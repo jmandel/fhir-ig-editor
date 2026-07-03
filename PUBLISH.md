@@ -129,8 +129,84 @@ Local clones used:
   resources byte-identical to native `rust_sushi build`; the only native-only
   file is the ImplementationGuide (in-memory compile skips it by design).
 
+## M2 site preview (spec §7) — BUILT on branch `m2-preview` (not yet on main)
+
+The M2 site preview (cycle's TS site generator rendering real IG pages IN THE
+BROWSER from a Rust-produced site.db) is implemented on branch **`m2-preview`**.
+It depends on an **additive engine change** that is NOT yet in the pinned
+`vendor/sushi-rs` submodule, so the branch must NOT merge to main until the
+engine commit lands and the submodule is bumped.
+
+### Engine dependency (additive, uncommitted in `sushi-rs-snapshot`)
+
+The editor's `build_site_db` worker call needs a new wasm export + two additive
+engine seams (all left uncommitted in the `sushi-rs-snapshot` working tree,
+branch `snapshot-gen`):
+
+- `crates/compiler/src/lib.rs`: new `build_project_in_memory_with_ig(...)` — the
+  in-memory compile path now CAN emit the ImplementationGuide (fed a page-folder
+  listing instead of a `std::fs` scan). `ig_export`'s `IgInputs` gains an optional
+  `page_dir_listing` (disk path passes `None` → byte-identical `std::fs` scan).
+- `crates/site_db`: `build_from_inputs(...)` + `assemble_rows(...)` — S5/S6 over
+  fully in-memory inputs; `augment` gains a `FileSource` trait (disk vs VFS). The
+  SQLite writer (S7) is now behind a default `sqlite` feature so the wasm build
+  (`default-features = false`) links the row model + pipeline WITHOUT C-sqlite.
+  Row model structs are `Serialize` (SQLite/core-db.ts column casing; assets
+  base64).
+- `crates/wasm_api`: new `build_site_db(input_json) -> rows JSON` export. Builds
+  the snapshot context over ONLY the FHIR core package (matching the native
+  pipeline — loading the whole mounted closure inflated snapshots vs the oracle).
+
+Engine gates (all green locally):
+- `cargo test --workspace` green; `-p compiler -p wasm_api -p snapshot_gen -p
+  site_db --release` green (incl. NEW `site_db::inmem_vs_disk` — in-memory rows ==
+  disk rows JSON-identical for cycle — and `wasm_api::site_db_snapshot` — the
+  build_site_db snapshot counts == disk pipeline).
+- SUSHI-harvest **326/326** case parity, 100% byte-identical (engine change is
+  additive; disk `ig_export` path unchanged).
+- wasm byte-check: **10/10** cycle resources byte-identical wasm vs native.
+
+### Merge steps for main (do these IN ORDER)
+
+1. Coordinator reviews + commits the engine change in `jmandel/sushi-rs`, pushes.
+2. In this repo on `m2-preview`: `git -C vendor/sushi-rs fetch && git -C
+   vendor/sushi-rs checkout <engine-commit>`; `git add vendor/sushi-rs`;
+   commit "Bump vendor/sushi-rs to <commit> (M2 build_site_db)".
+3. Rebuild data locally to sanity-check: `bash scripts/prepare-data.sh` (now also
+   runs `copy-site-assets.mjs`), then `cd app && bun run build`.
+4. Merge `m2-preview` → main. CI (`pages.yml`) rebuilds the wasm from the bumped
+   submodule (so `build_site_db` is present), bundles + exports manifest + copies
+   site-assets, byte-checks, deploys.
+5. Verify the LIVE URL end-to-end (headless-Chromium E2E already extended:
+   `scripts/verify-e2e.mjs` opens the Preview tab, renders index + a profile page,
+   edits a title, asserts the preview updates).
+
+### M2 as built (architecture)
+
+- **Row store (JS):** a thin typed `RowStore` (`app/src/preview/rowStore.ts`)
+  implementing `core/db.ts`'s exact query surface over the wasm-produced rows —
+  NO wa-sqlite (cycle's pages use no `{% sql %}`; a tiny `SELECT … FROM <table>`
+  interpreter covers the documented Metadata case, fail-loud otherwise). The
+  submodule's `core/db` (bun:sqlite) is redirected to a shim (`dbShim.ts`) via a
+  Vite `resolveId` plugin so importing `Layout`/`Menu` never opens a file DB.
+- **SSR in the Worker:** `app/src/preview/render.tsx` re-implements `build.tsx`'s
+  per-page selection + `Layout`-wrapping (build.tsx is a Bun script, not callable)
+  by importing the submodule's pure pieces via a `@cycle/*` alias. Shims:
+  `react-dom/server` → the BROWSER build (the node build needs `util`/`stream`);
+  `process.env.SITE_*` defined as `undefined` (project config fallbacks);
+  submodule bare deps (react/liquidjs/markdown-it/fhirpath/fast-xml-parser)
+  aliased to this app's node_modules. Wrapper-generated includes absent from IG
+  source (e.g. `sample-viewer-links.md`) render an honest in-editor placeholder
+  instead of failing the page.
+- **Preview tab:** a sandboxed iframe renders the selected page's HTML (`srcDoc`)
+  with a `<base>` to the copied design assets and IG images served via blob URLs.
+  Render-on-demand per visible page (M2 scope, stated in the UI as "on-demand
+  render"); recompile → rebuild rows → re-render the current page.
+- **HTML fidelity:** the in-browser rendered profile/VS/CS/artifacts/narrative
+  pages are IDENTICAL to the native TS pipeline's output for cycle after
+  normalizing the known blob-URL/`<base>`/timestamp differences.
+
 ## Out of scope this run
 
-- **M2 site preview** (spec §7) — not built.
 - OPFS is used with an in-memory fallback; Safari degrades to no-persistence
   (stated in spec §11, not hardened here).

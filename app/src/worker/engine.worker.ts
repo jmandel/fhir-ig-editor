@@ -8,6 +8,7 @@
 // the typed protocol + TS.
 
 import type { WorkerRequest, WorkerReply, BundleSpec } from './protocol';
+import type { SiteDbRows } from '../preview/rowStore';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -18,8 +19,13 @@ type WasmModule = {
   init: (bundlesJson: string) => number;
   compile: (filesJson: string, config: string, predefinedJson: string) => string;
   generate_snapshot: (input: string) => string;
+  build_site_db: (inputJson: string) => string;
   version: () => string;
 };
+
+// The last-built site.db rows, so renderPage/assetBytes render on demand without
+// rebuilding (render-on-demand per visible page — M2 scope, honest per spec §7).
+let lastRows: SiteDbRows | null = null;
 
 let wasm: WasmModule | null = null;
 
@@ -107,6 +113,49 @@ async function doSnapshot(url: string) {
   return { ...out, snapshotMs: performance.now() - t0 };
 }
 
+// ---- M2 site preview --------------------------------------------------------
+
+async function doBuildSite(
+  config: string,
+  files: Record<string, string>,
+  predefined: Record<string, unknown>,
+  siteFiles: Record<string, string>,
+  buildEpochSecs: number,
+) {
+  const w = await ensureWasm();
+  const t0 = performance.now();
+  const input = {
+    config,
+    fsh: files,
+    predefined,
+    site_files: siteFiles,
+    build_epoch_secs: buildEpochSecs,
+  };
+  const rowsJson = w.build_site_db(JSON.stringify(input));
+  lastRows = JSON.parse(rowsJson) as SiteDbRows;
+  // Enumerate pages (needs the render module; imported lazily so the wasm-only
+  // paths don't pull React/liquid into their critical path).
+  const { listPages } = await import('../preview/render');
+  const pages = listPages(lastRows);
+  const assets = lastRows.assets.map((a) => ({ name: a.Name, mime: a.Mime }));
+  return { pages, assets, buildMs: performance.now() - t0 };
+}
+
+async function doRenderPage(file: string) {
+  if (!lastRows) throw new Error('renderPage before buildSite');
+  const { renderPage } = await import('../preview/render');
+  const t0 = performance.now();
+  const { html } = renderPage(lastRows, file);
+  return { file, html, renderMs: performance.now() - t0 };
+}
+
+function doAssetBytes(name: string): { name: string; mime: string; base64: string } | null {
+  if (!lastRows) return null;
+  const a = lastRows.assets.find((x) => x.Name === name);
+  if (!a) return null;
+  return { name: a.Name, mime: a.Mime, base64: a.Content };
+}
+
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const msg = e.data;
   const reply = (r: WorkerReply) => (self as unknown as Worker).postMessage(r);
@@ -121,6 +170,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
       case 'snapshot':
         result = await doSnapshot(msg.url);
+        break;
+      case 'buildSite':
+        result = await doBuildSite(msg.config, msg.files, msg.predefined, msg.siteFiles, msg.buildEpochSecs);
+        break;
+      case 'renderPage':
+        result = await doRenderPage(msg.file);
+        break;
+      case 'assetBytes':
+        result = doAssetBytes(msg.name);
         break;
       default:
         throw new Error(`unknown message type: ${(msg as { type: string }).type}`);

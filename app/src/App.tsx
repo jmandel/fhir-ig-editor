@@ -10,12 +10,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EngineClient } from './worker/client';
 import { ProjectStore } from './vfs/store';
 import { loadDemoIg } from './vfs/demoIg';
-import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
+import type { CompileResult, Diagnostic, EngineVersion, SitePreviewResult } from './worker/protocol';
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
 import { ResourceInspector } from './views/ResourceInspector';
 import { BuildStatus } from './views/BuildStatus';
+import { PreviewPane } from './views/PreviewPane';
 
 const DEBOUNCE_MS = 300;
 
@@ -36,6 +37,12 @@ export function App() {
   const [compiling, setCompiling] = useState(false);
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
+
+  // M2 site preview.
+  const [inspectTab, setInspectTab] = useState<'resource' | 'preview'>('resource');
+  const [site, setSite] = useState<SitePreviewResult | null>(null);
+  const [siteBuilding, setSiteBuilding] = useState(false);
+  const [siteError, setSiteError] = useState<string | null>(null);
 
   // ---- boot: engine + store ------------------------------------------------
   useEffect(() => {
@@ -68,6 +75,30 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- site preview build (M2): compile -> rows -> page list. --------------
+  const runBuildSite = useCallback(async (st: ProjectStore, engine: EngineClient) => {
+    setSiteBuilding(true);
+    setSiteError(null);
+    try {
+      // A fixed injected timestamp keeps rebuilds deterministic (spec §2c). The
+      // absolute value is irrelevant for the preview; only stability matters.
+      const epoch = 1700000000;
+      const res = await engine.buildSite(
+        st.config(),
+        st.fshFiles(),
+        st.predefinedResources(),
+        st.siteFiles(),
+        epoch,
+      );
+      setSite(res);
+    } catch (e) {
+      setSite(null);
+      setSiteError(String(e));
+    } finally {
+      setSiteBuilding(false);
+    }
+  }, []);
+
   // ---- compile (full project) ----------------------------------------------
   const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient) => {
     if (!engine.initialized) return;
@@ -81,6 +112,11 @@ export function App() {
         const firstSd = result.resources.find((r) => r.resourceType === 'StructureDefinition' && r.url);
         return firstSd?.filename ?? result.resources[0]?.filename ?? null;
       });
+      // Rebuild the site preview rows (only when the compile had no fatal errors —
+      // a broken IG can't produce a coherent site.db). Fire-and-forget.
+      const hasError = result.diagnostics.some((d) => d.severity === 'error');
+      if (!hasError) void runBuildSite(st, engine);
+      else setSiteError('Fix the FSH errors to update the site preview.');
     } catch (e) {
       setCompile({
         resources: [],
@@ -91,7 +127,7 @@ export function App() {
     } finally {
       setCompiling(false);
     }
-  }, []);
+  }, [runBuildSite]);
 
   // ---- debounced compile on edit ------------------------------------------
   const debounceRef = useRef<number | null>(null);
@@ -256,11 +292,39 @@ export function App() {
           </main>
 
           <section className="inspect-pane">
-            {activeResource && engineRef.current ? (
-              <ResourceInspector resource={activeResource} engine={engineRef.current} />
-            ) : (
-              <div className="panel-empty">No resource selected.</div>
-            )}
+            <div className="inspect-tabs">
+              <button
+                className={`inspect-tab${inspectTab === 'resource' ? ' active' : ''}`}
+                onClick={() => setInspectTab('resource')}
+              >
+                Resource
+              </button>
+              <button
+                className={`inspect-tab${inspectTab === 'preview' ? ' active' : ''}`}
+                onClick={() => setInspectTab('preview')}
+              >
+                Site preview
+                {siteBuilding && <span className="tab-spinner" />}
+              </button>
+            </div>
+            <div className="inspect-body">
+              {inspectTab === 'resource' ? (
+                activeResource && engineRef.current ? (
+                  <ResourceInspector resource={activeResource} engine={engineRef.current} />
+                ) : (
+                  <div className="panel-empty">No resource selected.</div>
+                )
+              ) : engineRef.current ? (
+                <PreviewPane
+                  engine={engineRef.current}
+                  site={site}
+                  building={siteBuilding}
+                  error={siteError}
+                />
+              ) : (
+                <div className="panel-empty">Engine not ready.</div>
+              )}
+            </div>
           </section>
         </div>
       )}

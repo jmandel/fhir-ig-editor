@@ -206,6 +206,97 @@ body {
   display: flex;
   flex-direction: column;
 }
+.inspect-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border, #2a2a35);
+  flex: 0 0 auto;
+  background: var(--panel, #16161d);
+}
+.inspect-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim, #9aa);
+  padding: 7px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.inspect-tab.active {
+  color: var(--fg, #e6e6ef);
+  border-bottom-color: var(--accent, #6ea8fe);
+}
+.tab-spinner {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.inspect-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- M2 site preview ---- */
+.preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #2a2a35);
+  font-size: 12px;
+  color: var(--fg-dim, #9aa);
+  flex: 0 0 auto;
+}
+.preview-page-select select {
+  background: var(--panel, #16161d);
+  color: var(--fg, #e6e6ef);
+  border: 1px solid var(--border, #2a2a35);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  max-width: 260px;
+}
+.preview-status { font-variant-numeric: tabular-nums; }
+.preview-note {
+  margin-left: auto;
+  font-size: 10.5px;
+  opacity: 0.6;
+  border: 1px solid var(--border, #2a2a35);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.preview-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+.preview-error {
+  padding: 12px;
+  color: #ff8080;
+  font-size: 12px;
+  overflow: auto;
+}
+.preview-error pre { white-space: pre-wrap; }
 
 /* ---- file tree ---- */
 .file-tree {

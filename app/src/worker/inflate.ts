@@ -10,6 +10,23 @@ async function gunzip(buf: ArrayBuffer): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+/** Inflate a gzip stream directly, avoiding a full ArrayBuffer round-trip. Piping
+ *  `resp.body` straight through DecompressionStream is far kinder on memory for
+ *  large package tarballs (r5.core is ~65 MB) than buffering then re-streaming —
+ *  the round-trip form intermittently fails ("Failed to fetch") on big blobs in
+ *  headless Chromium. */
+async function gunzipStream(body: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const ds = new DecompressionStream('gzip');
+  const out = body.pipeThrough(ds);
+  return new Uint8Array(await new Response(out).arrayBuffer());
+}
+
+/** Inflate a `.tgz` straight from a fetch Response (streaming). */
+export async function inflateBundleResponse(resp: Response): Promise<Record<string, string>> {
+  if (!resp.body) return untar(await gunzip(await resp.arrayBuffer()));
+  return untar(await gunzipStream(resp.body));
+}
+
 function base64(bytes: Uint8Array): string {
   let bin = '';
   const CHUNK = 0x8000;

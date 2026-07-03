@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Export the baked default IG (spec §5, mode 1) from the cycle submodule into
-// app/public/data/cycle/manifest.json — a single JSON with every project file's
-// text inlined, so "Open demo IG" is one fetch + one OPFS hydrate (offline after
-// first load). Gitignored / regenerated here + in CI.
+// app/public/data/cycle/manifest.json — a single JSON with every project file
+// inlined, so "Open demo IG" is one fetch + one OPFS hydrate (offline after first
+// load). Gitignored / regenerated here + in CI.
 //
 //   node scripts/export-ig-manifest.mjs
 //
-// Includes: sushi-config.yaml, input/fsh/**.fsh, input/resources/**.json. The
-// engine's compile input is exactly these (config + FSH + predefined resources).
+// Text files (`files`): sushi-config.yaml, input/fsh/**.fsh,
+// input/resources/**.json, input/pagecontent/**, input/includes/** — the compile
+// input AND the S6 site-content the M2 preview producer reads.
+// Binary files (`binaryFiles`, base64): input/images/** — served into the preview
+// iframe. Together these are the full site.db producer input set (§2b S6).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -36,14 +39,24 @@ function collect(dir, exts) {
 }
 
 const files = {};
-function add(abs) {
+const binaryFiles = {};
+function addText(abs) {
   const rel = path.relative(CYCLE, abs).split(path.sep).join('/');
   files[rel] = fs.readFileSync(abs, 'utf8');
 }
+function addBinary(abs) {
+  const rel = path.relative(CYCLE, abs).split(path.sep).join('/');
+  binaryFiles[rel] = fs.readFileSync(abs).toString('base64');
+}
 
-add(path.join(CYCLE, 'sushi-config.yaml'));
-for (const f of collect(path.join(CYCLE, 'input/fsh'), ['fsh'])) add(f);
-for (const f of collect(path.join(CYCLE, 'input/resources'), ['json'])) add(f);
+addText(path.join(CYCLE, 'sushi-config.yaml'));
+for (const f of collect(path.join(CYCLE, 'input/fsh'), ['fsh'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/resources'), ['json'])) addText(f);
+// S6 site content: page bodies + any liquid includes (text).
+for (const f of collect(path.join(CYCLE, 'input/pagecontent'), ['md', 'xml'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/includes'), ['md', 'xml', 'xhtml', 'html', 'txt'])) addText(f);
+// Images are binary → base64.
+for (const f of collect(path.join(CYCLE, 'input/images'), ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'])) addBinary(f);
 
 // Read the IG name from sushi-config (best-effort; no YAML dep).
 const cfg = files['sushi-config.yaml'] ?? '';
@@ -51,9 +64,10 @@ const nameMatch = cfg.match(/^title:\s*(.+)$/m) || cfg.match(/^name:\s*(.+)$/m);
 const name = (nameMatch ? nameMatch[1] : 'cycle IG').trim().replace(/^["']|["']$/g, '');
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
-const manifest = { name, fileCount: Object.keys(files).length, files };
+const fileCount = Object.keys(files).length + Object.keys(binaryFiles).length;
+const manifest = { name, fileCount, files, binaryFiles };
 fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), JSON.stringify(manifest));
 
 console.log(
-  `[export-ig-manifest] ${name}: ${manifest.fileCount} files -> app/public/data/cycle/manifest.json`,
+  `[export-ig-manifest] ${name}: ${Object.keys(files).length} text + ${Object.keys(binaryFiles).length} binary files -> app/public/data/cycle/manifest.json`,
 );

@@ -4,7 +4,7 @@
 // public/data/cycle/manifest.json (a single JSON with inlined file text), so one
 // fetch + one loadAll gives an offline-capable working project.
 
-import type { ProjectStore, ProjectFile } from './store';
+import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -12,6 +12,8 @@ interface IgManifest {
   name: string;
   /** path → text, project-relative. */
   files: Record<string, string>;
+  /** path → base64, project-relative (images). */
+  binaryFiles?: Record<string, string>;
 }
 
 export interface DemoIgMeta {
@@ -27,6 +29,9 @@ export async function loadDemoIg(store: ProjectStore): Promise<DemoIgMeta> {
     path,
     text,
   }));
-  await store.loadAll(files);
-  return { name: manifest.name, fileCount: files.length };
+  const binary: BinaryProjectFile[] = Object.entries(manifest.binaryFiles ?? {}).map(
+    ([path, base64]) => ({ path, base64 }),
+  );
+  await store.loadAll(files, binary);
+  return { name: manifest.name, fileCount: files.length + binary.length };
 }

@@ -8,6 +8,8 @@ import type {
   BundleSpec,
   CompileResult,
   InitResult,
+  RenderPageResult,
+  SitePreviewResult,
   SnapshotResult,
   WorkerReply,
   WorkerRequest,
@@ -61,7 +63,7 @@ export class EngineClient {
     // Inflate bundles on the UI side (DecompressionStream is available in both
     // window + worker; doing it here keeps the worker's init call pure JSON and
     // lets us show per-package progress).
-    const { inflateBundle } = await import('./inflate');
+    const { inflateBundleResponse } = await import('./inflate');
     for (const b of manifest.bundles) {
       onProgress?.(`Inflating ${b.label}…`);
       // Bundle filenames contain '#' (e.g. hl7.fhir.r4.core#4.0.1.tgz); a raw '#'
@@ -69,8 +71,9 @@ export class EngineClient {
       const url = `${BASE}data/bundles/${encodeURIComponent(b.tgz)}`;
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`fetch ${url} -> ${resp.status}`);
-      const tgz = await resp.arrayBuffer();
-      bundles.push({ label: b.label, files: await inflateBundle(tgz) });
+      // Stream straight through DecompressionStream (no 65 MB ArrayBuffer
+      // round-trip — that intermittently fails on large blobs in headless Chromium).
+      bundles.push({ label: b.label, files: await inflateBundleResponse(resp) });
     }
     onProgress?.('Mounting packages in engine…');
     const res = await this.call<InitResult>({ type: 'init', bundles });
@@ -94,6 +97,36 @@ export class EngineClient {
     const res = await this.call<SnapshotResult>({ type: 'snapshot', url });
     this.snapshotCache.set(url, res);
     return res;
+  }
+
+  // ---- M2 site preview ----
+
+  /** Build the in-browser site.db rows + enumerate renderable pages. */
+  async buildSite(
+    config: string,
+    files: Record<string, string>,
+    predefined: Record<string, unknown>,
+    siteFiles: Record<string, string>,
+    buildEpochSecs: number,
+  ): Promise<SitePreviewResult> {
+    return this.call<SitePreviewResult>({
+      type: 'buildSite',
+      config,
+      files,
+      predefined,
+      siteFiles,
+      buildEpochSecs,
+    });
+  }
+
+  /** Render one page to HTML (render-on-demand per visible page). */
+  async renderPage(file: string): Promise<RenderPageResult> {
+    return this.call<RenderPageResult>({ type: 'renderPage', file });
+  }
+
+  /** Fetch an asset's bytes (base64) for serving into the preview iframe. */
+  async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string } | null> {
+    return this.call<{ name: string; mime: string; base64: string } | null>({ type: 'assetBytes', name });
   }
 
   get initialized() {

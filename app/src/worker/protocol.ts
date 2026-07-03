@@ -49,6 +49,38 @@ export interface InitResult {
   initMs: number;
 }
 
+// ---- M2 site preview ------------------------------------------------------
+
+/** One page the preview can render, as returned by `listPages`. */
+export interface PagePreviewDescriptor {
+  file: string;
+  title: string;
+  kind: 'narrative' | 'artifacts' | 'profile' | 'valueset' | 'codesystem' | 'example' | 'generic';
+}
+
+/** Result of building the site.db rows + enumerating renderable pages. */
+export interface SitePreviewResult {
+  pages: PagePreviewDescriptor[];
+  /** Asset names -> mime, so the UI can serve them into the iframe on demand. */
+  assets: { name: string; mime: string }[];
+  buildMs: number;
+}
+
+/** A rendered page's HTML + the assets it may reference (served via blob URLs). */
+export interface RenderPageResult {
+  file: string;
+  html: string;
+  renderMs: number;
+}
+
+/** The inputs the worker needs to build the site.db rows (beyond the FSH compile
+ *  inputs): the site-content files (pagecontent/images/includes) as base64. */
+export interface SiteContentInput {
+  /** project-relative path -> base64 bytes (pagecontent/images/includes). */
+  siteFiles: Record<string, string>;
+  buildEpochSecs: number;
+}
+
 // ---- request messages (UI -> worker) --------------------------------------
 
 export type WorkerRequest =
@@ -60,7 +92,18 @@ export type WorkerRequest =
       files: Record<string, string>;
       predefined: Record<string, unknown>;
     }
-  | { id: number; type: 'snapshot'; url: string };
+  | { id: number; type: 'snapshot'; url: string }
+  | {
+      id: number;
+      type: 'buildSite';
+      config: string;
+      files: Record<string, string>;
+      predefined: Record<string, unknown>;
+      siteFiles: Record<string, string>;
+      buildEpochSecs: number;
+    }
+  | { id: number; type: 'renderPage'; file: string }
+  | { id: number; type: 'assetBytes'; name: string };
 
 /** A package bundle to mount: a label + its inflated `{name: base64}` files. */
 export interface BundleSpec {

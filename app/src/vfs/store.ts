@@ -14,6 +14,21 @@ export interface ProjectFile {
   text: string;
 }
 
+/** A binary project file (e.g. an image), content base64. Kept separate from the
+ *  text cache so it round-trips through the site.db producer without corruption. */
+export interface BinaryProjectFile {
+  path: string;
+  base64: string;
+}
+
+function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  return btoa(bin);
+}
+
 const OPFS_DIR = 'fhir-ig-editor-project';
 const KEY_SEP = '␟'; // '␟' unit separator — not valid in paths
 
@@ -116,6 +131,10 @@ export class ProjectStore {
 
   readonly listeners = new Set<() => void>();
 
+  /** Binary project files (images), path -> base64. Not persisted (read-only demo
+   *  assets); rehydrated by `loadAll` each session. */
+  private binary = new Map<string, string>();
+
   static async create(): Promise<ProjectStore> {
     const backend = (await OpfsBackend.create()) ?? new MemoryBackend();
     const cache = new Map<string, string>();
@@ -165,14 +184,34 @@ export class ProjectStore {
   }
 
   /** Replace the whole project (used by "Open demo IG"). */
-  async loadAll(files: ProjectFile[]): Promise<void> {
+  async loadAll(files: ProjectFile[], binary: BinaryProjectFile[] = []): Promise<void> {
     await this.backend.clear();
     this.cache.clear();
+    this.binary.clear();
     for (const f of files) {
       this.cache.set(f.path, f.text);
       await this.backend.write(f.path, f.text);
     }
+    for (const b of binary) this.binary.set(b.path, b.base64);
     this.notify();
+  }
+
+  /** The S6 site-content input for the M2 site.db producer: every pagecontent /
+   *  includes / images file as `path -> base64` (text files UTF-8 base64'd, images
+   *  as their stored base64). This is what `build_site_db`'s `site_files` expects. */
+  siteFiles(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [p, t] of this.cache) {
+      if (
+        p.startsWith('input/pagecontent/') ||
+        p.startsWith('input/includes/') ||
+        (p.startsWith('input/resources/') && p.endsWith('.json'))
+      ) {
+        out[p] = utf8ToBase64(t);
+      }
+    }
+    for (const [p, b64] of this.binary) out[p] = b64;
+    return out;
   }
 
   /** All FSH file contents keyed by path — the compile input. */

@@ -144,6 +144,100 @@ try {
   );
   results.brokenDiagCount = await evalJs(ws, `document.querySelectorAll('.diag').length`);
 
+  // ---- M2 site preview (spec §7 / gate ii) --------------------------------
+  // Undo the broken FSH so the site rebuilds cleanly, then open the Preview tab.
+  await evalJs(ws, `(() => {
+    const ed = window.monaco && window.monaco.editor.getEditors()[0];
+    if (!ed) return 'no-editor';
+    const m = ed.getModel();
+    m.setValue(m.getValue().replace(/\\n\\nProfile: E2EBroken[\\s\\S]*$/, ''));
+    return 'ok';
+  })()`);
+  // Wait for the clean recompile to clear diagnostics.
+  await waitFor(ws, `document.querySelectorAll('.diag').length === 0`, 30000, 'clean recompile');
+
+  // Click the "Site preview" tab.
+  await waitFor(ws, `[...document.querySelectorAll('.inspect-tab')].some(b => /Site preview/.test(b.textContent))`, 15000, 'preview tab present');
+  await evalJs(ws, `[...document.querySelectorAll('.inspect-tab')].find(b => /Site preview/.test(b.textContent)).click()`);
+
+  // Wait for the preview iframe to render the index page (a real IG page).
+  await waitFor(ws, `!!document.querySelector('.preview-frame')`, 30000, 'preview iframe');
+  const frameHasContent = `(() => {
+    const f = document.querySelector('.preview-frame');
+    const doc = f && (f.contentDocument || f.contentWindow?.document);
+    if (!doc || !doc.body) return 0;
+    return doc.body.textContent.length;
+  })()`;
+  await waitFor(ws, `${frameHasContent} > 200`, 30000, 'preview page rendered');
+  results.previewTextLen = await evalJs(ws, frameHasContent);
+  results.previewTitle = await evalJs(ws, `(() => {
+    const f = document.querySelector('.preview-frame');
+    const doc = f && (f.contentDocument || f.contentWindow?.document);
+    return doc ? (doc.querySelector('h1,h2')?.textContent || doc.title || '') : '';
+  })()`);
+  // The index page should mention the IG's subject matter ("Period Tracking").
+  results.previewHasIgContent = await evalJs(ws, `(() => {
+    const f = document.querySelector('.preview-frame');
+    const doc = f && (f.contentDocument || f.contentWindow?.document);
+    return doc ? /Period Tracking/i.test(doc.body.textContent) : false;
+  })()`);
+
+  // Switch to a PROFILE page and confirm it renders an element table.
+  results.hasProfileOption = await evalJs(ws, `!!document.querySelector('.preview-page-select select optgroup[label="Profiles"] option')`);
+  if (results.hasProfileOption) {
+    await evalJs(ws, `(() => {
+      const sel = document.querySelector('.preview-page-select select');
+      const opt = sel.querySelector('optgroup[label="Profiles"] option');
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return opt.value;
+    })()`);
+    await waitFor(ws, `(() => {
+      const f = document.querySelector('.preview-frame');
+      const doc = f && (f.contentDocument || f.contentWindow?.document);
+      return doc && /StructureDefinition|Formal definition|Overview/i.test(doc.body.textContent);
+    })()`, 30000, 'profile page rendered');
+    results.profilePageLen = await evalJs(ws, frameHasContent);
+  }
+
+  // ---- Edit a title in the IG source -> preview updates (the demo's goal) --
+  // Switch the preview back to the index page (its <title>/heading reflects the
+  // IG title from sushi-config). Then edit the IG `title:` in sushi-config.yaml —
+  // a robust, unambiguous source edit that flows through compile -> site.db ->
+  // rendered page.
+  await evalJs(ws, `(() => {
+    const sel = document.querySelector('.preview-page-select select');
+    if (sel) { sel.value = 'index.html'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  })()`);
+  await sleep(500);
+  // Open input/pagecontent/index.md from the file tree (click the leaf row whose
+  // text is exactly the file name), then rewrite its `# ` H1 — this drives the
+  // rendered index page's title + heading, an unambiguous source-edit-to-preview link.
+  const editTitle = await evalJs(ws, `(async () => {
+    const leaves = [...document.querySelectorAll('.file-tree *')].filter(e => e.children.length === 0);
+    const row = leaves.find(e => (e.textContent||'').replace(/[^\\x20-\\x7e]/g,'').trim() === 'index.md');
+    if (!row) return 'no-index-row';
+    (row.closest('[class*=row]') || row).click();
+    await new Promise(r => setTimeout(r, 500));
+    const ed = window.monaco && window.monaco.editor.getEditors()[0];
+    if (!ed) return 'no-editor';
+    const m = ed.getModel();
+    const v = m.getValue();
+    if (!/^# /m.test(v)) return 'model-not-index:' + v.slice(0, 40);
+    m.setValue(v.replace(/^# .*/m, '# E2E Preview Title Changed'));
+    return 'ok';
+  })()`);
+  results.editTitleResult = editTitle;
+  if (editTitle === 'ok') {
+    await waitFor(ws, `(() => {
+      const f = document.querySelector('.preview-frame');
+      const doc = f && (f.contentDocument || f.contentWindow?.document);
+      // The IG title flows to the Layout <title> and the index page heading.
+      return doc && (/E2E Preview Title Changed/.test(doc.title) || /E2E Preview Title Changed/.test(doc.body.textContent));
+    })()`, 30000, 'preview reflects edited title');
+    results.previewUpdatedAfterEdit = true;
+  }
+
   console.log(JSON.stringify(results, null, 2));
 
   // assertions
@@ -156,6 +250,10 @@ try {
     // location should reference the edited fsh file
     console.error('assert: diagnostic missing fsh location:', results.brokenDiagnostic.loc); ok = false;
   }
+  // M2 preview assertions.
+  if (!(results.previewTextLen > 200)) { console.error('assert: preview page did not render'); ok = false; }
+  if (!results.previewHasIgContent) { console.error('assert: preview missing IG content'); ok = false; }
+  if (results.editTitleResult === 'ok' && !results.previewUpdatedAfterEdit) { console.error('assert: preview did not update after FSH/page edit'); ok = false; }
   console.log(ok ? '\nE2E GATE: PASS' : '\nE2E GATE: FAIL');
   if (!ok) fail('assertions failed');
 } catch (e) {
