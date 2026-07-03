@@ -13,7 +13,9 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 
-const [WASM_DIR, BUNDLE_DIR, CYCLE_DIR, NATIVE_DIR] = process.argv.slice(2);
+const [WASM_DIR, BUNDLE_DIR, CYCLE_DIR, NATIVE_DIR] = process.argv
+  .slice(2)
+  .map((p) => path.resolve(p)); // absolute, so the dynamic import below isn't a bare specifier
 const mod = await import(path.join(WASM_DIR, 'wasm_api.js'));
 
 function untarGz(tgz) {

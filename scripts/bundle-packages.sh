@@ -2,13 +2,14 @@
 # Build the cycle IG's package closure into app/public/data/bundles/ as prebuilt
 # `.tgz` bundles + a manifest.json (gitignored — regenerated here / in CI).
 #
-# The 5-package closure (spec §8 step 4): r4.core (build) + tools + terminology +
-# uv.extensions, plus r5.core (needed for R4→R5 base resolution during snapshot
-# generation). Built with the pinned engine's `rust_sushi bundle` CLI so the
-# bundle format matches what the wasm BundleSource mounts.
+# The closure comes from scripts/packages.list (single source of truth, shared
+# with fetch-packages.sh — see that file for WHY each package, incl. r5.core).
+# Built with the pinned engine's `rust_sushi bundle` CLI so the bundle format
+# matches what the wasm BundleSource mounts.
 #
-# Requires a populated FHIR package cache. Point FHIR_CACHE at it; default is the
-# engine submodule's isolated repo cache.
+# Requires a populated FHIR package cache (scripts/fetch-packages.sh populates
+# one from the registry). Point FHIR_CACHE at it; default is the engine
+# submodule's isolated repo cache.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,13 +23,12 @@ CACHE="${FHIR_CACHE:-$ENGINE/temp/fhir-home/.fhir/packages}"
 # Optional scratch cargo/toolchain env (same knobs as build-wasm.sh).
 if [ -n "${WASM_CARGO_HOME:-}" ]; then export CARGO_HOME="$WASM_CARGO_HOME"; export PATH="$CARGO_HOME/bin:$PATH"; fi
 
-LABELS=(
-  "hl7.fhir.r4.core#4.0.1"
-  "hl7.fhir.uv.tools.r4#1.1.2"
-  "hl7.terminology.r4#7.2.0"
-  "hl7.fhir.uv.extensions.r4#5.3.0"
-  "hl7.fhir.r5.core#5.0.0"
-)
+LABELS=()
+while IFS= read -r line; do
+  l="${line%%[[:space:]]*}"
+  case "$l" in ''|'#'*) continue ;; esac
+  LABELS+=("$l")
+done < "$HERE/packages.list"
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 

@@ -5,11 +5,11 @@
 # event. CI runs the engine's own fast gates before deploying — the demo never
 # ships an engine that fails its own tests (spec §8 step 2, §9).
 #
-# NOTE: CI has not run yet at authoring time (network was down locally). It is
-# written against the documented gates + the local verification that all pass:
-#   - cargo test --workspace (engine) — green locally
-#   - SUSHI-harvest 326/326 — green locally
-#   - wasm byte-match vs native for the cycle IG — green locally (scripts/byte-check.mjs)
+# Package acquisition: CI downloads the pinned closure (scripts/packages.list)
+# from the FHIR package registry into .fhir-cache, wrapped in actions/cache keyed
+# on the list — one download per closure change, hermetic otherwise. The whole
+# path (fetch → bundle → native build → byte-check) is also runnable locally:
+#   FHIR_CACHE=/tmp/c scripts/fetch-packages.sh && FHIR_CACHE=/tmp/c scripts/bundle-packages.sh
 
 name: Pages
 
@@ -66,19 +66,25 @@ jobs:
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
 
-      # --- Materialize the FHIR package cache for the cycle closure. CI never
-      # calls a live registry beyond this deterministic fetch; expansions are the
-      # committed cache (spec §6 tier 3 / §8 step 5). The engine's deps CLI
-      # resolves the closure into a local cache dir.
-      - name: Materialize package cache
+      # --- FHIR package cache: the pinned closure (scripts/packages.list, which
+      # documents WHY each package incl. r5.core) is downloaded once from the
+      # FHIR package registry and cached by actions/cache keyed on the list, so
+      # repeat runs don't re-download (~240 MB). This is CI's only registry
+      # traffic; no live tx server is ever called (spec §6 tier 3 / §8 step 5).
+      - name: Restore FHIR package cache
+        uses: actions/cache@v4
+        with:
+          path: .fhir-cache
+          key: fhir-packages-${{ hashFiles('scripts/packages.list') }}
+
+      - name: Fetch FHIR packages (no-op on cache hit)
+        env:
+          FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
+        run: bash scripts/fetch-packages.sh
+
+      - name: Build rust_sushi (bundle CLI + native oracle)
         working-directory: vendor/sushi-rs
-        run: |
-          cargo build --release -p rust_sushi
-          mkdir -p "$GITHUB_WORKSPACE/.fhir-cache"
-          ./target/release/rust_sushi materialize --project "$GITHUB_WORKSPACE/vendor/cycle" \
-            --out "$GITHUB_WORKSPACE/.fhir-cache" || true
-        # (If the cycle IG lacks a lockfile, fall back to the maintainer-committed
-        #  cache under data/ — see scripts/bundle-packages.sh FHIR_CACHE knob.)
+        run: cargo build --release -p rust_sushi
 
       - name: Build wasm engine
         env:
@@ -105,10 +111,10 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           node scripts/byte-check.mjs .pkg-node app/public/data/bundles vendor/cycle .native-out/fsh-generated/resources
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Bun (the committed lockfile is bun.lock)
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 20
+          bun-version: latest
 
       - name: Build SPA
         working-directory: app
@@ -116,8 +122,8 @@ jobs:
           # Project Pages serve under /<repo>/; user/org Pages use '/'.
           BASE_PATH: /${{ github.event.repository.name }}/
         run: |
-          npm ci
-          npm run build
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Assemble Pages artifact
         run: |
