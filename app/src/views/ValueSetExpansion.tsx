@@ -44,7 +44,7 @@ function gatherReferenced(vs: unknown, all: CompiledResource[]): unknown[] {
     const base = r.url.split('|')[0];
     if (r.resourceType === 'CodeSystem' && systems.has(base)) {
       try { out.push(JSON.parse(r.text)); } catch { /* skip */ }
-    } else if (r.resourceType === 'ValueSet' && valueSets.has(base) && r.filename !== undefined) {
+    } else if (r.resourceType === 'ValueSet' && valueSets.has(base)) {
       try { out.push(JSON.parse(r.text)); } catch { /* skip */ }
     }
   }
@@ -242,6 +242,10 @@ export function ValueSetExpansion({
   const [tier1, setTier1] = useState<ExpandResult | null>(null);
   const [cached, setCached] = useState<TxCacheEntry | null>(null);
   const [loading, setLoading] = useState(true);
+  // A genuine engine/worker failure (wasm not loaded, postMessage rejection) — a
+  // DISTINCT state from a NotEnumerable refusal, so we never mislabel an engine
+  // error as "needs terminology server" (which would offer a bogus tx action).
+  const [engineError, setEngineError] = useState<string | null>(null);
 
   // Tier-1 live expansion: recompute whenever the VS text or referenced local
   // resources change (pure function of IG content — spec §6 tier 1).
@@ -249,10 +253,11 @@ export function ValueSetExpansion({
     let cancelled = false;
     if (!vs) { setTier1(null); setLoading(false); return; }
     setLoading(true);
+    setEngineError(null);
     engine
       .expandValueSet(resource.text, JSON.stringify(referenced))
       .then((r) => { if (!cancelled) { setTier1(r); setLoading(false); } })
-      .catch((e) => { if (!cancelled) { setTier1({ ok: false, notEnumerable: { component: 'include', index: 0, kind: 'Malformed', reason: String(e), display: String(e) }, expandMs: 0 }); setLoading(false); } });
+      .catch((e) => { if (!cancelled) { setTier1(null); setEngineError(String(e)); setLoading(false); } });
     return () => { cancelled = true; };
   }, [engine, resource.text, referenced, vs]);
 
@@ -281,7 +286,19 @@ export function ValueSetExpansion({
 
       {loading && <div className="vs-loading">Expanding…</div>}
 
-      {!loading && tier1?.ok && (
+      {!loading && engineError && (
+        <div className="vs-engine-error">
+          <div className="vs-engine-error-head">Expansion engine error</div>
+          <pre className="vs-refusal-reason">{engineError}</pre>
+          <div className="vs-refusal-detail">
+            This is an engine/worker failure, not a terminology-service boundary —
+            the ValueSet could not be evaluated at all. Retry after the engine
+            finishes loading, or check the console.
+          </div>
+        </div>
+      )}
+
+      {!loading && !engineError && tier1?.ok && (
         <div className="vs-tier1">
           <div className="vs-tier1-head">
             <span className="vs-ok-badge">Expanded in-engine</span>
@@ -293,7 +310,7 @@ export function ValueSetExpansion({
         </div>
       )}
 
-      {!loading && tier1 && !tier1.ok && (
+      {!loading && !engineError && tier1 && !tier1.ok && (
         cached ? (
           <CachedServerExpansion
             entry={cached}

@@ -175,6 +175,13 @@ export class EngineClient {
         message: `Snapshot data ready — ${r.mounted} packages mounted.`,
       });
     })();
+    // Don't LATCH a failure: if the deferred fetch/mount rejects (flaky network,
+    // corrupt bundle), clear the shared promise so a later snapshot/site build can
+    // retry instead of re-inheriting the same rejection forever. `this.deferred`
+    // is only cleared on success (above), so a retry re-fetches the right set.
+    this.deferredMount.catch(() => {
+      this.deferredMount = null;
+    });
     return this.deferredMount;
   }
 
