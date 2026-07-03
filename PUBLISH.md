@@ -1,5 +1,34 @@
 # PUBLISH — status & operations notes for `jmandel/fhir-ig-editor`
 
+## ⏳ Task #22 — deploy is GATED on an engine commit (2026-07-03)
+
+Branch `task-22-terminology-lazy` adds lazy cold-start + tiered terminology. It
+depends on an **additive** engine change (two new `wasm_api` exports:
+`expand_enumerable`, `mount_bundles`; `BundleSource: Clone`). That change is
+**uncommitted** in the `sushi-rs-snapshot` working tree (branch `snapshot-gen`),
+in:
+- `crates/wasm_api/src/lib.rs` — `expand_enumerable(vs, resources)` (tier-1
+  wrapper over `compiler::terminology`) + `mount_bundles(bundles)` (additive
+  lazy mount; the engine `bundle` is now an `Rc<BundleSource>` appended
+  copy-on-write) + a `tests/expand_api.rs` native gate (4 tests).
+- `crates/package_store/src/bundle.rs` — `#[derive(Clone)]` on `BundleSource`.
+
+**Deploy sequence (coordinator):**
+1. Review + commit the engine change in `jmandel/sushi-rs`, push it.
+2. Bump `vendor/sushi-rs` in this repo to that commit (currently pinned at the
+   pre-change `5390b38`, which LACKS the two exports — CI would build an engine
+   that breaks init/expansion).
+3. Merge `task-22-terminology-lazy` → main; CI rebuilds wasm from the bumped
+   submodule, runs the byte-check + the new consistency gate, deploys to Pages.
+
+Gates (all green locally): engine `cargo test -p compiler -p wasm_api
+-p snapshot_gen -p package_store` (all suites ok, incl. new expand_api 4/4 +
+oracle_tx 1/1); SUSHI-harvest **326/326 cases, 256/256 byte-identical**;
+snapshot_gen parity (ips 29/29 covered); wasm-vs-native byte-check **10/10
+identical**; consistency gate **PASS** (0 committed entries + 2 self-tests);
+extended E2E **PASS** (cold-start progress, lazy r5 defer, VS tab 5 codes,
+external-filter refusal). Cold start 9.7s→6.1s, warm 9.7s→2.2s (0 fetches).
+
 ## ✅ PUBLISHED (2026-07-03)
 
 - [x] Repo public: https://github.com/jmandel/fhir-ig-editor
