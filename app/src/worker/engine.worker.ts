@@ -17,11 +17,17 @@ const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   init: (bundlesJson: string) => number;
+  mount_bundles?: (bundlesJson: string) => number;
   compile: (filesJson: string, config: string, predefinedJson: string) => string;
   generate_snapshot: (input: string) => string;
   build_site_db: (inputJson: string) => string;
+  expand_enumerable: (valueSetJson: string, resourcesJson: string) => string;
   version: () => string;
 };
+
+/** Labels currently mounted in the engine — so `mountBundles` is idempotent and
+ *  the UI's lazy loader never re-fetches an already-mounted package. */
+const mountedLabels = new Set<string>();
 
 // The last-built site.db rows, so renderPage/assetBytes render on demand without
 // rebuilding (render-on-demand per visible page — M2 scope, honest per spec §7).
@@ -90,8 +96,45 @@ async function doInit(bundles: BundleSpec[]) {
   const w = await ensureWasm();
   const t0 = performance.now();
   const mounted = w.init(JSON.stringify(bundles));
+  for (const b of bundles) mountedLabels.add(b.label);
   const version = JSON.parse(w.version());
   return { mounted, version, initMs: performance.now() - t0 };
+}
+
+/** Incrementally mount additional bundles (lazy per-bundle loading, spec §1).
+ *  Idempotent: labels already mounted are skipped both here and in the engine. */
+async function doMountBundles(bundles: BundleSpec[]) {
+  const w = await ensureWasm();
+  if (!w.mount_bundles) throw new Error('engine lacks mount_bundles (rebuild wasm)');
+  const t0 = performance.now();
+  const fresh = bundles.filter((b) => !mountedLabels.has(b.label));
+  const mounted = fresh.length > 0 ? w.mount_bundles(JSON.stringify(fresh)) : mountedLabels.size;
+  for (const b of fresh) mountedLabels.add(b.label);
+  return {
+    mounted,
+    newlyMounted: fresh.map((b) => b.label),
+    mountMs: performance.now() - t0,
+  };
+}
+
+/** Tier-1 in-engine ValueSet expansion (spec §6 tier 1). Pure function of IG
+ *  content — no tx, no mounted packages needed beyond the resources passed in. */
+async function doExpandValueSet(valueSetJson: string, resourcesJson: string) {
+  const w = await ensureWasm();
+  const t0 = performance.now();
+  const raw = JSON.parse(w.expand_enumerable(valueSetJson, resourcesJson));
+  const expandMs = performance.now() - t0;
+  if (raw.ok) {
+    return {
+      ok: true,
+      total: raw.expansion.total ?? (raw.expansion.contains?.length ?? 0),
+      contains: raw.expansion.contains ?? [],
+      usedCodeSystems: raw.usedCodeSystems ?? [],
+      copyright: raw.copyright ?? [],
+      expandMs,
+    };
+  }
+  return { ok: false, notEnumerable: raw.notEnumerable, expandMs };
 }
 
 async function doCompile(
@@ -164,6 +207,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
     switch (msg.type) {
       case 'init':
         result = await doInit(msg.bundles);
+        break;
+      case 'mountBundles':
+        result = await doMountBundles(msg.bundles);
+        break;
+      case 'expandValueSet':
+        result = await doExpandValueSet(msg.valueSetJson, msg.resourcesJson);
         break;
       case 'compile':
         result = await doCompile(msg.config, msg.files, msg.predefined);

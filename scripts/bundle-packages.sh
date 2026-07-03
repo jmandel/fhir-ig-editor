@@ -41,14 +41,37 @@ fi
 echo "[bundle-packages] bundling ${#LABELS[@]} packages from $CACHE"
 "$BIN" bundle --cache "$CACHE" --out "$OUT" "${LABELS[@]}" >/dev/null
 
-# Emit manifest.json (labels + tgz paths) — what EngineClient.init fetches.
+# Emit manifest.json (labels + tgz paths + sizes + a `defer` flag) — what
+# EngineClient.init fetches. `defer:true` marks a bundle the FIRST COMPILE does
+# not need, so cold start can skip fetching it until the engine first needs it
+# (spec §1 lazy loading). Today that is ONLY the R5 core: cycle is an R4 IG, so
+# the compile fishes R4 bases; r5.core is pulled solely by SNAPSHOT generation
+# (the walk engine is R5-internal — see scripts/packages.list). Deferring its
+# ~6.8 MB tgz off the cold-start critical path is the bulk of the speedup, and it
+# is fetched + mounted lazily on the first snapshot / site-preview build.
+#
+# The rule is derived, not hand-listed: a bundle is deferrable iff it is an
+# R5 core AND the IG is not itself R5 (so removing it cannot change compile
+# output). We detect "IG is R5" from the exported cycle config's fhirVersion.
+IG_FHIR_VERSION="$(grep -E '^fhirVersion:' "$REPO/vendor/cycle/sushi-config.yaml" 2>/dev/null | head -1 | sed 's/[^0-9.]//g')"
+is_deferrable() {
+  local label="$1"
+  case "$label" in
+    hl7.fhir.r5.core#*) case "$IG_FHIR_VERSION" in 5.*) return 1 ;; *) return 0 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
 {
   echo '{'
   echo '  "bundles": ['
   for i in "${!LABELS[@]}"; do
     l="${LABELS[$i]}"
     comma=","; [ "$i" -eq $((${#LABELS[@]} - 1)) ] && comma=""
-    printf '    { "label": "%s", "tgz": "%s.tgz" }%s\n' "$l" "$l" "$comma"
+    tgz_bytes=$(stat -c%s "$OUT/$l.tgz" 2>/dev/null || echo 0)
+    defer=false; is_deferrable "$l" && defer=true
+    printf '    { "label": "%s", "tgz": "%s.tgz", "bytes": %s, "defer": %s }%s\n' \
+      "$l" "$l" "$tgz_bytes" "$defer" "$comma"
   done
   echo '  ]'
   echo '}'

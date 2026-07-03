@@ -1,0 +1,48 @@
+{
+  "_comment": "SELF-TEST (expectAgree:false): the SAME menstrual-flow VS, but the golden expansion carries an EXTRA code (flow-bogus) the tier-1 evaluator will not produce. The consistency gate MUST detect this mismatch — proving the comparison logic genuinely rejects disagreement (not a vacuous pass). If the gate reported agreement here, the plumbing would be broken.",
+  "expectAgree": false,
+  "vs": {
+    "resourceType": "ValueSet",
+    "url": "https://cycle.fhir.me/ValueSet/menstrual-flow",
+    "compose": {
+      "include": [
+        {
+          "system": "https://cycle.fhir.me/CodeSystem/cycle",
+          "concept": [
+            { "code": "flow-none" },
+            { "code": "flow-spotting" },
+            { "code": "flow-light" },
+            { "code": "flow-moderate" },
+            { "code": "flow-heavy" }
+          ]
+        }
+      ]
+    }
+  },
+  "refs": [
+    {
+      "resourceType": "CodeSystem",
+      "url": "https://cycle.fhir.me/CodeSystem/cycle",
+      "version": "0.2.0",
+      "content": "complete",
+      "concept": [
+        { "code": "flow-none", "display": "None" },
+        { "code": "flow-spotting", "display": "Spotting" },
+        { "code": "flow-light", "display": "Light" },
+        { "code": "flow-moderate", "display": "Moderate" },
+        { "code": "flow-heavy", "display": "Heavy" }
+      ]
+    }
+  ],
+  "expansion": {
+    "total": 6,
+    "contains": [
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-none", "display": "None" },
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-spotting", "display": "Spotting" },
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-light", "display": "Light" },
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-moderate", "display": "Moderate" },
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-heavy", "display": "Heavy" },
+      { "system": "https://cycle.fhir.me/CodeSystem/cycle", "code": "flow-bogus", "display": "Bogus (not in evaluator output)" }
+    ]
+  }
+}

@@ -538,3 +538,313 @@ body {
   color: var(--fg-dim);
   white-space: nowrap;
 }
+
+/* ---- cold-start progress (spec §1) ------------------------------------ */
+.startup-progress {
+  margin: 16px 0 4px;
+  width: 100%;
+}
+.startup-bar {
+  height: 6px;
+  background: var(--bg-3);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.startup-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.25s ease;
+}
+.startup-msg {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.startup-cache {
+  color: var(--ok);
+  font-weight: 600;
+}
+.lazy-progress {
+  padding: 3px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- tx settings (spec §6 tier 2) ------------------------------------- */
+.tx-settings {
+  position: relative;
+}
+.tx-settings-pop {
+  position: absolute;
+  right: 0;
+  top: 32px;
+  z-index: 50;
+  width: 360px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.tx-settings-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.tx-settings-help {
+  font-size: 11px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+.tx-settings-input {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.tx-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.tx-settings-current {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* ---- ValueSet expansion tab (spec §6) --------------------------------- */
+.vs-expansion {
+  padding: 12px 14px;
+  overflow: auto;
+  height: 100%;
+}
+.vs-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.vs-title-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.vs-exp-badge,
+.vs-inactive-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  color: var(--warn);
+  border: 1px solid var(--border);
+}
+.vs-tier1-head,
+.vs-cached-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.vs-ok-badge {
+  background: rgba(90, 209, 154, 0.15);
+  color: var(--ok);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.vs-count {
+  font-weight: 600;
+}
+.vs-timing {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.vs-used {
+  margin: 8px 0 14px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.vs-used-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  margin-bottom: 6px;
+}
+.vs-used ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.vs-used li {
+  font-size: 12px;
+  padding: 2px 0;
+}
+.vs-used code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+.vs-ver {
+  color: var(--fg-dim);
+  font-family: var(--mono);
+}
+.vs-contains {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.vs-contains th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+.vs-contains td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--bg-3);
+  vertical-align: top;
+}
+.vs-contains tr.inactive {
+  opacity: 0.55;
+}
+.vs-sys {
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vs-code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+.vs-inactive-badge {
+  margin-left: 6px;
+}
+.vs-display {
+  color: var(--fg);
+}
+.vs-display .muted,
+.vs-used .muted {
+  color: var(--fg-dim);
+}
+.vs-loading {
+  color: var(--fg-dim);
+  font-style: italic;
+  padding: 12px 0;
+}
+
+/* ---- the "needs terminology server" refusal state (spec §6 tier 2) ---- */
+.vs-refusal {
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 180, 84, 0.06);
+}
+.vs-refusal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.vs-refusal-badge {
+  background: var(--warn);
+  color: #1a0808;
+  padding: 2px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.vs-refusal-kind {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--warn);
+}
+.vs-refusal-reason {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 9px 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 10px;
+}
+.vs-refusal-detail {
+  font-size: 12px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.vs-tx-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.vs-tx-endpoint {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.vs-tx-noendpoint {
+  font-size: 12px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+.vs-tx-error {
+  color: var(--error);
+  font-size: 12px;
+  font-family: var(--mono);
+  margin-top: 8px;
+  width: 100%;
+}
+.vs-cached {
+  border: 1px solid var(--info);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(107, 193, 255, 0.05);
+}
+.vs-cached-badge {
+  background: rgba(107, 193, 255, 0.18);
+  color: var(--info);
+  padding: 2px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.vs-cached-meta {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.vs-cached-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}

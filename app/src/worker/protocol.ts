@@ -49,6 +49,40 @@ export interface InitResult {
   initMs: number;
 }
 
+/** Result of an incremental `mountBundles` call (lazy per-bundle mount). */
+export interface MountResult {
+  /** Total packages mounted in the engine after this call. */
+  mounted: number;
+  /** Labels newly mounted by THIS call (already-mounted labels are skipped). */
+  newlyMounted: string[];
+  mountMs: number;
+}
+
+// ---- cold-start progress (spec §1 / §11: measure first load) --------------
+
+/** A staged progress event surfaced during cold/warm start. `stage` names the
+ *  phase; `bundle`/`bytes`/`totalBytes` are present during per-bundle fetch so
+ *  the UI can show "inflating hl7.fhir.r4.core (3.8 MB)". `fromCache` marks a
+ *  warm-start OPFS hit (no network). */
+export interface ProgressEvent {
+  stage:
+    | 'wasm'
+    | 'manifest'
+    | 'bundle-fetch'
+    | 'bundle-cache-hit'
+    | 'bundle-mount'
+    | 'ready'
+    | 'lazy-fetch';
+  label?: string;
+  /** Bytes fetched/inflated for the current bundle (compressed tgz size). */
+  bytes?: number;
+  /** Human message for the status line (kept for back-compat with setStatus). */
+  message: string;
+  /** 0..1 overall progress across the eager bundle set, when computable. */
+  fraction?: number;
+  fromCache?: boolean;
+}
+
 // ---- M2 site preview ------------------------------------------------------
 
 /** One page the preview can render, as returned by `listPages`. */
@@ -83,8 +117,61 @@ export interface SiteContentInput {
 
 // ---- request messages (UI -> worker) --------------------------------------
 
+// ---- tier-1 ValueSet expansion (spec §6 tier 1) ---------------------------
+
+/** One expansion member row (`expansion.contains[i]`). */
+export interface ExpansionConcept {
+  system: string;
+  code: string;
+  display?: string;
+  inactive?: boolean;
+}
+
+/** A used-codesystem version the expansion drew from. */
+export interface UsedCodeSystem {
+  system: string;
+  version?: string;
+}
+
+/** A precise refusal from the tier-1 evaluator — the "needs terminology server"
+ *  state, carrying WHICH compose element and WHY (shown verbatim per spec §6). */
+export interface NotEnumerable {
+  /** `"include"` or `"exclude"`. */
+  component: string;
+  /** 0-based index of the offending element within that side. */
+  index: number;
+  system?: string;
+  /** Machine-readable refusal class (the UI branches on this). */
+  kind:
+    | 'ExternalSystemFilter'
+    | 'UnresolvableOrIncompleteSystem'
+    | 'UnresolvableValueSet'
+    | 'NestedNotEnumerable'
+    | 'UnsupportedLocalFilter'
+    | 'Malformed'
+    | 'CycleGuard';
+  /** The verbatim single-line refusal reason. */
+  reason: string;
+  /** `component[index]: reason` — the full Display string. */
+  display: string;
+}
+
+/** Result of a tier-1 `expandValueSet` call: either an expansion or a refusal. */
+export type ExpandResult =
+  | {
+      ok: true;
+      total: number;
+      contains: ExpansionConcept[];
+      usedCodeSystems: UsedCodeSystem[];
+      copyright: string[];
+      expandMs: number;
+    }
+  | { ok: false; notEnumerable: NotEnumerable; expandMs: number };
+
 export type WorkerRequest =
   | { id: number; type: 'init'; bundles: BundleSpec[] }
+  | { id: number; type: 'mountBundles'; bundles: BundleSpec[] }
+  | { id: number; type: 'expandValueSet'; valueSetJson: string; resourcesJson: string }
   | {
       id: number;
       type: 'compile';

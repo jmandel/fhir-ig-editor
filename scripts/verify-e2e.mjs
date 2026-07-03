@@ -58,6 +58,10 @@ await new Promise((res) => ws.addEventListener('open', res));
 
 // Capture console + page errors for debugging.
 const logs = [];
+// Bundle .tgz fetches, in order — drives the lazy-loading gate (only the
+// compile-critical bundles should be fetched before the first snapshot; r5.core
+// must NOT appear until a snapshot/site build needs it).
+const bundleFetches = [];
 ws.addEventListener('message', (ev) => {
   const m = JSON.parse(ev.data);
   if (m.method === 'Runtime.consoleAPICalled') {
@@ -66,10 +70,19 @@ ws.addEventListener('message', (ev) => {
   if (m.method === 'Runtime.exceptionThrown') {
     logs.push('EXC ' + (m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text));
   }
+  if (m.method === 'Network.requestWillBeSent') {
+    const url = m.params.request.url;
+    if (/\/data\/bundles\/.*\.tgz/.test(url)) {
+      // Decode the bundle label from the (percent-encoded) filename.
+      const file = decodeURIComponent(url.split('/data/bundles/')[1].split('?')[0]);
+      bundleFetches.push({ file: file.replace(/\.tgz$/, ''), at: Date.now() });
+    }
+  }
 });
 
 await cdp(ws, 'Page.enable', {}, id);
 await cdp(ws, 'Runtime.enable', {}, id);
+await cdp(ws, 'Network.enable', {}, id);
 
 const results = {};
 function fail(msg) {
@@ -82,6 +95,32 @@ try {
   const t0 = Date.now();
   await cdp(ws, 'Page.navigate', { url: base }, id);
 
+  // 0. Cold-start progress must be VISIBLE during startup (spec §1 gate). Poll
+  //    for the startup progress bar + a staged message before the engine is
+  //    ready. (On a very fast warm start this may be brief; we poll tightly.)
+  results.progressSeen = false;
+  {
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      const seen = await evalJs(
+        ws,
+        `(() => {
+          const p = document.querySelector('.startup-progress');
+          const ready = !!document.querySelector('.welcome-card button:not([disabled])');
+          return { bar: !!(p && p.querySelector('.startup-bar-fill')),
+                   msg: (p && p.querySelector('.startup-msg')?.textContent) || '',
+                   ready };
+        })()`,
+      );
+      if (seen.bar) {
+        results.progressSeen = true;
+        results.progressMsg = seen.msg;
+      }
+      if (seen.ready) break;
+      await sleep(120);
+    }
+  }
+
   // 1. Wait for the engine to be ready (the "Open demo IG" button enables).
   await waitFor(
     ws,
@@ -90,6 +129,10 @@ try {
     'engine ready',
   );
   results.engineReadyMs = Date.now() - t0;
+  // Bundles fetched BEFORE the engine became ready = the eager (compile-critical)
+  // set. r5.core (deferred) must NOT be among them (lazy-loading gate).
+  results.eagerBundles = bundleFetches.map((b) => b.file);
+  results.r5FetchedAtInit = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
   // Capture the engine version shown.
   results.engineLabel = await evalJs(ws, `document.querySelector('.welcome-engine')?.textContent || ''`);
@@ -111,6 +154,107 @@ try {
   await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'snapshot tree');
   results.snapshotRows = await evalJs(ws, `document.querySelectorAll('.snapshot .sd-table tbody tr').length`);
   results.snapshotMeta = await evalJs(ws, `document.querySelector('.snapshot-meta')?.textContent || ''`);
+  // The deferred r5.core bundle should have been fetched LAZILY by now (the
+  // snapshot needs it), i.e. it appeared only after init — the lazy-loading gate.
+  results.r5FetchedLazily = bundleFetches.some((b) => /r5\.core/.test(b.file));
+
+  // ---- ValueSet expansion tab (spec §6 tier 1) ----------------------------
+  // Select the cycle IG's menstrual-flow ValueSet, open its Expansion tab, and
+  // confirm tier-1 renders exactly 5 codes (the 5 local flow codes).
+  const selectedMenstrual = await evalJs(ws, `(() => {
+    const rows = [...document.querySelectorAll('.res-row')];
+    const vs = rows.find(r => /menstrual-flow|MenstrualFlow/i.test(r.textContent) || /ValueSet/.test(r.querySelector('.res-type')?.textContent||'') && /menstrual/i.test(r.textContent));
+    // Fallback: first ValueSet row.
+    const target = vs || rows.find(r => /ValueSet/.test(r.querySelector('.res-type')?.textContent||''));
+    if (!target) return 'no-vs-row';
+    target.click();
+    return target.textContent;
+  })()`);
+  results.selectedValueSet = selectedMenstrual;
+  if (selectedMenstrual !== 'no-vs-row') {
+    // Make sure we picked the menstrual-flow VS specifically (retry by scanning
+    // all ValueSet rows for one whose expansion has 5 flow codes).
+    await waitFor(ws, `[...document.querySelectorAll('.inspector-tabs .tab-btn')].some(b => /Expansion/.test(b.textContent))`, 15000, 'expansion tab present');
+    await evalJs(ws, `[...document.querySelectorAll('.inspector-tabs .tab-btn')].find(b => /Expansion/.test(b.textContent))?.click()`);
+    // Ensure the specific menstrual-flow VS is selected (scan rows if needed).
+    await evalJs(ws, `(() => {
+      const rows = [...document.querySelectorAll('.res-row')];
+      const vs = rows.find(r => /menstrual/i.test(r.textContent));
+      if (vs) vs.click();
+    })()`);
+    await sleep(300);
+    await evalJs(ws, `[...document.querySelectorAll('.inspector-tabs .tab-btn')].find(b => /Expansion/.test(b.textContent))?.click()`);
+    await waitFor(ws, `!!document.querySelector('.vs-contains tbody tr') || !!document.querySelector('.vs-refusal')`, 20000, 'expansion rendered');
+    results.menstrualFlowExpansion = await evalJs(ws, `(() => {
+      const rows = document.querySelectorAll('.vs-contains tbody tr');
+      const codes = [...rows].map(r => r.querySelector('.vs-code')?.textContent?.replace(/inactive$/,'').trim());
+      const used = [...document.querySelectorAll('.vs-used li code')].map(c => c.textContent);
+      const ok = !!document.querySelector('.vs-ok-badge');
+      return { count: rows.length, codes, used, tier1Ok: ok };
+    })()`);
+  }
+
+  // ---- external-filter refusal state (spec §6 tier 1 boundary) ------------
+  // Inject a ValueSet whose compose is an external-system filter (SNOMED is-a) —
+  // tier-1 must REFUSE and the "needs terminology server" state must appear with
+  // the refusal verbatim. We add it to ValueSets.fsh via Monaco.
+  const injectedRefusal = await evalJs(ws, `(async () => {
+    // Open ValueSets.fsh in the file tree.
+    const leaves = [...document.querySelectorAll('.file-tree *')].filter(e => e.children.length === 0);
+    const row = leaves.find(e => (e.textContent||'').replace(/[^\\x20-\\x7e]/g,'').trim() === 'ValueSets.fsh');
+    if (!row) return 'no-valuesets-file';
+    (row.closest('[class*=row]') || row).click();
+    await new Promise(r => setTimeout(r, 400));
+    const ed = window.monaco && window.monaco.editor.getEditors()[0];
+    if (!ed) return 'no-editor';
+    const m = ed.getModel();
+    const vs = [
+      '',
+      'ValueSet: E2EExternalFilterVS',
+      'Id: e2e-external-filter',
+      'Title: "E2E External Filter"',
+      '* include codes from system http://snomed.info/sct where concept is-a #73211009',
+      ''
+    ].join('\\n');
+    m.setValue(m.getValue() + vs);
+    return 'ok';
+  })()`);
+  results.injectedRefusal = injectedRefusal;
+  if (injectedRefusal === 'ok') {
+    // Wait for the recompile, then select the new VS + open its Expansion tab.
+    await sleep(1500);
+    const pickedRefusalVs = await evalJs(ws, `(() => {
+      const rows = [...document.querySelectorAll('.res-row')];
+      const vs = rows.find(r => /e2e-external-filter|E2EExternalFilter/i.test(r.textContent));
+      if (!vs) return 'no-row';
+      vs.click();
+      return 'ok';
+    })()`);
+    results.pickedRefusalVs = pickedRefusalVs;
+    if (pickedRefusalVs === 'ok') {
+      await evalJs(ws, `[...document.querySelectorAll('.inspector-tabs .tab-btn')].find(b => /Expansion/.test(b.textContent))?.click()`);
+      await waitFor(ws, `!!document.querySelector('.vs-refusal')`, 20000, 'refusal state');
+      results.refusalState = await evalJs(ws, `(() => {
+        const r = document.querySelector('.vs-refusal');
+        if (!r) return null;
+        return {
+          badge: r.querySelector('.vs-refusal-badge')?.textContent || '',
+          kind: r.querySelector('.vs-refusal-kind')?.textContent || '',
+          reason: r.querySelector('.vs-refusal-reason')?.textContent || '',
+        };
+      })()`);
+    }
+    // Clean the injected VS back out so the site preview + later steps are clean.
+    await evalJs(ws, `(() => {
+      const ed = window.monaco && window.monaco.editor.getEditors()[0];
+      if (!ed) return;
+      const m = ed.getModel();
+      m.setValue(m.getValue().replace(/\\n*ValueSet: E2EExternalFilterVS[\\s\\S]*$/, '\\n'));
+    })()`);
+    await sleep(1200);
+    // Re-select an SD so the later snapshot/preview steps have their default.
+    await evalJs(ws, `(() => { const r = [...document.querySelectorAll('.res-row')].find(r => /StructureDefinition/.test(r.querySelector('.res-type')?.textContent||'')); if (r) r.click(); })()`);
+  }
 
   // 5. Introduce an FSH error: select an FSH file, set its Monaco model text to
   //    something with an unresolvable insert rule, and let the debounced compile run.
@@ -254,6 +398,36 @@ try {
   if (!(results.previewTextLen > 200)) { console.error('assert: preview page did not render'); ok = false; }
   if (!results.previewHasIgContent) { console.error('assert: preview missing IG content'); ok = false; }
   if (results.editTitleResult === 'ok' && !results.previewUpdatedAfterEdit) { console.error('assert: preview did not update after FSH/page edit'); ok = false; }
+
+  // ---- cold-start progress + lazy-loading gates (spec §1) ----------------
+  if (!results.progressSeen) { console.error('assert: cold-start progress bar never appeared'); ok = false; }
+  // r5.core (deferred) must NEVER be fetched at init, on cold OR warm start.
+  if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init (should be lazy/deferred)'); ok = false; }
+  // On a COLD start the eager set is fetched over the network and excludes
+  // r5.core; on a WARM start (OPFS cache populated) NOTHING is fetched — both are
+  // correct. So: if any eager bundle was fetched, it must exclude r5.core (checked
+  // via r5FetchedAtInit above); r5.core is fetched lazily only once a snapshot
+  // needs it. A warm start (0 eager fetches) is explicitly allowed.
+  results.warmStart = (results.eagerBundles || []).length === 0;
+  if (!results.warmStart && results.eagerBundles.some((b) => /r5\.core/.test(b))) {
+    console.error('assert: r5.core appeared in the eager set'); ok = false;
+  }
+  // r5FetchedLazily is a cold-start signal (warm start serves it from cache with
+  // no network); only assert it when we actually saw a cold fetch of eager bundles.
+  if (!results.warmStart && !results.r5FetchedLazily) {
+    console.error('assert: r5.core was never fetched on a cold start (snapshot needs it — lazy mount failed?)'); ok = false;
+  }
+
+  // ---- ValueSet expansion tab gate (spec §6 tier 1) ----------------------
+  const mfx = results.menstrualFlowExpansion;
+  if (!mfx || !mfx.tier1Ok) { console.error('assert: menstrual-flow VS did not tier-1 expand'); ok = false; }
+  else if (mfx.count !== 5) { console.error('assert: menstrual-flow expansion expected 5 codes, got ' + mfx.count); ok = false; }
+
+  // ---- external-filter refusal gate (spec §6 boundary) -------------------
+  if (results.injectedRefusal === 'ok') {
+    if (!results.refusalState) { console.error('assert: external-filter VS did not show refusal state'); ok = false; }
+    else if (!/snomed/i.test(results.refusalState.reason)) { console.error('assert: refusal reason did not name the external system: ' + results.refusalState.reason); ok = false; }
+  }
   console.log(ok ? '\nE2E GATE: PASS' : '\nE2E GATE: FAIL');
   if (!ok) fail('assertions failed');
 } catch (e) {

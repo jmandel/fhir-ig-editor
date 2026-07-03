@@ -120,6 +120,16 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           node scripts/byte-check.mjs .pkg-node app/public/data/bundles vendor/cycle .native-out/fsh-generated/resources
 
+      # --- Consistency gate: the in-engine tier-1 expander (expand_enumerable)
+      # must agree with the committed expansion cache on the shared domain
+      # (spec §6 tier 3). This cycle's committed cache is EMPTY, so the gate is
+      # trivially green over it — but it is WIRED and proven by a fixture-based
+      # self-test (an agreeing case AND a deliberately-wrong case the gate must
+      # reject), so a green result means the machinery genuinely compares. CI
+      # never calls a tx server (hermetic).
+      - name: Consistency gate (expand_enumerable ↔ committed cache)
+        run: node scripts/consistency-gate.mjs "$GITHUB_WORKSPACE/.pkg-node"
+
       - name: Setup Bun (the committed lockfile is bun.lock)
         uses: oven-sh/setup-bun@v2
         with:

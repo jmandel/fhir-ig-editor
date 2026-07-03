@@ -17,6 +17,8 @@ import { DiagnosticsPanel } from './views/DiagnosticsPanel';
 import { ResourceInspector } from './views/ResourceInspector';
 import { BuildStatus } from './views/BuildStatus';
 import { PreviewPane } from './views/PreviewPane';
+import { TxSettings } from './views/TxSettings';
+import type { ProgressEvent } from './worker/protocol';
 
 const DEBOUNCE_MS = 300;
 
@@ -27,6 +29,10 @@ export function App() {
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
   const [status, setStatus] = useState('Booting…');
+  // Cold-start progress (spec §1): staged phase + per-bundle progress.
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  // Bumped when the tx endpoint changes, so the VS tab re-evaluates.
+  const [settingsVersion, setSettingsVersion] = useState(0);
 
   const [paths, setPaths] = useState<string[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -56,11 +62,15 @@ export function App() {
       st.listeners.add(() => setPaths(st.list()));
       setPaths(st.list());
 
-      const res = await engine.init((m) => setStatus(m));
+      const res = await engine.init((ev) => {
+        setProgress(ev);
+        setStatus(ev.message);
+      });
       if (cancelled) return;
       setVersion(res.version);
       setInitMs(res.initMs);
       setEngineReady(true);
+      setProgress({ stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` });
       setStatus(`Engine ready — mounted ${res.mounted} packages.`);
 
       // If OPFS already has a project (reload), compile it immediately.
@@ -220,6 +230,7 @@ export function App() {
               in-memory
             </span>
           )}
+          <TxSettings onChange={() => setSettingsVersion((v) => v + 1)} />
           <button className="btn" disabled={!engineReady} onClick={openDemo}>
             Open demo IG
           </button>
@@ -240,6 +251,7 @@ export function App() {
             <button className="btn btn-primary" disabled={!engineReady} onClick={openDemo}>
               {engineReady ? 'Open the demo IG (cycle)' : 'Starting engine…'}
             </button>
+            {!engineReady && progress && <StartupProgress progress={progress} />}
             {version && (
               <div className="welcome-engine">
                 {version.engine} · {version.commit}
@@ -310,7 +322,12 @@ export function App() {
             <div className="inspect-body">
               {inspectTab === 'resource' ? (
                 activeResource && engineRef.current ? (
-                  <ResourceInspector resource={activeResource} engine={engineRef.current} />
+                  <ResourceInspector
+                    resource={activeResource}
+                    allResources={resources}
+                    engine={engineRef.current}
+                    settingsVersion={settingsVersion}
+                  />
                 ) : (
                   <div className="panel-empty">No resource selected.</div>
                 )
@@ -329,6 +346,10 @@ export function App() {
         </div>
       )}
 
+      {projectLoaded && progress && !engineReady && (
+        <div className="lazy-progress" title={progress.message}>{progress.message}</div>
+      )}
+
       {projectLoaded && (
         <footer className="problems">
           <div className="problems-header">
@@ -338,6 +359,23 @@ export function App() {
           <DiagnosticsPanel diagnostics={diagnostics} onNavigate={navigateTo} />
         </footer>
       )}
+    </div>
+  );
+}
+
+/** Cold-start progress: the current stage + a bar across the eager bundle set,
+ *  with the per-bundle byte size when fetching (spec §1). */
+function StartupProgress({ progress }: { progress: ProgressEvent }) {
+  const pct = progress.fraction != null ? Math.round(progress.fraction * 100) : null;
+  return (
+    <div className="startup-progress" data-stage={progress.stage}>
+      <div className="startup-bar">
+        <div className="startup-bar-fill" style={{ width: pct != null ? `${pct}%` : '35%' }} />
+      </div>
+      <div className="startup-msg">
+        {progress.fromCache && <span className="startup-cache">⚡ cached</span>}
+        {progress.message}
+      </div>
     </div>
   );
 }
