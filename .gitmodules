@@ -1,0 +1,6 @@
+[submodule "vendor/sushi-rs"]
+	path = vendor/sushi-rs
+	url = https://github.com/jmandel/sushi-rs.git
+[submodule "vendor/cycle"]
+	path = vendor/cycle
+	url = https://github.com/jmandel/cycle.git

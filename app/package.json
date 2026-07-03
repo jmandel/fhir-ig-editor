@@ -1,0 +1,25 @@
+{
+  "name": "fhir-ig-editor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Static, GitHub-Pages-hosted web editor for FHIR IGs (rust_sushi + snapshot walk engine as WASM).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "4.6.0",
+    "monaco-editor": "0.52.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.3",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  }
+}

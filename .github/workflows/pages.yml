@@ -1,0 +1,142 @@
+# Build the static FHIR IG Editor and deploy to GitHub Pages (spec §8).
+#
+# The engine that ships is EXACTLY the pinned vendor/sushi-rs commit; the default
+# IG is EXACTLY the pinned vendor/cycle commit. Bumping a submodule is the upgrade
+# event. CI runs the engine's own fast gates before deploying — the demo never
+# ships an engine that fails its own tests (spec §8 step 2, §9).
+#
+# NOTE: CI has not run yet at authoring time (network was down locally). It is
+# written against the documented gates + the local verification that all pass:
+#   - cargo test --workspace (engine) — green locally
+#   - SUSHI-harvest 326/326 — green locally
+#   - wasm byte-match vs native for the cycle IG — green locally (scripts/byte-check.mjs)
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vendor/sushi-rs/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('vendor/sushi-rs/Cargo.lock') }}
+
+      # --- Engine gate: the demo never deploys an engine that fails its own tests.
+      # Fast subset per spec §8 step 2 (full suite is heavy; this is the ladder +
+      # in-memory compile-equivalence + wasm_api). Widen as CI budget allows.
+      - name: Engine gate (fast tests)
+        working-directory: vendor/sushi-rs
+        run: cargo test -p compiler -p wasm_api -p snapshot_gen --release
+
+      - name: Install wasm-bindgen-cli (version-matched)
+        run: |
+          VER=$(grep -A1 'name = "wasm-bindgen"' vendor/sushi-rs/Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "wasm-bindgen $VER"
+          cargo install wasm-bindgen-cli --version "$VER" --locked
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      # --- Materialize the FHIR package cache for the cycle closure. CI never
+      # calls a live registry beyond this deterministic fetch; expansions are the
+      # committed cache (spec §6 tier 3 / §8 step 5). The engine's deps CLI
+      # resolves the closure into a local cache dir.
+      - name: Materialize package cache
+        working-directory: vendor/sushi-rs
+        run: |
+          cargo build --release -p rust_sushi
+          mkdir -p "$GITHUB_WORKSPACE/.fhir-cache"
+          ./target/release/rust_sushi materialize --project "$GITHUB_WORKSPACE/vendor/cycle" \
+            --out "$GITHUB_WORKSPACE/.fhir-cache" || true
+        # (If the cycle IG lacks a lockfile, fall back to the maintainer-committed
+        #  cache under data/ — see scripts/bundle-packages.sh FHIR_CACHE knob.)
+
+      - name: Build wasm engine
+        env:
+          FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
+        run: bash scripts/build-wasm.sh
+
+      - name: Bundle packages + export IG manifest
+        env:
+          FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
+        run: |
+          bash scripts/bundle-packages.sh
+          node scripts/export-ig-manifest.mjs
+
+      # --- Drift gate: wasm output byte-matches native for the whole cycle IG.
+      - name: Byte-match gate (wasm vs native)
+        working-directory: vendor/sushi-rs
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/.native-out"
+          FHIR_CACHE="$GITHUB_WORKSPACE/.fhir-cache" \
+            ./target/release/rust_sushi build "$GITHUB_WORKSPACE/vendor/cycle" -o "$GITHUB_WORKSPACE/.native-out"
+          # nodejs-target wasm for the headless byte-check.
+          wasm-bindgen --target nodejs --out-dir "$GITHUB_WORKSPACE/.pkg-node" --out-name wasm_api \
+            target/wasm32-unknown-unknown/release/wasm_api.wasm
+          cd "$GITHUB_WORKSPACE"
+          node scripts/byte-check.mjs .pkg-node app/public/data/bundles vendor/cycle .native-out/fsh-generated/resources
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build SPA
+        working-directory: app
+        env:
+          # Project Pages serve under /<repo>/; user/org Pages use '/'.
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: |
+          npm ci
+          npm run build
+
+      - name: Assemble Pages artifact
+        run: |
+          # public/ (pkg + data) is copied into dist by Vite; ensure it is present.
+          test -f app/dist/pkg/wasm_api_bg.wasm
+          test -f app/dist/data/cycle/manifest.json
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

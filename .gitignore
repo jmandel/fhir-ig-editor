@@ -1,0 +1,21 @@
+# Build-time generated static data (regenerable — see scripts/, never committed)
+/data/
+/app/public/data/
+
+# Vendored wasm artifacts (built by scripts/build-wasm.sh into app/public/pkg/)
+/app/public/pkg/
+
+# node / vite
+node_modules/
+/app/node_modules/
+/app/dist/
+*.tsbuildinfo
+*.log
+
+# editor / OS
+.DS_Store
+.vscode/
+*.swp
+
+# scratch
+/scratch/
