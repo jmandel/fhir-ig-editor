@@ -63,8 +63,16 @@ jobs:
           echo "wasm-bindgen $VER"
           cargo install wasm-bindgen-cli --version "$VER" --locked
 
-      - name: Install binaryen (wasm-opt)
-        run: sudo apt-get update && sudo apt-get install -y binaryen
+      # Pinned binaryen release — NOT apt. The runner's apt ships binaryen 108,
+      # whose wasm-opt corrupts wasm-bindgen's externref table (the module then
+      # dies at init with "Table.grow(): failed to grow table by 4" in the
+      # browser; found on the first live deploy). 117 is verified against this
+      # exact module in headless Chromium; build-wasm.sh also refuses wasm-opt
+      # older than 116 as a backstop.
+      - name: Install binaryen (wasm-opt, pinned release)
+        run: |
+          curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_117/bin" >> "$GITHUB_PATH"
 
       # --- FHIR package cache: the pinned closure (scripts/packages.list, which
       # documents WHY each package incl. r5.core) is downloaded once from the

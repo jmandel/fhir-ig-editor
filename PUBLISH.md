@@ -30,6 +30,11 @@ package registry (`packages.fhir.org`, fallback `packages2.fhir.org`):
   This is CI's only registry traffic; no live tx server is ever called.
 - The SPA build uses **bun** (`bun install --frozen-lockfile`) — the committed
   lockfile is `bun.lock`, so the original `npm ci` could never have worked.
+- **binaryen is a pinned release (117), not apt**: the runner's apt ships
+  binaryen 108, whose `wasm-opt -Oz` corrupts wasm-bindgen's externref table —
+  the first deployed wasm died at init in the browser with
+  `Table.grow(): failed to grow table by 4` (caught by the live headless-Chromium
+  check). `build-wasm.sh` also skips wasm-opt below binaryen 116 as a backstop.
 
 ---
 

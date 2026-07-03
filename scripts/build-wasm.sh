@@ -45,10 +45,19 @@ WASM="$ENGINE/target/wasm32-unknown-unknown/release/wasm_api.wasm"
 echo "[build-wasm] wasm-bindgen --target web"
 "$WASM_BINDGEN" --target web --out-dir "$OUT" --out-name wasm_api "$WASM"
 
+# wasm-opt: only with a modern binaryen. Old versions (e.g. apt's 108) corrupt
+# wasm-bindgen's externref table — the module then fails at init in the browser
+# with "Table.grow(): failed to grow table by 4". 116+ is the floor; CI pins the
+# binaryen 117 release (verified against this module in headless Chromium).
 if command -v wasm-opt >/dev/null; then
-  echo "[build-wasm] wasm-opt -Oz"
-  wasm-opt -Oz "$OUT/wasm_api_bg.wasm" -o "$OUT/wasm_api_bg.wasm.opt" \
-    && mv "$OUT/wasm_api_bg.wasm.opt" "$OUT/wasm_api_bg.wasm"
+  WO_VER="$(wasm-opt --version | grep -oE '[0-9]+' | head -1)"
+  if [ "${WO_VER:-0}" -ge 116 ]; then
+    echo "[build-wasm] wasm-opt -Oz (binaryen $WO_VER)"
+    wasm-opt -Oz "$OUT/wasm_api_bg.wasm" -o "$OUT/wasm_api_bg.wasm.opt" \
+      && mv "$OUT/wasm_api_bg.wasm.opt" "$OUT/wasm_api_bg.wasm"
+  else
+    echo "[build-wasm] wasm-opt is binaryen $WO_VER (<116, breaks externref tables) — SKIPPING optimization"
+  fi
 else
   echo "[build-wasm] (wasm-opt not found — skipping size optimization)"
 fi
