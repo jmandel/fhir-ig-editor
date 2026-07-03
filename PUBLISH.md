@@ -1,7 +1,39 @@
-# PUBLISH — coordinator checklist for `jmandel/fhir-ig-editor`
+# PUBLISH — status & operations notes for `jmandel/fhir-ig-editor`
 
-This repo was built **locally, offline** (no `gh`, no push). Everything here is
-verified locally (see "Local verification" below). To go public:
+## ✅ PUBLISHED (2026-07-03)
+
+- [x] Repo public: https://github.com/jmandel/fhir-ig-editor
+- [x] Engine diagnostics change landed in `jmandel/sushi-rs`;
+      `vendor/sushi-rs` bumped to `4edef7b` (was pre-change `209effd`)
+- [x] `vendor/cycle` pinned @ `aa10e71`; `.gitmodules` carries real https URLs
+- [x] Pages enabled (Source: GitHub Actions)
+- [x] CI package acquisition fixed (see design note below) — the first deploy
+      run after publish (28648330577) failed on an empty `.fhir-cache`
+- [x] Live: https://joshuamandel.com/fhir-ig-editor/
+
+## CI package-fetch design (added post-publish)
+
+CI populates `.fhir-cache` by downloading the pinned closure from the FHIR
+package registry (`packages.fhir.org`, fallback `packages2.fhir.org`):
+
+- **`scripts/packages.list`** — the single source of truth for the closure,
+  consumed by both `fetch-packages.sh` (download) and `bundle-packages.sh`
+  (bundle). It documents WHY each package is present. Notably **r5.core stays
+  even though cycle is an R4 IG**: the snapshot walk engine is R5-internal, so
+  R4 profile bases resolve against r5.core during snapshot generation — without
+  it the snapshot-tree view (a core M1 deliverable) breaks.
+- **`scripts/fetch-packages.sh`** — idempotent per-package download+extract to
+  `.fhir-cache/<id>#<ver>/package/`; the engine derives its
+  `.derived-index.json` sidecar itself, so plain registry tarballs suffice.
+- **`actions/cache`** wraps `.fhir-cache` keyed on `hashFiles('scripts/packages.list')`
+  (~240 MB) — repeat runs are a no-op; the registry is hit once per closure change.
+  This is CI's only registry traffic; no live tx server is ever called.
+- The SPA build uses **bun** (`bun install --frozen-lockfile`) — the committed
+  lockfile is `bun.lock`, so the original `npm ci` could never have worked.
+
+---
+
+## Original pre-publish checklist (kept for the record)
 
 ## 0. Prerequisite: land the engine change first
 
