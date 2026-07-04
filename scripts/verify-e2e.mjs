@@ -46,6 +46,136 @@ async function waitFor(ws, expr, timeoutMs = 60000, label = expr) {
   throw new Error(`TIMEOUT waiting for: ${label}`);
 }
 
+// ---- preview-window gate (task #37) ---------------------------------------
+// Drives extra browser tabs (the SW-served preview) over CDP. Uses the DevTools
+// HTTP endpoint to open/close tabs and a per-tab WebSocket for evaluation.
+async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, editorTabId) {
+  const PREVIEW = base.replace(/\/?$/, '/') + 'preview/';
+  const pathOf = (u) => new URL(u).pathname;
+  const out = {};
+  const openedTabs = [];
+  // A self-contained CDP call over a per-tab WebSocket (independent of the harness's
+  // shared single-target `ws`). Each request gets a fresh id + a scoped listener.
+  let tabMsgId = 1;
+  const tabConn = (wsUrl) => new Promise((res, rej) => { const w = new WebSocket(wsUrl); w.addEventListener('open', () => res(w)); w.addEventListener('error', rej); });
+  function tabCdp(tws, method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const msgId = tabMsgId++;
+      const onMsg = (ev) => { const m = JSON.parse(ev.data); if (m.id === msgId) { tws.removeEventListener('message', onMsg); m.error ? reject(new Error(m.error.message)) : resolve(m.result); } };
+      tws.addEventListener('message', onMsg);
+      tws.send(JSON.stringify({ id: msgId, method, params }));
+    });
+  }
+  async function newTab(url) {
+    const t = await (await fetch(`http://localhost:9222/json/new?${encodeURIComponent(url)}`, { method: 'PUT' })).json();
+    if (!t.webSocketDebuggerUrl) throw new Error('newTab: no webSocketDebuggerUrl in ' + JSON.stringify(t).slice(0, 120));
+    const tws = await tabConn(t.webSocketDebuggerUrl);
+    await tabCdp(tws, 'Page.enable');
+    await tabCdp(tws, 'Runtime.enable');
+    openedTabs.push(t.id);
+    return { ws: tws, id: t.id };
+  }
+  async function closeTab(tabId) { try { await fetch(`http://localhost:9222/json/close/${tabId}`); } catch { /* ignore */ } }
+  const tabEval = async (tws, expr) => {
+    const r = await tabCdp(tws, 'Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ' :: ' + expr.slice(0, 80));
+    return r.result.value;
+  };
+  const tabWaitFor = async (tws, expr, ms = 30000, label = expr) => {
+    const dl = Date.now() + ms;
+    while (Date.now() < dl) { const v = await tabEval(tws, expr).catch(() => false); if (v) return v; await sleep(250); }
+    throw new Error('TIMEOUT (preview) ' + label);
+  };
+
+  try {
+    // Capability: the "Open site in new window" button must be enabled.
+    out.previewCapable = await editorEval(`(() => { const b = document.querySelector('.preview-open-window'); return !!b && !b.disabled; })()`);
+    if (!out.previewCapable) { out.skipped = 'preview button disabled (no SW support in this context)'; return out; }
+    // The editor is on the stock template; grab a profile page name for the
+    // unrelated-tab test.
+    const profilePath = await editorEval(`(() => { const o = document.querySelector('.preview-page-select optgroup[label="Profiles"] option'); return o ? o.value : ''; })()`);
+    const indexUrl = PREVIEW + 'hl7.fhir.template/en/index.html';
+    const indexPath = pathOf(indexUrl);
+
+    // --- open the preview tab (real URL, SW-served) ---
+    const pv = await newTab(indexUrl);
+    const preview = pv.ws;
+    await tabWaitFor(preview, `document.body && document.body.textContent.length > 400 && !document.querySelector('[data-igpreview-fallback]')`, 30000, 'preview index rendered');
+    out.indexRenderedLen = await tabEval(preview, `document.body ? document.body.textContent.length : 0`);
+    // The served HTML (not the JS-rewritten DOM) must carry the injected snippet.
+    out.snippetInjected = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return /data-igpreview="hot-reload"/.test(t); })()`);
+    // Write-through: the editor's SW cache holds the page after it was served.
+    out.cachedWriteThrough = await editorEval(`(async () => { const ks = (await caches.keys()).filter(k => k.startsWith('igpreview::')); for (const k of ks) { const c = await caches.open(k); if (await c.match('${indexPath}')) return true; } return false; })()`);
+    // Latency numbers: live render (cache-busted) vs cache hit.
+    out.liveRenderMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}?nocache=' + Date.now()); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
+    out.cacheHitMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}'); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
+
+    // --- cross-page navigation: click a link to another (content-rich) page ---
+    out.navClick = await tabEval(preview, `(() => { const links = [...document.querySelectorAll('a[href]')].filter(a => { const h = a.getAttribute('href'); return h && /\\.html$/.test(h) && !/index\\.html$/.test(h) && !/^[a-z]+:/i.test(h) && !h.startsWith('#'); }); const t = links.find(a => /StructureDefinition-/.test(a.getAttribute('href'))) || links[0]; if (!t) return 'no-links'; t.click(); return t.getAttribute('href'); })()`);
+    await sleep(2000);
+    const afterNavUrl = await tabEval(preview, `location.href`);
+    out.crossPageNav = out.navClick !== 'no-links' && afterNavUrl !== indexUrl;
+    out.navPageLen = await tabEval(preview, `(async () => { const r = await fetch(location.pathname); return (await r.text()).length; })()`).catch(() => 0);
+
+    // --- F5 reload on the navigated page ---
+    await tabCdp(preview, 'Page.reload');
+    await sleep(2000);
+    out.reloadLen = await tabEval(preview, `(async () => { const r = await fetch(location.pathname); return (await r.text()).length; })()`).catch(() => 0);
+    out.reloadUrlStable = (await tabEval(preview, `location.href`)) === afterNavUrl;
+
+    // --- back / forward ---
+    await tabEval(preview, `history.back()`); await sleep(1500);
+    out.backWorked = (await tabEval(preview, `location.href`)) === indexUrl;
+    await tabEval(preview, `history.forward()`); await sleep(1500);
+    out.forwardWorked = (await tabEval(preview, `location.href`)) === afterNavUrl;
+
+    // --- smart hot reload: edit index.md -> index preview reloads; an UNRELATED
+    //     open profile tab does NOT ---
+    await tabEval(preview, `location.href = '${indexUrl}'`);
+    await tabWaitFor(preview, `document.body && document.body.textContent.length > 400 && !document.querySelector('[data-igpreview-fallback]')`, 20000, 'preview back at index');
+    await sleep(600);
+    let profile = null, profileTabId = null;
+    if (profilePath) {
+      const pp = await newTab(PREVIEW + 'hl7.fhir.template/' + profilePath);
+      profile = pp.ws; profileTabId = pp.id;
+      await tabWaitFor(profile, `document.body && document.body.textContent.length > 300 && !document.querySelector('[data-igpreview-fallback]')`, 30000, 'profile preview rendered');
+      await sleep(600);
+    }
+    await tabEval(preview, `window.__stamp = 'IDX'`);
+    if (profile) await tabEval(profile, `window.__stamp = 'PROF'`);
+    // Edit index.md's H1 in the editor (via Monaco).
+    out.editResult = await editorEval(`(async () => { const leaves = [...document.querySelectorAll('.file-tree *')].filter(e => e.children.length === 0); const row = leaves.find(e => (e.textContent || '').replace(/[^\\x20-\\x7e]/g, '').trim() === 'index.md'); if (!row) return 'no-row'; (row.closest('[class*=row]') || row).click(); await new Promise(r => setTimeout(r, 400)); const ed = window.monaco && window.monaco.editor.getEditors()[0]; if (!ed) return 'no-ed'; const m = ed.getModel(); const v = m.getValue(); if (!/^# /m.test(v)) return 'not-index'; m.setValue(v.replace(/^# .*/m, '# HOTRELOAD ' + Date.now())); return 'ok'; })()`);
+    const tEdit = Date.now();
+    try {
+      await tabWaitFor(preview, `window.__stamp !== 'IDX'`, 25000, 'index tab reloaded');
+      out.hotReloadMs = Date.now() - tEdit;
+      out.indexHotReloaded = await tabEval(preview, `(async () => { const r = await fetch(location.pathname); const t = await r.text(); return /HOTRELOAD/.test(t); })()`);
+    } catch (e) { out.indexHotReloaded = false; out.hotReloadErr = String(e).slice(0, 120); }
+    await sleep(1200);
+    out.unrelatedStayedPut = profile ? (await tabEval(profile, `window.__stamp === 'PROF'`)) : true;
+
+    // --- editor-closed fallback ladder (the gate: close the editor, then a CACHED
+    //     page still 200s and a NON-cached page yields the friendly fallback) ---
+    // Close the profile tab and the EDITOR tab so NO client can live-render. This is
+    // the LAST step that touches the editor; the harness does not eval it afterward.
+    if (profileTabId) await closeTab(profileTabId);
+    if (editorTabId) await closeTab(editorTabId);
+    await sleep(1200);
+    // Tier (a): the index page was cached (write-through) -> still 200 with content.
+    out.cachedAfterClose = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return { status: r.status, len: t.length, src: r.headers.get('X-IGPreview-Source') }; })()`);
+    // Tier (c): a page that was never rendered/cached, editor closed -> friendly
+    // fallback (200, never a browser error page).
+    const nonCached = pathOf(PREVIEW + 'hl7.fhir.template/en/ZZZ-NeverRendered-xyz.html');
+    out.fallbackAfterClose = await tabEval(preview, `(async () => { const r = await fetch('${nonCached}'); const t = await r.text(); return { status: r.status, isFallback: /data-igpreview-fallback/.test(t), src: r.headers.get('X-IGPreview-Source') }; })()`);
+  } catch (e) {
+    out.error = String(e);
+    out.stack = (e && e.stack ? String(e.stack) : '').split('\n').slice(0, 4).join(' | ');
+  } finally {
+    for (const tabId of openedTabs) await closeTab(tabId);
+  }
+  return out;
+}
+
 // find page target
 let targets;
 for (let i = 0; i < 40; i++) {
@@ -437,11 +567,47 @@ try {
     results.stockWarmEditMs = Date.now() - t0;
   }
 
+  // ---- preview window (task #37): SW-backed REAL browser tab ----------------
+  // The editor is now on the stock template with a warm engine. Open the rendered
+  // site as a real tab (SW-served real URLs), then assert: cross-page navigation,
+  // F5 reload, back/forward, smart hot reload (edit a page -> its open tab reloads,
+  // an UNRELATED open tab does NOT), and the editor-closed fallback ladder
+  // (cached page = 200; non-cached page = friendly fallback, never a browser error).
+  results.previewWindow = await runPreviewWindowGate(
+    base,
+    ws,
+    (expr) => evalJs(ws, expr),
+    (expr, ms, label) => waitFor(ws, expr, ms, label),
+    page.id,
+  );
+
   console.log(JSON.stringify(results, null, 2));
 
   // assertions
   let ok = true;
   if (results.resourceCount < 5) { console.error('assert: too few resources'); ok = false; }
+  // preview-window gates (task #37).
+  const pw = results.previewWindow || {};
+  if (pw.skipped) {
+    console.error('note: preview-window gate skipped —', pw.skipped);
+  } else {
+    if (!pw.previewCapable) { console.error('assert: preview window not capable (SW missing?)'); ok = false; }
+    if (!(pw.indexRenderedLen > 400)) { console.error('assert: preview index did not render via SW'); ok = false; }
+    if (!pw.snippetInjected) { console.error('assert: hot-reload snippet not injected into preview HTML'); ok = false; }
+    if (!pw.cachedWriteThrough) { console.error('assert: preview page not written through to cache'); ok = false; }
+    if (!pw.crossPageNav) { console.error('assert: cross-page link navigation failed'); ok = false; }
+    if (!(pw.reloadLen > 200)) { console.error('assert: F5 reload did not render'); ok = false; }
+    if (!pw.backWorked) { console.error('assert: back navigation failed'); ok = false; }
+    if (!pw.forwardWorked) { console.error('assert: forward navigation failed'); ok = false; }
+    if (!pw.indexHotReloaded) { console.error('assert: edited page did not hot-reload its preview tab'); ok = false; }
+    if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
+    if (!(pw.cachedAfterClose && pw.cachedAfterClose.status === 200 && pw.cachedAfterClose.len > 200)) {
+      console.error('assert: cached page did not serve 200 after editor closed'); ok = false;
+    }
+    if (!(pw.fallbackAfterClose && pw.fallbackAfterClose.status === 200 && pw.fallbackAfterClose.isFallback)) {
+      console.error('assert: non-cached page did not serve the friendly fallback'); ok = false;
+    }
+  }
   if (results.cleanDiagnostics !== 0) { console.error('assert: clean IG had diagnostics'); ok = false; }
   if (results.snapshotRows < 10) { console.error('assert: snapshot tree too small'); ok = false; }
   if (!results.brokenDiagnostic) { console.error('assert: no broken diagnostic'); ok = false; }
