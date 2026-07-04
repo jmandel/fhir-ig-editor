@@ -259,6 +259,9 @@ export interface EngineOps {
   listSitePages: { args: []; result: { pages: string[] } };
   renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
   renderFragment: { args: [ref: string, kind: string]; result: { html: string } };
+  // ContentApi (TS-liquid sunset): the engine renders all content.
+  renderLiquid: { args: [source: string, data?: Record<string, unknown>]; result: { html: string } };
+  renderMarkdown: { args: [md: string, opts?: { rougeWrappers?: boolean }]; result: { html: string } };
 }
 
 export type Op = keyof EngineOps;

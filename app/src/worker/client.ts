@@ -319,6 +319,16 @@ export class EngineClient {
     return this.call('renderFragment', ref, kind);
   }
 
+  /** ContentApi: engine-side Liquid over the session provider. */
+  async renderLiquid(source: string, data?: Record<string, unknown>): Promise<{ html: string }> {
+    return this.call('renderLiquid', source, data);
+  }
+
+  /** ContentApi: engine-side kramdown (Jekyll markdownify semantics). */
+  async renderMarkdown(md: string, opts?: { rougeWrappers?: boolean }): Promise<{ html: string }> {
+    return this.call('renderMarkdown', md, opts);
+  }
+
   get initialized() {
     return this.inited;
   }

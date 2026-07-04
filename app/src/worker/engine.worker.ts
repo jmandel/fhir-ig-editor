@@ -28,6 +28,8 @@ interface WasmSession {
   buildSiteDb(inputJson: string): string;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
   mountSite(filesJson: string, optionsJson: string): string;
+  renderLiquid(source: string, dataJson: string): string;
+  renderMarkdown(md: string, optsJson: string): string;
   listPages(): string;
   renderPage(name: string): string;
   renderFragment(ref: string, kind: string): string;
@@ -252,6 +254,18 @@ const handlers: Handlers = {
   async renderFragment(ref, kind) {
     const s = await ensureSession();
     return unwrap(s.renderFragment(ref, kind));
+  },
+
+  // ---- ContentApi (TS-liquid sunset): engine renders all content ----
+
+  async renderLiquid(source, data) {
+    const s = await ensureSession();
+    return unwrap(s.renderLiquid(source, data ? JSON.stringify(data) : ''));
+  },
+
+  async renderMarkdown(md, opts) {
+    const s = await ensureSession();
+    return unwrap(s.renderMarkdown(md, opts ? JSON.stringify(opts) : ''));
   },
 };
 
