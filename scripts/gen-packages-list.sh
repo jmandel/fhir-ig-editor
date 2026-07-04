@@ -47,6 +47,13 @@ HEADER="$(cat <<'EOF'
 #                             the walk engine is R5-internal, so R4 profile bases
 #                             resolve against r5.core during snapshot generation.
 #                             Removing it kills the snapshot-tree view.
+#   hl7.fhir.template       — STOCK TEMPLATE CHAIN (#40 live template loader): the
+#   hl7.base.template         default template + its `base` chain. NOT sushi-config
+#   fhir.base.template        deps — the template loader's walk_base_chain decides
+#                             the chain; the editor fetches it on the SAME
+#                             resolve→fetch→mount path then calls mountTemplate.
+#                             Bundling them lets the LIVE path source the chain from
+#                             same-origin baked bundles. Walked by gen-template-chain.sh.
 EOF
 )"
 
@@ -60,6 +67,21 @@ if ! grep -q "^hl7.fhir.r5.core#" <<<"$LABELS"; then
   LABELS="$LABELS
 $R5_LABEL"
 fi
+
+# The STOCK TEMPLATE CHAIN (#40 live template loader): the default template
+# `hl7.fhir.template#1.0.0` and its `base` chain. These are NOT sushi-config deps
+# (resolve_project doesn't surface them) — the template loader's walk_base_chain
+# decides the chain, and the editor fetches it on the SAME resolve→fetch→mount
+# path regular packages take, then calls Session.mountTemplate. Bundling them
+# here lets the LIVE path source them from same-origin baked bundles (registry is
+# the fallback). The chain is walked+verified by scripts/gen-template-chain.sh
+# (fig): hl7.fhir.template#1.0.0 → hl7.base.template#1.0.0 → fhir.base.template#1.0.0.
+TEMPLATE_CHAIN="$("$HERE/gen-template-chain.sh" "hl7.fhir.template#1.0.0" 2>/dev/null || printf 'hl7.fhir.template#1.0.0\nhl7.base.template#1.0.0\nfhir.base.template#1.0.0')"
+while IFS= read -r tl; do
+  [ -z "$tl" ] && continue
+  grep -q "^${tl%%#*}#" <<<"$LABELS" || LABELS="$LABELS
+$tl"
+done <<<"$TEMPLATE_CHAIN"
 
 GENERATED="$HEADER
 $LABELS"

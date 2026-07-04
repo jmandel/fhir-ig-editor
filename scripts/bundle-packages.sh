@@ -38,8 +38,49 @@ if [ ! -x "$BIN" ]; then
   ( cd "$ENGINE" && cargo build --release -p rust_sushi >/dev/null )
 fi
 
-echo "[bundle-packages] bundling ${#LABELS[@]} packages from $CACHE"
-"$BIN" bundle --cache "$CACHE" --out "$OUT" "${LABELS[@]}" >/dev/null
+# Split FHIR-resource packages from TEMPLATE packages (#40). `rust_sushi bundle`
+# reads only `<label>/package/**` (the FHIR-resource convention) — correct for
+# resource packages, but a TEMPLATE package's content (includes/, layouts/, liquid/,
+# config.json) lives at the Publisher-NATIVE top level (`<label>/**`, alongside the
+# `package/` metadata dir), so `rust_sushi bundle` would strip it (a 700-byte
+# index-only tgz). Detect template packages by a top-level content marker and
+# repack them so ALL content sits under `package/` in the tgz: the editor's untar
+# strips `package/` and BundleSource re-adds it, landing content at
+# `<label>/package/**` — exactly where TemplatePaths.content_root's fallback finds
+# it (top-level absent → `package/`), so mountTemplate reads a complete tree.
+FHIR_LABELS=(); TEMPLATE_LABELS=()
+for l in "${LABELS[@]}"; do
+  d="$CACHE/$l"
+  if [ -d "$d/includes" ] || [ -f "$d/config.json" ] || [ -d "$d/layouts" ] || [ -d "$d/liquid" ]; then
+    TEMPLATE_LABELS+=("$l")
+  else
+    FHIR_LABELS+=("$l")
+  fi
+done
+
+echo "[bundle-packages] bundling ${#FHIR_LABELS[@]} FHIR packages from $CACHE"
+"$BIN" bundle --cache "$CACHE" --out "$OUT" "${FHIR_LABELS[@]}" >/dev/null
+
+# Repack each template package: everything under `package/` (excluding the engine
+# index sidecars the loader ignores anyway). The result mounts as a full template
+# tree; the fig-materialized warm-start artifact is the fast path, this baked
+# bundle the LIVE (resolve→fetch→mount→mountTemplate) fallback source (a).
+for l in "${TEMPLATE_LABELS[@]}"; do
+  src="$CACHE/$l"
+  [ -d "$src" ] || { echo "FATAL: template package $l not in cache"; exit 2; }
+  stage="$(mktemp -d)"; mkdir -p "$stage/package"
+  # Copy the whole publisher-native tree under package/, dropping .index.* sidecars.
+  ( cd "$src" && tar cf - --exclude='.index.json' --exclude='.index.db' --exclude='.derived-index.json' . ) | ( cd "$stage/package" && tar xf - )
+  # The tarball's package.json already lives at <label>/package/package.json in the
+  # cache; the copy above nested it at package/package/package.json — flatten it.
+  if [ -f "$stage/package/package/package.json" ]; then
+    cp "$stage/package/package/package.json" "$stage/package/package.json"
+    rm -rf "$stage/package/package"
+  fi
+  ( cd "$stage" && tar czf "$OUT/$l.tgz" package )
+  rm -rf "$stage"
+  echo "[bundle-packages] template $l repacked -> $(du -h "$OUT/$l.tgz" | cut -f1)"
+done
 
 # Emit manifest.json (labels + tgz paths + sizes + a `defer` flag) — what
 # EngineClient.init fetches. `defer:true` marks a bundle the FIRST COMPILE does

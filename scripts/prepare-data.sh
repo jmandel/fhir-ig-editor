@@ -19,6 +19,22 @@ mkdir -p "$REPO/app/public/data/expansions"
 cp -r "$REPO/expansions/." "$REPO/app/public/data/expansions/" 2>/dev/null || true
 # Stage the COMMITTED stock-template site bundles (packed publisher-staged
 # trees; scripts/build-stock-site.mjs regenerates from a publisher build).
+# NB: site-bundles/templates/ (the loader-produced template warm-start artifacts,
+# #40) is staged SEPARATELY below, not as a *-stock.json site bundle.
 mkdir -p "$REPO/app/public/data/sites"
-cp -r "$REPO/site-bundles/." "$REPO/app/public/data/sites/" 2>/dev/null || true
+for f in "$REPO"/site-bundles/*.json; do
+  [ -e "$f" ] && cp "$f" "$REPO/app/public/data/sites/"
+done
+# Stage the COMMITTED loader-produced template warm-start artifacts (#40): the
+# `fig packages bundle --template` output the stock adapter fetches for a warm
+# start of the TEMPLATE layer (the live resolve→fetch→mount→mountTemplate path is
+# the cold path; the byte gate proves they render identically). Filenames carry
+# the template coord with '#' → %23 (URL-safe). Regenerate one with
+# scripts/build-template-bundle.sh <id#ver>.
+mkdir -p "$REPO/app/public/data/templates"
+cp -r "$REPO/site-bundles/templates/." "$REPO/app/public/data/templates/" 2>/dev/null || true
+# Stage the committed E2E fixtures (#40): the synthetic bad-ant template the
+# live-template AntHookError gate loads to prove custom-ant → clear refusal.
+mkdir -p "$REPO/app/public/data/fixtures"
+cp -r "$REPO/scripts/fixtures/bad-ant-template/." "$REPO/app/public/data/fixtures/" 2>/dev/null || true
 echo "[prepare-data] all static data assembled under app/public/"
