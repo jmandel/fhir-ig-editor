@@ -6,7 +6,9 @@
 //
 //   node scripts/fidelity-capture.mjs http://localhost:4173/ out.json
 //
-// Requires headless chromium on --remote-debugging-port=9222.
+// Requires headless chromium on --remote-debugging-port=9222, and a
+// %23-faithful static server for app/dist (python3 -m http.server — NOT
+// `vite preview`, which SPA-fallbacks the encoded-# bundle URLs).
 import fs from 'node:fs';
 
 const base = process.argv[2] || 'http://localhost:4173/';

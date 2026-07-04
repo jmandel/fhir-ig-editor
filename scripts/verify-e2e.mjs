@@ -6,6 +6,11 @@
 //   node scripts/verify-e2e.mjs http://localhost:4173/
 //
 // Requires headless chromium already running with --remote-debugging-port=9222.
+//
+// SERVER CONSTRAINT: serve app/dist with a %23-FAITHFUL static server, e.g.
+//   (cd app/dist && python3 -m http.server 4173)
+// NOT `vite preview` — it decodes %23 to '#' as a fragment delimiter and
+// SPA-fallbacks the bundle .tgz URLs to index.html, so the engine never boots.
 
 const base = process.argv[2] || 'http://localhost:4173/';
 
