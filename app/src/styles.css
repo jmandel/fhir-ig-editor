@@ -307,6 +307,18 @@ body {
   border-radius: 3px;
   padding: 1px 5px;
 }
+.preview-open-window {
+  background: var(--panel, #16161d);
+  color: var(--fg, #e6e6ef);
+  border: 1px solid var(--accent, #4f8cff);
+  border-radius: 4px;
+  padding: 3px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preview-open-window:hover:not(:disabled) { background: var(--accent, #4f8cff); color: #fff; }
+.preview-open-window:disabled { opacity: 0.45; cursor: not-allowed; border-color: var(--border, #2a2a35); }
 .preview-frame {
   flex: 1 1 auto;
   min-height: 0;

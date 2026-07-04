@@ -16,6 +16,11 @@ import { getSiteGenerator, listSiteGenerators, registerSiteGenerator } from './a
 import type { PageInfo } from './adapters/types';
 import { cycleAdapter } from './adapters/cycleAdapter';
 import { stockAdapter } from './adapters/stockAdapter';
+import {
+  ensurePreviewServiceWorker,
+  wirePreviewResponder,
+  updatePreviewSource,
+} from './preview/previewWindow';
 
 // Adapter API v1 build-time registry: the selectable site generators.
 registerSiteGenerator(cycleAdapter);
@@ -73,6 +78,8 @@ export function App() {
   const [siteGeneration, setSiteGeneration] = useState(0);
   const [siteBuilding, setSiteBuilding] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
+  // Preview-window (task #37): whether the SW-backed preview is supported here.
+  const [previewCapable, setPreviewCapable] = useState(false);
 
   // ---- boot: engine + store ------------------------------------------------
   useEffect(() => {
@@ -83,6 +90,12 @@ export function App() {
       // Debug/verification hook: the e2e + fidelity harnesses drive the engine
       // directly (render every page, hash outputs) without UI scraping.
       (window as unknown as { __igDebug?: unknown }).__igDebug = { engine };
+      // Preview-window (task #37): register the SW + render responder early so an
+      // "Open site in new window" tab can be answered as soon as it exists.
+      wirePreviewResponder();
+      void ensurePreviewServiceWorker().then((ok) => {
+        if (!cancelled) setPreviewCapable(ok);
+      });
       const st = await ProjectStore.create();
       if (cancelled) return;
       setStore(st);
@@ -139,7 +152,14 @@ export function App() {
         },
       });
       setSitePages(await adapter.listPages());
-      setSiteGeneration((g) => g + 1);
+      // Preview-window (task #37): point the render responder at the freshly
+      // (re)initialized adapter + a monotonic generation. This drives cache naming,
+      // the SW answer ladder, and the smart hot-reload of any open preview tabs.
+      setSiteGeneration((g) => {
+        const nextGen = g + 1;
+        updatePreviewSource({ generatorId: genId, adapter, generation: nextGen });
+        return nextGen;
+      });
     } catch (e) {
       setSitePages(null);
       setSiteError(String(e));
@@ -458,6 +478,7 @@ export function App() {
                   generation={siteGeneration}
                   building={siteBuilding}
                   error={siteError}
+                  previewCapable={previewCapable}
                 />
               ) : (
                 <div className="panel-empty">Engine not ready.</div>

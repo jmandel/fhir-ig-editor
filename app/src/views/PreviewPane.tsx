@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageInfo, SiteGeneratorAdapter } from '../adapters/types';
+import { previewUrl } from '../preview/previewWindow';
 
 interface Props {
   adapter: SiteGeneratorAdapter;
@@ -20,9 +21,11 @@ interface Props {
   generation: number;
   building: boolean;
   error: string | null;
+  /** Preview-window (task #37): SW-backed real-tab preview is supported here. */
+  previewCapable: boolean;
 }
 
-export function PreviewPane({ adapter, generators, onSelectGenerator, pages, generation, building, error }: Props) {
+export function PreviewPane({ adapter, generators, onSelectGenerator, pages, generation, building, error, previewCapable }: Props) {
   const [current, setCurrent] = useState<string>('index.html');
   const [html, setHtml] = useState<string>('');
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -180,6 +183,21 @@ export function PreviewPane({ adapter, generators, onSelectGenerator, pages, gen
           {building ? 'rebuilding…' : rendering ? 'rendering…' : renderErr ? 'render error' : renderMs != null ? `rendered in ${renderMs.toFixed(0)} ms` : ''}
         </span>
         <span className="preview-note" title="render-on-demand per visible page">on-demand render</span>
+        <button
+          className="preview-open-window"
+          disabled={!previewCapable}
+          title={
+            previewCapable
+              ? 'Open this page as a real site in a new browser tab (live navigation + hot reload)'
+              : 'Preview window needs a Service Worker (unavailable in this browser/context)'
+          }
+          onClick={() => {
+            if (!previewCapable) return;
+            window.open(previewUrl(adapter.id, current), '_blank', 'noopener');
+          }}
+        >
+          Open site in new window ↗
+        </button>
       </div>
       {renderErr ? (
         <div className="preview-error"><pre>{renderErr}</pre></div>
