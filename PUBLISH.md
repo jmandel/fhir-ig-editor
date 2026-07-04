@@ -45,6 +45,97 @@ closed at 1332/1332 + 2 classified); `adapter.invalidate` is structural
 (any compile drops the whole render state — the <1s gate passes without
 finer-grained replay-skip, which remains a future optimization).
 
+## Task #37 — "Open preview in new window" (branch `preview-window`, NOT merged)
+
+A Service-Worker-backed REAL browser tab that serves the rendered IG site under
+`<base>preview/<generator>/<page>` with real navigation (URL bar, links,
+back/forward, F5) and smart hot reload. NO engine change — `vendor/sushi-rs` stays
+pinned; the render path is the existing adapter surface (`renderPage`/`assetBytes`).
+
+### As built (tiers, freshness, lifecycle, scope)
+
+- **Virtual site via SW** (`app/public/preview-sw.js`, scope `<base>preview/`): the
+  SW script sits at `<base>preview-sw.js` (app base = ancestor of the scope), so it
+  claims `<base>preview/` with no `Service-Worker-Allowed` header. Confirmed working
+  under the local `/`-base build; the same derivation (`new URL('./', self.location)`)
+  yields `/fhir-ig-editor/preview/` for project Pages.
+- **Three-tier answer ladder** (foolproof) for a `/preview/` GET:
+  (a) **Cache API** (`igpreview::<generation>`): write-through of every served page +
+  asset; survives editor-tab close and SW restarts.
+  (b) **Live render**: SW → `clients.matchAll` → MessageChannel → an open editor tab
+  renders via the adapter (`renderPage`/`assetBytes`); write-through; returned.
+  (c) **Friendly fallback**: a self-contained 200 HTML page ("this preview isn't
+  rendered yet — reopen the editor", auto-retry every 5s) — never a browser error.
+- **Assets**: preview pages are served with `<base href="<base>preview/<gen>/<dir>/">`
+  so EVERY relative ref (design css/js AND IG images) routes back through the SW. The
+  responder resolves adapter-known bytes via `assetBytes`, and design assets the
+  adapter serves from the app's static tree (cycle's `baseHref`) are fetched and
+  relayed so they too ride the SW as real, cacheable URLs.
+- **Freshness policy**: cache name carries the compile generation; the editor announces
+  each new generation to the SW, which prunes to the newest 2 generations (a
+  just-bumped, still-refilling generation can fall back to the previous complete one).
+  Policy: **bump + lazy/eager refill** — the hot-reload pass eagerly re-renders OPEN
+  pages into the new generation; other pages refill on demand.
+- **Hot reload (designed-in)**: a tiny, clearly-marked (`data-igpreview`) client
+  snippet injected ONLY into preview HTML opens a `BroadcastChannel('igpreview')`,
+  announces `{generator,path,generation}`, and reloads itself ONLY when the editor
+  broadcasts `{type:'reload', paths:[...]}` containing its path. On each new compile
+  generation the editor re-renders every OPEN preview page, byte-compares the fresh
+  render against the bytes currently in the SW cache (what the tab last showed —
+  ignoring only the injected generation stamp), and broadcasts a reload for ONLY the
+  changed pages. Debounced: a newer generation supersedes an in-flight pass. Reload =
+  `location.reload()` (browser restores scroll); fetch-and-swap noted as future work.
+  The snippet fails silent if the channel is gone (editor closed → tab stays static;
+  the SW tiers still serve it).
+- **SW lifecycle**: `skipWaiting()` (install) + `clients.claim()` (activate) so the
+  newest SW controls `/preview/` immediately — safe because it governs ONLY `/preview/`.
+- **Scope guards (asserted in code)**: the fetch handler returns early for any request
+  not same-origin AND under `<base>preview/`. The editor app's own traffic — shell,
+  `/pkg/` wasm, `/data/` bundles (incl. the %23-encoded `.tgz` URLs) — is NEVER
+  intercepted (double protection: registration scope + pathname guard). The %23
+  constraint is untouched because those URLs live under `/data/`, outside `/preview/`.
+- **UI**: an "Open site in new window ↗" button in the preview bar (per selected
+  generator + current page). `window.open` to the preview URL. Disabled with a tooltip
+  when SW is unavailable (private windows / no-SW) — the in-pane preview is unchanged.
+- **Multiple editor tabs**: the SW broadcasts the render request to all editor clients
+  and takes the FIRST reply (the MessageChannel port resolves once — no double-answer).
+
+### Foolproofing checklist (verified vs assumed)
+
+- VERIFIED (headless Chromium, `scripts/verify-e2e.mjs` preview-window gate + standalone
+  probe): SW registers + controls; preview page renders via SW; snippet injected;
+  write-through to cache; cross-page link navigation; F5 reload; back/forward; smart
+  hot reload (edited page's tab reloads, an UNRELATED open tab does NOT); editor-closed
+  fallback ladder (cached page → 200; non-cached page → friendly fallback); button
+  disabled path is code-guarded on `previewCapable`.
+- VERIFIED: the SW never breaks the editor's %23-encoded bundle boot — every E2E run
+  boots the engine with the SW registered.
+- ASSUMED (not exercised headlessly): true private-window/no-SW degradation (the code
+  path is the same `previewCapable=false` branch, asserted enabled in the normal case);
+  Safari specifics; multi-editor-tab race under real concurrency (single-tab verified;
+  the first-reply-wins logic is by construction).
+
+### Gate evidence + latency (this build)
+
+E2E `previewWindow` block: `previewCapable`, `indexRenderedLen 3594`, `snippetInjected`,
+`cachedWriteThrough`, `crossPageNav` (418 KB profile page), `reloadLen 418781`,
+`backWorked`, `forwardWorked`, `indexHotReloaded` (unrelated tab `unrelatedStayedPut`),
+`cachedAfterClose {status:200}`, `fallbackAfterClose {status:200,isFallback:true}` →
+`E2E GATE: PASS`. Latency: **live render 2 ms, cache hit 1.9 ms**; **hot-reload
+edit→tab-updated ≈ 1.5 s** (300 ms edit debounce + warm stock compile/render).
+
+### Merge / deploy steps (coordinator)
+
+1. No engine dependency — `vendor/sushi-rs` stays at its pinned rev. Nothing to bump.
+2. Merge `preview-window` → `main`. `app/public/preview-sw.js` is copied verbatim into
+   `dist/` by Vite (confirmed: `dist/preview-sw.js` present), so it ships at
+   `<base>preview-sw.js` under Pages. No workflow change needed.
+3. CI runs `verify-e2e.mjs` (now incl. the preview-window gate) + tsc + vite build +
+   the byte gates — all green locally.
+4. Verify LIVE at `https://joshuamandel.com/fhir-ig-editor/`: open demo IG → Site
+   preview → "Open site in new window" → navigate links/back/forward/F5; edit a page
+   and watch the open tab hot-reload.
+
 ## ✅ Task #32 — arbitrary-IG runtime loading (SHIPPED; historical notes)
 
 Branch `task-32-arbitrary-ig-loading` makes arbitrary IGs load at runtime with a
