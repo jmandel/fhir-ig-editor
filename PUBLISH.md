@@ -1,6 +1,51 @@
 # PUBLISH — status & operations notes for `jmandel/fhir-ig-editor`
 
-## ⏳ Task #32 — arbitrary-IG runtime loading (GATED on an engine commit)
+## 🚀 F6 — branch `f6-integration`: DEPLOY SEQUENCE (coordinator runs this)
+
+Everything below is committed on `f6-integration` (pushed) with local gates
+green. The engine side lives on `sushi-rs` `snapshot-gen` (coordinator
+verifies/pushes those commits first — the submodule pin here references them).
+
+What ships: Session-only wasm API + render surface; SiteGeneratorAdapter v1
+(cycle TS + stock FHIR-template Rust renderers) with the template selector;
+TS-liquid sunset (engine ContentApi; byte-gate 17/17); live md staging; the
+<1s warm-edit gate in verify-e2e; baked projects `cycle` AND `uscore`
+(US Core is resource-authored — no FSH upstream); packed stock site bundles
+under `site-bundles/` (committed; staged into `app/public/data/sites/` by
+`scripts/prepare-data.sh` + the pages workflow).
+
+1. **Engine first**: confirm `jmandel/sushi-rs` `snapshot-gen` contains the
+   pinned submodule SHA (`git -C vendor/sushi-rs rev-parse HEAD`) and is
+   pushed. CI clones submodules from GitHub — an unpushed pin = red build.
+2. Merge `f6-integration` → `main`, push. `pages.yml` rebuilds the wasm from
+   the pin (binaryen 117), regenerates bundles/manifests, runs the drift +
+   consistency gates, deploys.
+3. **Live verification** (the gates that matter, in order):
+   a. https://joshuamandel.com/fhir-ig-editor/ loads; engine version footer
+      shows the pinned commit.
+   b. Open demo IG → Site preview: cycle generator renders index; switch
+      Template to "FHIR IG template (Rust, stock)" → pages render.
+   c. Edit `input/pagecontent/index.md` → stock-rendered page updates (<1s
+      warm — this is the F6 gate; verify-e2e's `stockWarmEditMs` proves it
+      headlessly at build time).
+   d. Open US Core → wait for the resolver loop (registry fetches, first time
+      is minutes; OPFS-cached after) → stock template lists ~960 pages →
+      `StructureDefinition-us-core-patient.html` renders with tables.
+4. **E2E harness note**: serve `app/dist` with a %23-faithful static server
+   (`python3 -m http.server`), NOT `vite preview` (it SPA-fallbacks the
+   encoded-`#` bundle URLs and the engine never boots).
+5. Rollback = revert the merge commit; the wasm + data artifacts are all
+   build-generated from the pin, so no stale-artifact hazard.
+
+Known limits shipping with this (documented, not hidden): fragment kinds the
+engine does not yet produce fall back to packed staged copies or a loud gap
+marker (instance `-html` narrative = F4b); the us-core in-editor fragment set
+is not yet byte-audited against the native corpus (the native page corpus IS
+closed at 1332/1332 + 2 classified); `adapter.invalidate` is structural
+(any compile drops the whole render state — the <1s gate passes without
+finer-grained replay-skip, which remains a future optimization).
+
+## ✅ Task #32 — arbitrary-IG runtime loading (SHIPPED; historical notes)
 
 Branch `task-32-arbitrary-ig-loading` makes arbitrary IGs load at runtime with a
 Rust-DRIVEN, host-TRANSPORTED package-acquisition loop. It depends on an
