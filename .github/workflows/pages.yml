@@ -130,6 +130,8 @@ jobs:
           bash scripts/bundle-packages.sh
           node scripts/export-ig-manifest.mjs
           node scripts/copy-site-assets.mjs
+          mkdir -p app/public/data/sites
+          cp -r site-bundles/. app/public/data/sites/
 
       # --- Drift gate: wasm output byte-matches native for the whole cycle IG.
       - name: Byte-match gate (wasm vs native)

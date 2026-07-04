@@ -17,4 +17,8 @@ node "$HERE/copy-site-assets.mjs"   # M2: design CSS/fonts for the preview ifram
 # staged copy is not.
 mkdir -p "$REPO/app/public/data/expansions"
 cp -r "$REPO/expansions/." "$REPO/app/public/data/expansions/" 2>/dev/null || true
+# Stage the COMMITTED stock-template site bundles (packed publisher-staged
+# trees; scripts/build-stock-site.mjs regenerates from a publisher build).
+mkdir -p "$REPO/app/public/data/sites"
+cp -r "$REPO/site-bundles/." "$REPO/app/public/data/sites/" 2>/dev/null || true
 echo "[prepare-data] all static data assembled under app/public/"

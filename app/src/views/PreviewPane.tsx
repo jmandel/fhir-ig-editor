@@ -1,32 +1,28 @@
-// M2 Preview: the cycle site generator's rendered IG pages, produced IN THE
-// BROWSER from a Rust-built site.db (wasm build_site_db -> JS row store -> React
-// SSR + liquid in the worker). Edit FSH -> the rendered page updates.
+// Site preview over a SiteGeneratorAdapter (Adapter API v1): the template
+// selector chooses the generator; pages render on demand (selecting a page or
+// recompiling re-renders only the CURRENT page).
 //
-// Render-on-demand per visible page (M2 scope, honest per spec §7): selecting a
-// page or recompiling re-renders only the CURRENT page, not the whole site.
-//
-// The rendered HTML references design assets as `assets/cycle/*.css`,
-// `assets/fonts/*`, `assets/project.css`, `assets/cycle-mark.svg` (copied to
-// public/data/cycle/site-assets/ at build time) and IG images as `X.png`. We inject
-// a <base> for the design assets and rewrite image src/href to worker-served blob
-// URLs, then show it all in a sandboxed iframe.
+// Asset handling: rendered HTML references design assets + IG images by
+// (relative) name. We rewrite src/href/srcset to blob URLs served by the
+// adapter's assetBytes, and inject the adapter's baseHref (when it has one)
+// for assets it serves from the app's static tree.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { EngineClient } from '../worker/client';
-import type { PagePreviewDescriptor, SitePreviewResult } from '../worker/protocol';
-
-const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
-const SITE_ASSETS = `${BASE}data/cycle/site-assets/`;
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { PageInfo, SiteGeneratorAdapter } from '../adapters/types';
 
 interface Props {
-  engine: EngineClient;
-  /** The site build result (page list + asset names) for the current compile. */
-  site: SitePreviewResult | null;
+  adapter: SiteGeneratorAdapter;
+  generators: { id: string; label: string }[];
+  onSelectGenerator: (id: string) => void;
+  /** The adapter's page list for the current compile generation. */
+  pages: PageInfo[] | null;
+  /** Bumped on every adapter (re)init — re-renders the visible page. */
+  generation: number;
   building: boolean;
   error: string | null;
 }
 
-export function PreviewPane({ engine, site, building, error }: Props) {
+export function PreviewPane({ adapter, generators, onSelectGenerator, pages, generation, building, error }: Props) {
   const [current, setCurrent] = useState<string>('index.html');
   const [html, setHtml] = useState<string>('');
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -36,27 +32,37 @@ export function PreviewPane({ engine, site, building, error }: Props) {
 
   // Keep the selected page valid when the page list changes.
   useEffect(() => {
-    if (!site) return;
-    if (!site.pages.some((p) => p.file === current)) {
-      const fallback = site.pages.find((p) => p.file === 'index.html') ?? site.pages[0];
+    if (!pages) return;
+    if (!pages.some((p) => p.file === current)) {
+      const fallback =
+        pages.find((p) => p.file === 'index.html' || p.file === 'en/index.html') ?? pages[0];
       if (fallback) setCurrent(fallback.file);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [site]);
+  }, [pages]);
 
-  const assetNames = useMemo(() => new Set((site?.assets ?? []).map((a) => a.name)), [site]);
-
-  // Build blob URLs for the site.db assets this page might reference (images),
-  // then rewrite src/href in the HTML to those + the <base> for design assets.
+  // Rewrite referenced asset names to blob URLs (adapter-served bytes), then
+  // inject the adapter's <base> for statically-served design assets.
   const prepareHtml = useCallback(
     async (raw: string): Promise<string> => {
-      // Revoke prior blob URLs.
       for (const u of blobUrls.current) URL.revokeObjectURL(u);
       blobUrls.current = [];
 
+      // Collect candidate relative refs (skip absolute URLs, anchors, data:).
+      const names = new Set<string>();
+      const collect = (val: string) => {
+        const base = val.split(/[?#]/)[0];
+        if (!base || /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(base)) return;
+        names.add(base);
+      };
+      for (const m of raw.matchAll(/\b(?:src|href)=(["'])([^"']+)\1/g)) collect(m[2]);
+      for (const m of raw.matchAll(/\bsrcset=(["'])([^"']+)\1/g)) {
+        for (const part of m[2].split(',')) collect(part.trim().split(/\s+/)[0] ?? '');
+      }
+
       const urlByName = new Map<string, string>();
-      for (const name of assetNames) {
-        const a = await engine.assetBytes(name);
+      for (const name of names) {
+        const a = await adapter.assetBytes(name).catch(() => null);
         if (!a) continue;
         const bin = atob(a.base64);
         const bytes = new Uint8Array(bin.length);
@@ -66,7 +72,6 @@ export function PreviewPane({ engine, site, building, error }: Props) {
         blobUrls.current.push(url);
       }
 
-      // Rewrite src="X" / srcset="X ..." for IG image assets to blob URLs.
       let out = raw.replace(/\b(src|href)=(["'])([^"']+)\2/g, (m: string, attr: string, q: string, val: string) => {
         const base = val.split(/[?#]/)[0];
         if (urlByName.has(base)) return `${attr}=${q}${urlByName.get(base)}${q}`;
@@ -84,20 +89,20 @@ export function PreviewPane({ engine, site, building, error }: Props) {
         return `srcset=${q}${rewritten}${q}`;
       });
 
-      // Inject a <base> so design assets (assets/cycle/*.css, fonts, marks) resolve
-      // against the copied site-assets dir. Insert right after <head> (or the doctype).
-      const baseTag = `<base href="${SITE_ASSETS}">`;
-      if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
-      else out = baseTag + out;
+      if (adapter.baseHref) {
+        const baseTag = `<base href="${adapter.baseHref}">`;
+        if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
+        else out = baseTag + out;
+      }
       return out;
     },
-    [assetNames, engine],
+    [adapter],
   );
 
   // Render the current page whenever it changes or the site rebuilds.
   useEffect(() => {
     let cancelled = false;
-    if (!site || !site.pages.some((p) => p.file === current)) {
+    if (!pages || !pages.some((p) => p.file === current)) {
       setHtml('');
       return;
     }
@@ -105,12 +110,12 @@ export function PreviewPane({ engine, site, building, error }: Props) {
     setRenderErr(null);
     (async () => {
       try {
-        const res = await engine.renderPage(current);
+        const res = await adapter.renderPage(current);
         if (cancelled) return;
         const prepared = await prepareHtml(res.html);
         if (cancelled) return;
         setHtml(prepared);
-        setRenderMs(res.renderMs);
+        setRenderMs(res.renderMs ?? null);
       } catch (e) {
         if (!cancelled) setRenderErr(String(e));
       } finally {
@@ -121,26 +126,48 @@ export function PreviewPane({ engine, site, building, error }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, site]);
+  }, [current, pages, generation]);
 
   useEffect(() => () => {
     for (const u of blobUrls.current) URL.revokeObjectURL(u);
   }, []);
 
+  const selector = (
+    <label className="preview-generator-select" title="Site generator / template">
+      Template&nbsp;
+      <select value={adapter.id} onChange={(e) => onSelectGenerator(e.target.value)}>
+        {generators.map((g) => (
+          <option key={g.id} value={g.id}>{g.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+
   if (error) {
-    return <div className="preview-error">Site build failed:<pre>{error}</pre></div>;
+    return (
+      <div className="preview">
+        <div className="preview-bar">{selector}</div>
+        <div className="preview-error">Site build failed:<pre>{error}</pre></div>
+      </div>
+    );
   }
-  if (!site) {
-    return <div className="panel-empty">{building ? 'Building site preview…' : 'No site preview yet.'}</div>;
+  if (!pages) {
+    return (
+      <div className="preview">
+        <div className="preview-bar">{selector}</div>
+        <div className="panel-empty">{building ? 'Building site preview…' : 'No site preview yet.'}</div>
+      </div>
+    );
   }
 
   return (
     <div className="preview">
       <div className="preview-bar">
+        {selector}
         <label className="preview-page-select">
           Page&nbsp;
           <select value={current} onChange={(e) => setCurrent(e.target.value)}>
-            {groupPages(site.pages).map((g) => (
+            {groupPages(pages).map((g) => (
               <optgroup key={g.label} label={g.label}>
                 {g.pages.map((p) => (
                   <option key={p.file} value={p.file}>{p.title}</option>
@@ -152,7 +179,7 @@ export function PreviewPane({ engine, site, building, error }: Props) {
         <span className="preview-status">
           {building ? 'rebuilding…' : rendering ? 'rendering…' : renderErr ? 'render error' : renderMs != null ? `rendered in ${renderMs.toFixed(0)} ms` : ''}
         </span>
-        <span className="preview-note" title="M2: render-on-demand per visible page">on-demand render</span>
+        <span className="preview-note" title="render-on-demand per visible page">on-demand render</span>
       </div>
       {renderErr ? (
         <div className="preview-error"><pre>{renderErr}</pre></div>
@@ -168,9 +195,9 @@ export function PreviewPane({ engine, site, building, error }: Props) {
   );
 }
 
-function groupPages(pages: PagePreviewDescriptor[]) {
-  const order: PagePreviewDescriptor['kind'][] = ['narrative', 'artifacts', 'profile', 'valueset', 'codesystem', 'example', 'generic'];
-  const labels: Record<PagePreviewDescriptor['kind'], string> = {
+function groupPages(pages: PageInfo[]) {
+  const order: PageInfo['kind'][] = ['narrative', 'artifacts', 'profile', 'valueset', 'codesystem', 'example', 'generic'];
+  const labels: Record<PageInfo['kind'], string> = {
     narrative: 'Pages',
     artifacts: 'Index',
     profile: 'Profiles',

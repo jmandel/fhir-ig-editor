@@ -11,7 +11,16 @@ import { EngineClient } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
 import { loadDemoIg } from './vfs/demoIg';
-import type { CompileResult, Diagnostic, EngineVersion, SitePreviewResult } from './worker/protocol';
+import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
+import { getSiteGenerator, listSiteGenerators, registerSiteGenerator } from './adapters/types';
+import type { PageInfo } from './adapters/types';
+import { cycleAdapter } from './adapters/cycleAdapter';
+import { stockAdapter } from './adapters/stockAdapter';
+
+// Adapter API v1 build-time registry: the selectable site generators.
+registerSiteGenerator(cycleAdapter);
+registerSiteGenerator(stockAdapter);
+const GENERATOR_KEY = 'igEditor.siteGenerator';
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -27,6 +36,7 @@ const DEBOUNCE_MS = 300;
 export function App() {
   const engineRef = useRef<EngineClient | null>(null);
   const [store, setStore] = useState<ProjectStore | null>(null);
+  const storeRef = useRef<ProjectStore | null>(null);
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
@@ -52,9 +62,13 @@ export function App() {
   // whole closure on every keystroke — only when dependencies/fhirVersion change).
   const acquiredConfigRef = useRef<string | null>(null);
 
-  // M2 site preview.
+  // Site preview (adapter-driven).
   const [inspectTab, setInspectTab] = useState<'resource' | 'preview'>('resource');
-  const [site, setSite] = useState<SitePreviewResult | null>(null);
+  const [generatorId, setGeneratorId] = useState<string>(
+    () => localStorage.getItem(GENERATOR_KEY) || 'cycle',
+  );
+  const [sitePages, setSitePages] = useState<PageInfo[] | null>(null);
+  const [siteGeneration, setSiteGeneration] = useState(0);
   const [siteBuilding, setSiteBuilding] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
 
@@ -70,6 +84,7 @@ export function App() {
       const st = await ProjectStore.create();
       if (cancelled) return;
       setStore(st);
+      storeRef.current = st;
       st.listeners.add(() => setPaths(st.list()));
       setPaths(st.list());
 
@@ -96,29 +111,49 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- site preview build (M2): compile -> rows -> page list. --------------
-  const runBuildSite = useCallback(async (st: ProjectStore, engine: EngineClient) => {
+  // ---- site preview build: adapter init for this compile generation. -------
+  const runBuildSite = useCallback(async (st: ProjectStore, engine: EngineClient, genId: string) => {
     setSiteBuilding(true);
     setSiteError(null);
     try {
+      const adapter = getSiteGenerator(genId);
+      if (!adapter) throw new Error(`no site generator '${genId}'`);
       // A fixed injected timestamp keeps rebuilds deterministic (spec §2c). The
       // absolute value is irrelevant for the preview; only stability matters.
-      const epoch = 1700000000;
-      const res = await engine.buildSite(
-        st.config(),
-        st.fshFiles(),
-        st.predefinedResources(),
-        st.siteFiles(),
-        epoch,
-      );
-      setSite(res);
+      await adapter.init({
+        engine,
+        fragments: { fragment: (ref, kind) => engine.renderFragment(ref, kind).then((r) => r.html) },
+        content: {
+          renderLiquid: (src, data) => engine.renderLiquid(src, data).then((r) => r.html),
+          renderMarkdown: (md, opts) => engine.renderMarkdown(md, opts).then((r) => r.html),
+        },
+        project: {
+          config: st.config(),
+          files: st.fshFiles(),
+          predefined: st.predefinedResources(),
+          siteFiles: st.siteFiles(),
+          buildEpochSecs: 1700000000,
+        },
+      });
+      setSitePages(await adapter.listPages());
+      setSiteGeneration((g) => g + 1);
     } catch (e) {
-      setSite(null);
+      setSitePages(null);
       setSiteError(String(e));
     } finally {
       setSiteBuilding(false);
     }
   }, []);
+
+  // Template switch: persist + rebuild the preview for the new generator.
+  const switchGenerator = useCallback((id: string) => {
+    localStorage.setItem(GENERATOR_KEY, id);
+    setGeneratorId(id);
+    setSitePages(null);
+    if (storeRef.current && engineRef.current) {
+      void runBuildSite(storeRef.current, engineRef.current, id);
+    }
+  }, [runBuildSite]);
 
   // ---- compile (full project) ----------------------------------------------
   const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient) => {
@@ -158,7 +193,7 @@ export function App() {
       // Rebuild the site preview rows (only when the compile had no fatal errors —
       // a broken IG can't produce a coherent site.db). Fire-and-forget.
       const hasError = result.diagnostics.some((d) => d.severity === 'error');
-      if (!hasError) void runBuildSite(st, engine);
+      if (!hasError) void runBuildSite(st, engine, localStorage.getItem(GENERATOR_KEY) || 'cycle');
       else setSiteError('Fix the FSH errors to update the site preview.');
     } catch (e) {
       setCompile({
@@ -403,8 +438,11 @@ export function App() {
                 )
               ) : engineRef.current ? (
                 <PreviewPane
-                  engine={engineRef.current}
-                  site={site}
+                  adapter={getSiteGenerator(generatorId) ?? cycleAdapter}
+                  generators={listSiteGenerators().map((g) => ({ id: g.id, label: g.label }))}
+                  onSelectGenerator={switchGenerator}
+                  pages={sitePages}
+                  generation={siteGeneration}
                   building={siteBuilding}
                   error={siteError}
                 />

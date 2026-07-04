@@ -32,15 +32,21 @@ const send = (method, params = {}) =>
     pend.set(id, res);
     ws.send(JSON.stringify({ id, method, params }));
   });
-const ev = async (expression) => {
+const ev = async (expression, tag = '') => {
   const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-  if (r.result?.exceptionDetails) throw new Error('page threw: ' + JSON.stringify(r.result.exceptionDetails).slice(0, 500));
+  if (r.result?.exceptionDetails)
+    throw new Error(`page threw [${tag}]: ` + JSON.stringify(r.result.exceptionDetails).slice(0, 500));
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 await send('Page.enable');
 await send('Runtime.enable');
+// The fidelity gate is defined over the CYCLE generator's output — pin it
+// regardless of what a previous session left in localStorage.
+await send('Page.navigate', { url: base });
+await sleep(1000);
+await ev(`localStorage.setItem('igEditor.siteGenerator', 'cycle')`, 'pin-generator');
 await send('Page.navigate', { url: base });
 
 // Cold profile: wait for the welcome card and open the demo IG. Warm profile
@@ -74,7 +80,7 @@ if (!pages || !pages.length) throw new Error('no page list');
 
 const result = {};
 for (const file of pages) {
-  const html = await ev(`window.__igDebug.engine.renderPage(${JSON.stringify(file)}).then(r => r.html)`);
+  const html = await ev(`window.__igDebug.engine.renderPage(${JSON.stringify(file)}).then(r => r.html)`, 'render:'+file);
   result[file] = html;
 }
 fs.writeFileSync(out, JSON.stringify(result, null, 1));
