@@ -52,9 +52,11 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   label = 'FHIR IG template (Rust, stock)';
 
   private engine: EngineClient | null = null;
-  /** The packed site tree (fetched once per project; re-mounted per compile). */
+  /** The packed site tree (fetched once per project; mounted ONCE — later
+   *  inits merge only the live overlay, keeping the warm-edit path fast). */
   private tree: Record<string, SiteTreeFile> | null = null;
   private treeProject: string | null = null;
+  private mountedProject: string | null = null;
   /** Multi-language (en/) vs flat page layout — detected from the bundle. */
   private pagePrefix = '';
   private pages: PageInfo[] = [];
@@ -75,13 +77,14 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     // is not needed for an R4 IG, but the context closure must be mounted —
     // App's acquireForProject already guarantees that before compile.
     const packed = await this.ensureTree(ctx.project.projectId);
+    const fullMount = this.mountedProject !== ctx.project.projectId;
     // LIVE md staging (the publisher's exact transform, verified byte-level on
     // us-core AND cycle F0 builds): each input/pagecontent/<name>.md is staged
     // as (a) a byte-copy at _includes/<name>.md and (b) a CRLF front-matter
     // shim page `{% include template-page-md.html %}`. Overlaying the CURRENT
     // project bytes here makes pagecontent edits live: compile -> re-init ->
     // re-mount -> the page renders from the edited markdown.
-    const tree: Record<string, SiteTreeFile> = { ...packed };
+    const tree: Record<string, SiteTreeFile> = fullMount ? { ...packed } : {};
     const SHIM = '---\r\n---\r\n{% include template-page-md.html %}';
     for (const [path, b64] of Object.entries(ctx.project.siteFiles)) {
       const m = path.match(/^input\/pagecontent\/([^/]+)\.md$/);
@@ -95,13 +98,16 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       tree[`_includes/en/${name}.md`] = { b64 };
       tree[`_includes/${name}.md`] = { b64 };
       const shimKey = `${this.pagePrefix}${name}.html`;
-      if (!(shimKey in tree)) tree[shimKey] = SHIM;
+      if (!(shimKey in packed)) tree[shimKey] = SHIM;
     }
     await ctx.engine.mountSite(tree, {
       activeTables: true,
       runUuid: RUN_UUID,
-      // engine-first is the default; stated for the contrast with cycle.
+      // engine-first is the default; merge=false only on the FIRST mount of a
+      // project (the big packed tree); warm re-inits send just the overlay.
+      merge: !fullMount,
     });
+    this.mountedProject = ctx.project.projectId;
     const { pages } = await ctx.engine.listSitePages();
     const prefix = this.pagePrefix;
     this.pages = pages

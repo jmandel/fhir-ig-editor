@@ -229,6 +229,8 @@ export type SiteTreeFile = string | { b64: string };
 export interface StockSiteOptions {
   activeTables?: boolean;
   runUuid?: string;
+  /** Merge into the mounted tree instead of replacing (overlay fast-path). */
+  merge?: boolean;
 }
 
 export interface EngineOps {
