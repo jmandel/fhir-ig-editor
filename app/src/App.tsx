@@ -27,6 +27,8 @@ registerSiteGenerator(cycleAdapter);
 registerSiteGenerator(stockAdapter);
 const GENERATOR_KEY = 'igEditor.siteGenerator';
 const PROJECT_KEY = 'igEditor.project';
+const TEMPLATE_KEY = 'igEditor.templateCoord';
+const DEFAULT_TEMPLATE = 'hl7.fhir.template#1.0.0';
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -78,6 +80,25 @@ export function App() {
   const [siteGeneration, setSiteGeneration] = useState(0);
   const [siteBuilding, setSiteBuilding] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
+  // Live template loader (#40): the selected stock template#version + the last
+  // load error (custom-ant refusal etc.). The coord persists across reloads.
+  const [templateCoord, setTemplateCoord] = useState<string>(
+    () => localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
+  );
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  // Curated templates' live version catalogs (#40 default UX): fetched from the
+  // registry (OPFS-cached, TTL, last-known-good, pinned fallback) so the selector
+  // offers a version list with NO typing. Null until first load.
+  const [templateCatalogs, setTemplateCatalogs] = useState<Record<string, import('./adapters/templateCatalog').TemplateCatalog> | null>(null);
+  // Whether the user has EXPLICITLY chosen a template this session (persisted key
+  // present). If not, the boot catalog load defaults the coord to the family's
+  // latest PUBLISHED version rather than the hardcoded DEFAULT_TEMPLATE.
+  const userPickedTemplateRef = useRef<boolean>(localStorage.getItem(TEMPLATE_KEY) != null);
+  // The last template that loaded cleanly, so a failed load can fall back to it
+  // (the selector never wedges — a bad template reverts to the previous one).
+  const lastGoodTemplateRef = useRef<string>(
+    localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
+  );
   // Preview-window (task #37): whether the SW-backed preview is supported here.
   const [previewCapable, setPreviewCapable] = useState(false);
 
@@ -126,6 +147,40 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- template catalogs (#40 default UX): load the curated families' live
+  // version lists on boot (registry → OPFS/TTL/last-known-good/pinned fallback).
+  // If the user hasn't explicitly picked a template, default the coord to the
+  // current family's LATEST PUBLISHED version (not the hardcoded 1.0.0), so the
+  // selector opens on a real, newest release with zero typing.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { getCuratedCatalogs } = await import('./adapters/templateCatalog');
+      const cats = await getCuratedCatalogs();
+      if (cancelled) return;
+      setTemplateCatalogs(cats);
+      if (!userPickedTemplateRef.current) {
+        // Default to the DEFAULT_TEMPLATE family's latest published version.
+        const hash = DEFAULT_TEMPLATE.lastIndexOf('#');
+        const defId = hash < 0 ? DEFAULT_TEMPLATE : DEFAULT_TEMPLATE.slice(0, hash);
+        const latest = cats[defId]?.latest ?? cats[defId]?.versions[0];
+        if (latest) {
+          const coord = `${defId}#${latest}`;
+          if (coord !== templateCoord) {
+            setTemplateCoord(coord);
+            lastGoodTemplateRef.current = coord;
+            // Do NOT persist — this is a derived default, not a user choice, so a
+            // future newer release still becomes the default on the next visit.
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---- site preview build: adapter init for this compile generation. -------
   const runBuildSite = useCallback(async (st: ProjectStore, engine: EngineClient, genId: string) => {
     setSiteBuilding(true);
@@ -133,6 +188,16 @@ export function App() {
     try {
       const adapter = getSiteGenerator(genId);
       if (!adapter) throw new Error(`no site generator '${genId}'`);
+      // Live template loader (#40): tell the stock adapter which template#version
+      // to materialize BEFORE init. Surface the template fetch/materialize stages
+      // (chain fetch, mountTemplate) through the shared progress → status line.
+      if (genId === 'hl7.fhir.template') {
+        stockAdapter.setTemplate(localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE);
+        engine.setProgress((ev) => {
+          setProgress(ev);
+          setStatus(ev.message);
+        });
+      }
       // A fixed injected timestamp keeps rebuilds deterministic (spec §2c). The
       // absolute value is irrelevant for the preview; only stability matters.
       await adapter.init({
@@ -152,6 +217,13 @@ export function App() {
         },
       });
       setSitePages(await adapter.listPages());
+      // Template loaded cleanly — remember it as the fallback + clear any prior
+      // load error (#40).
+      if (genId === 'hl7.fhir.template') {
+        const coord = localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
+        lastGoodTemplateRef.current = coord;
+        setTemplateError(null);
+      }
       // Preview-window (task #37): point the render responder at the freshly
       // (re)initialized adapter + a monotonic generation. This drives cache naming,
       // the SW answer ladder, and the smart hot-reload of any open preview tabs.
@@ -163,8 +235,10 @@ export function App() {
     } catch (e) {
       setSitePages(null);
       setSiteError(String(e));
+      throw e; // let selectTemplate see the failure so it can fall back
     } finally {
       setSiteBuilding(false);
+      if (genId === 'hl7.fhir.template') engine.setProgress(null);
     }
   }, []);
 
@@ -174,8 +248,31 @@ export function App() {
     setGeneratorId(id);
     setSitePages(null);
     if (storeRef.current && engineRef.current) {
-      void runBuildSite(storeRef.current, engineRef.current, id);
+      void runBuildSite(storeRef.current, engineRef.current, id).catch(() => {});
     }
+  }, [runBuildSite]);
+
+  // Live template loader (#40): select a template#version (known or write-your-own).
+  // Persist it, re-init the stock adapter; on failure (custom-ant refusal, chain
+  // unfetchable) surface the message and FALL BACK to the previous good template
+  // so the selector never wedges.
+  const selectTemplate = useCallback((coord: string) => {
+    const previous = lastGoodTemplateRef.current;
+    userPickedTemplateRef.current = true; // an explicit choice — persist + honor it.
+    localStorage.setItem(TEMPLATE_KEY, coord);
+    setTemplateCoord(coord);
+    setTemplateError(null);
+    setSitePages(null);
+    if (!storeRef.current || !engineRef.current) return;
+    void runBuildSite(storeRef.current, engineRef.current, 'hl7.fhir.template').catch((e) => {
+      // Revert to the last template that loaded — never leave the preview wedged.
+      setTemplateError(String(e).replace(/^Error:\s*/, ''));
+      localStorage.setItem(TEMPLATE_KEY, previous);
+      setTemplateCoord(previous);
+      if (previous !== coord && storeRef.current && engineRef.current) {
+        void runBuildSite(storeRef.current, engineRef.current, 'hl7.fhir.template').catch(() => {});
+      }
+    });
   }, [runBuildSite]);
 
   // ---- compile (full project) ----------------------------------------------
@@ -216,7 +313,7 @@ export function App() {
       // Rebuild the site preview rows (only when the compile had no fatal errors —
       // a broken IG can't produce a coherent site.db). Fire-and-forget.
       const hasError = result.diagnostics.some((d) => d.severity === 'error');
-      if (!hasError) void runBuildSite(st, engine, localStorage.getItem(GENERATOR_KEY) || 'cycle');
+      if (!hasError) void runBuildSite(st, engine, localStorage.getItem(GENERATOR_KEY) || 'cycle').catch(() => {});
       else setSiteError('Fix the FSH errors to update the site preview.');
     } catch (e) {
       setCompile({
@@ -479,6 +576,10 @@ export function App() {
                   building={siteBuilding}
                   error={siteError}
                   previewCapable={previewCapable}
+                  currentTemplate={templateCoord}
+                  onSelectTemplate={selectTemplate}
+                  templateError={templateError}
+                  templateCatalogs={templateCatalogs}
                 />
               ) : (
                 <div className="panel-empty">Engine not ready.</div>

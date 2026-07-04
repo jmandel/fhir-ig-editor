@@ -64,6 +64,12 @@ export interface SiteGeneratorAdapter {
   invalidate?(dirty: string[]): void;
 }
 
+// The curated stock templates + their LIVE registry version catalogs live in
+// `./templateCatalog` (#40 default UX). ONE wasm renderer materializes ANY
+// template as DATA; the selector offers the curated families' published versions
+// AND an advanced write-your-own `id#version` input — any resolvable template
+// loads, so the curated set is a convenience, not a whitelist.
+
 const registry = new Map<string, SiteGeneratorAdapter>();
 
 /** Build-time registry (Adapter API v1): modules register at import time. */

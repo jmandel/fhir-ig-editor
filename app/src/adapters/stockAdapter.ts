@@ -1,14 +1,30 @@
 // The stock FHIR IG template as a SiteGeneratorAdapter — the Rust renderer
-// (F5 page pass) behind the Adapter API v1 shim. ONE wasm renderer, template
-// bundles as DATA: this entry mounts the packed publisher-staged site tree
-// (template scripts, statics, _data, txcache) and renders pages through
-// Session.renderPage. Fragment kinds regenerate LIVE from the current compile
-// (engine-first include order); staged copies only serve kinds the engine
-// does not produce yet (documented gaps, e.g. instance -html narrative, F4b).
+// (F5 page pass) behind the Adapter API v1 shim. ONE wasm renderer drives ANY
+// `template#version` (#40): the template package chain is DATA, materialized by
+// the engine's loader — either LIVE (resolve→fetch→mount→Session.mountTemplate)
+// or from a committed `fig packages bundle --template` warm-start artifact (both
+// mount the byte-identical tree). The IG layer (pages/_data/txcache/IG fragments)
+// is the packed `{projectId}-stock.json`; the template layer overlays it, so the
+// loader-produced template is authoritative. Fragment kinds regenerate LIVE from
+// the current compile (engine-first include order); staged copies only serve
+// kinds the engine does not produce yet (documented gaps, e.g. instance -html
+// narrative, F4b).
 
 import type { AdapterContext, PageInfo, SiteGeneratorAdapter } from './types';
 import type { EngineClient } from '../worker/client';
 import type { SiteTreeFile } from '../worker/protocol';
+
+/** The default stock template#version (US Core / cycle render at parity with it).
+ *  Matches the curated default family + the committed warm-start artifact under
+ *  data/templates/. The App may set any other coord via setTemplate (the selector
+ *  defaults to the family's LATEST PUBLISHED version once the catalog loads). */
+const DEFAULT_TEMPLATE = 'hl7.fhir.template#1.0.0';
+
+/** An AntHookError surfaced from mountTemplate always contains these substrings
+ *  (loader Display text): a custom-ant template we refuse to run in-browser. */
+function isAntHookError(msg: string): boolean {
+  return /never execute ant|server-side/i.test(msg);
+}
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -48,18 +64,38 @@ function classify(name: string): PageInfo['kind'] {
 }
 
 class StockTemplateAdapter implements SiteGeneratorAdapter {
+  // The registry key / selector value the App + E2E gate reference. ONE adapter
+  // instance drives every template#version (the coord is state, not the id).
   id = 'hl7.fhir.template';
-  label = 'FHIR IG template (Rust, stock)';
+  get label(): string {
+    return `FHIR IG template ${this.templateCoord} (Rust, stock)`;
+  }
 
   private engine: EngineClient | null = null;
-  /** The packed site tree (fetched once per project; mounted ONCE — later
+  /** The packed IG-layer tree (fetched once per project; mounted ONCE — later
    *  inits merge only the live overlay, keeping the warm-edit path fast). */
   private tree: Record<string, SiteTreeFile> | null = null;
   private treeProject: string | null = null;
   private mountedProject: string | null = null;
+  /** The template#version to materialize. Set by the App from the selector
+   *  (default = the stock HL7 FHIR IG template). */
+  private templateCoord = DEFAULT_TEMPLATE;
+  /** The `(project, template)` the template LAYER was last materialized for, so a
+   *  template switch (or project change) forces a fresh materialize + re-mount. */
+  private mountedTemplateFor: string | null = null;
   /** Multi-language (en/) vs flat page layout — detected from the bundle. */
   private pagePrefix = '';
   private pages: PageInfo[] = [];
+
+  /** Select the template#version to render with (App → selector). Changing it
+   *  invalidates the mounted template layer AND forces a full IG re-mount so the
+   *  next init re-materializes cleanly. No-op if unchanged. */
+  setTemplate(coord: string): void {
+    if (coord === this.templateCoord) return;
+    this.templateCoord = coord;
+    this.mountedTemplateFor = null;
+    this.mountedProject = null; // force a full IG-layer re-mount under the new template
+  }
 
   private async ensureTree(projectId: string): Promise<Record<string, SiteTreeFile>> {
     if (this.tree && this.treeProject === projectId) return this.tree;
@@ -108,6 +144,39 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       merge: !fullMount,
     });
     this.mountedProject = ctx.project.projectId;
+
+    // TEMPLATE LAYER (#40). Materialize the selected template#version and overlay
+    // it LAST, so the loader-produced template (`_includes/fragment-*.html`,
+    // `_includes/template-page*.html`, template assets) is authoritative over any
+    // stale copy baked into the packed IG bundle. Materialized once per
+    // (project, template); a template switch or project change re-does it.
+    //   - WARM path: the committed `fig packages bundle --template` artifact
+    //     (already the loader's bytes) mounted via mountSite(merge).
+    //   - LIVE path (no committed artifact): resolve→fetch→mount the base chain,
+    //     then Session.mountTemplate materializes it into the site tree.
+    // Both mount the byte-identical `_includes/*`+`template/*` tree (byte gate).
+    const templateKey = `${ctx.project.projectId}::${this.templateCoord}`;
+    if (this.mountedTemplateFor !== templateKey || fullMount) {
+      try {
+        const warm = await ctx.engine.fetchTemplateArtifact(this.templateCoord);
+        if (warm) {
+          await ctx.engine.mountSite(warm, { activeTables: true, runUuid: RUN_UUID, merge: true });
+        } else {
+          await ctx.engine.mountTemplateChain(this.templateCoord);
+        }
+        this.mountedTemplateFor = templateKey;
+      } catch (e) {
+        const msg = String(e);
+        if (isAntHookError(msg)) {
+          throw new Error(
+            `Template ${this.templateCoord} needs server-side rendering (it wires custom ant hooks, ` +
+              `which we never execute in the browser). Pick another template.`,
+          );
+        }
+        throw new Error(`Loading template ${this.templateCoord} failed: ${msg}`);
+      }
+    }
+
     const { pages } = await ctx.engine.listSitePages();
     const prefix = this.pagePrefix;
     this.pages = pages
