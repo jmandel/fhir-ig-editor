@@ -20,12 +20,16 @@ import type {
   MountResult,
   ProgressEvent,
   RenderPageResult,
+  ResolutionStep,
   SitePreviewResult,
   SnapshotResult,
+  VersionIndex,
   WorkerReply,
   WorkerRequest,
 } from './protocol';
 import { readCachedBundle, writeCachedBundle } from './bundleCache';
+import type { ResolveOutcome } from './packageResolver';
+export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -55,6 +59,9 @@ export class EngineClient {
   private inited = false;
   /** Deferred bundle entries (from the manifest) not mounted at init time. */
   private deferred: BundleEntry[] = [];
+  /** The baked manifest's `label -> entry` map, kept so the runtime resolver can
+   *  source a missing package from a same-origin prebuilt bundle (task #32). */
+  private bakedByLabel = new Map<string, BundleEntry>();
   /** A single in-flight lazy-mount promise so concurrent snapshot/site builds
    *  share one fetch of the deferred bundles. */
   private deferredMount: Promise<void> | null = null;
@@ -125,6 +132,7 @@ export class EngineClient {
       await fetch(`${BASE}data/bundles/manifest.json`)
     ).json();
 
+    for (const b of manifest.bundles) this.bakedByLabel.set(b.label, b);
     const eager = manifest.bundles.filter((b) => !b.defer);
     this.deferred = manifest.bundles.filter((b) => b.defer);
 
@@ -183,6 +191,57 @@ export class EngineClient {
       this.deferredMount = null;
     });
     return this.deferredMount;
+  }
+
+  // ---- runtime package resolution (task #32) ----
+
+  /** Set/replace the progress callback used by acquisition + lazy mounts (so the
+   *  UI can surface resolve/registry-fetch/blocked stages outside init). */
+  setProgress(cb: ProgressCb | null): void {
+    this.progressCb = cb;
+  }
+
+  /** Ingest a user-dropped `.tgz` into the session-local package store (source d:
+   *  air-gapped / registry-blocked). The next `acquireForProject` will prefer it
+   *  over the network. Returns the `id#version` label it registered. */
+  async ingestLocalTgz(tgz: ArrayBuffer): Promise<string> {
+    const { ingestTgz } = await import('./localPackages');
+    return ingestTgz(tgz);
+  }
+
+
+  /** Ask the engine to resolve the project's package sets against the CURRENTLY
+   *  mounted bundles. The resolution logic is entirely in Rust; this is transport.*/
+  async resolveStep(config: string, versionIndex?: VersionIndex): Promise<ResolutionStep> {
+    return this.call<ResolutionStep>({ type: 'resolveProject', config, versionIndex });
+  }
+
+  /** Run the full resolve → fetch → mount → resolve acquisition loop for a
+   *  project, driven ONLY by the engine's ResolutionStep. Fetches missing
+   *  packages from (a) same-origin prebuilt bundles, (b) local .tgz drops,
+   *  (c) the FHIR registry, (d) an optional proxy — mounting each until the engine
+   *  reports `satisfied`. Packages no source can supply come back as a precise
+   *  `blocked` list for the UI. Safe to call before every compile of an arbitrary
+   *  IG; it is a no-op once the closure is already mounted. */
+  async acquireForProject(config: string): Promise<ResolveOutcome> {
+    const { acquireForProject } = await import('./packageResolver');
+    return acquireForProject(
+      {
+        resolveStep: (cfg, idx) => this.resolveStep(cfg, idx),
+        mount: async (bundles) => {
+          const r = await this.call<MountResult>({ type: 'mountBundles', bundles });
+          void r;
+        },
+        bakedBundle: (label) => {
+          const e = this.bakedByLabel.get(label);
+          return e ? { tgz: e.tgz, bytes: e.bytes } : undefined;
+        },
+        fetchBaked: (label, tgz) =>
+          this.loadBundle({ label, tgz }, 'Loading (dependency)'),
+      },
+      config,
+      (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+    );
   }
 
   async compile(

@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EngineClient } from './worker/client';
+import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
 import { loadDemoIg } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion, SitePreviewResult } from './worker/protocol';
@@ -18,6 +19,7 @@ import { ResourceInspector } from './views/ResourceInspector';
 import { BuildStatus } from './views/BuildStatus';
 import { PreviewPane } from './views/PreviewPane';
 import { TxSettings } from './views/TxSettings';
+import { PackageSettings } from './views/PackageSettings';
 import type { ProgressEvent } from './worker/protocol';
 
 const DEBOUNCE_MS = 300;
@@ -43,6 +45,12 @@ export function App() {
   const [compiling, setCompiling] = useState(false);
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
+
+  // task #32: packages the runtime resolver could not obtain from any source.
+  const [blockedPackages, setBlockedPackages] = useState<BlockedPackage[]>([]);
+  // The last config we ran package acquisition for (so we don't re-resolve the
+  // whole closure on every keystroke — only when dependencies/fhirVersion change).
+  const acquiredConfigRef = useRef<string | null>(null);
 
   // M2 site preview.
   const [inspectTab, setInspectTab] = useState<'resource' | 'preview'>('resource');
@@ -114,7 +122,29 @@ export function App() {
     if (!engine.initialized) return;
     setCompiling(true);
     try {
-      const result = await engine.compile(st.config(), st.fshFiles(), st.predefinedResources());
+      const cfg = st.config();
+      // task #32: ensure this project's package closure is mounted before compiling.
+      // Runs only when the config (deps/fhirVersion) changed since the last
+      // acquisition — the loop is a no-op once the closure is mounted, so this is
+      // cheap on subsequent keystrokes. Blocked packages surface in the UI.
+      if (cfg !== acquiredConfigRef.current) {
+        engine.setProgress((ev) => {
+          setProgress(ev);
+          setStatus(ev.message);
+        });
+        try {
+          const outcome = await engine.acquireForProject(cfg);
+          setBlockedPackages(outcome.blocked);
+          acquiredConfigRef.current = cfg;
+        } catch (e) {
+          // Acquisition failure is non-fatal: compile with whatever is mounted and
+          // let the compiler's own diagnostics report unresolved references.
+          setStatus(`Package acquisition warning: ${String(e)}`);
+        } finally {
+          engine.setProgress(null);
+        }
+      }
+      const result = await engine.compile(cfg, st.fshFiles(), st.predefinedResources());
       setCompile(result);
       // Default-select the first StructureDefinition for the inspector.
       setSelectedResource((cur) => {
@@ -230,6 +260,21 @@ export function App() {
               in-memory
             </span>
           )}
+          <PackageSettings
+            onChange={() => {
+              // A registry/proxy/local-package change may unblock packages — allow
+              // the next compile to re-run acquisition.
+              acquiredConfigRef.current = null;
+              setSettingsVersion((v) => v + 1);
+            }}
+            onDropTgz={async (bytes) => {
+              const label = (await engineRef.current?.ingestLocalTgz(bytes)) ?? '';
+              // A newly-provided package may satisfy a previously-blocked closure.
+              acquiredConfigRef.current = null;
+              if (store && engineRef.current) void runCompile(store, engineRef.current);
+              return label;
+            }}
+          />
           <TxSettings onChange={() => setSettingsVersion((v) => v + 1)} />
           <button className="btn" disabled={!engineReady} onClick={openDemo}>
             Open demo IG
@@ -238,6 +283,28 @@ export function App() {
       </header>
 
       <div className="statusline">{status}</div>
+
+      {blockedPackages.length > 0 && (
+        <div className="blocked-banner" role="alert">
+          <strong>
+            {blockedPackages.length} package{blockedPackages.length > 1 ? 's' : ''} could not be
+            loaded:
+          </strong>
+          <ul>
+            {blockedPackages.map((b) => (
+              <li key={`${b.packageId}#${b.version}`}>
+                <code>
+                  {b.packageId}#{b.version}
+                </code>{' '}
+                — {b.why}
+                <div className="blocked-remedies">
+                  Remedies: {b.remedies.join(' · ')}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {!projectLoaded ? (
         <div className="welcome">

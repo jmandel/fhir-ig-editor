@@ -140,6 +140,30 @@ body {
   font-family: var(--mono);
 }
 
+/* ---- blocked-packages banner (task #32) ---- */
+.blocked-banner {
+  padding: 8px 14px;
+  background: #fdf3e7;
+  border-bottom: 1px solid #e0b070;
+  color: #7a4a10;
+  font-size: 12px;
+}
+.blocked-banner ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.blocked-banner code {
+  font-family: var(--mono);
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.blocked-remedies {
+  color: #9a6a30;
+  font-size: 11px;
+  margin: 2px 0 4px;
+}
+
 /* ---- welcome ---- */
 .welcome {
   display: flex;

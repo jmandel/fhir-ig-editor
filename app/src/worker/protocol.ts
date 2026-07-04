@@ -68,9 +68,12 @@ export interface ProgressEvent {
   stage:
     | 'wasm'
     | 'manifest'
+    | 'resolve'
     | 'bundle-fetch'
     | 'bundle-cache-hit'
     | 'bundle-mount'
+    | 'registry-fetch'
+    | 'package-blocked'
     | 'ready'
     | 'lazy-fetch';
   label?: string;
@@ -168,9 +171,48 @@ export type ExpandResult =
     }
   | { ok: false; notEnumerable: NotEnumerable; expandMs: number };
 
+// ---- package resolution (task #32: runtime arbitrary-IG loading) ----------
+
+/** A concrete package coordinate the engine resolved. */
+export interface PackageRequestCoord {
+  package_id: string;
+  version: string;
+}
+
+/** Why a referenced package is not yet satisfiable from the mounted set. */
+export type MissingReason =
+  | { kind: 'not_mounted' }
+  | { kind: 'unresolved_version'; requested: string };
+
+/** A package the resolver needs but that is not yet mounted / resolvable. */
+export interface MissingPackage {
+  package_id: string;
+  version: string;
+  reason: MissingReason;
+  /** Which set surfaced it. */
+  set: 'compile' | 'context';
+}
+
+/** The engine's `resolve_project` answer (mirrors package_store::ResolutionStep).
+ *  The host loop drives resolve → fetch each `missing` → mount → resolve until
+ *  `satisfied`. */
+export interface ResolutionStep {
+  compile_set: PackageRequestCoord[];
+  context_closure: PackageRequestCoord[];
+  missing: MissingPackage[];
+  satisfied: boolean;
+}
+
+/** Host-supplied version index for `latest`/`current`/`M.N.x` resolution
+ *  (`{ versions: { "<id>": ["<ver>", ...] } }`). Data in, decisions in Rust. */
+export interface VersionIndex {
+  versions: Record<string, string[]>;
+}
+
 export type WorkerRequest =
   | { id: number; type: 'init'; bundles: BundleSpec[] }
   | { id: number; type: 'mountBundles'; bundles: BundleSpec[] }
+  | { id: number; type: 'resolveProject'; config: string; versionIndex?: VersionIndex }
   | { id: number; type: 'expandValueSet'; valueSetJson: string; resourcesJson: string }
   | {
       id: number;

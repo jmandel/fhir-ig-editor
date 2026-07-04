@@ -18,6 +18,7 @@ type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   init: (bundlesJson: string) => number;
   mount_bundles?: (bundlesJson: string) => number;
+  resolve_project?: (config: string, versionIndexJson: string) => string;
   compile: (filesJson: string, config: string, predefinedJson: string) => string;
   generate_snapshot: (input: string) => string;
   build_site_db: (inputJson: string) => string;
@@ -117,6 +118,18 @@ async function doMountBundles(bundles: BundleSpec[]) {
   };
 }
 
+/** Resolve a project's package sets against the CURRENTLY MOUNTED bundles
+ *  (task #32). Returns the engine's ResolutionStep JSON — the host loop reads
+ *  `missing` to know what to fetch next and `satisfied` to know when to stop. The
+ *  resolution logic lives entirely in Rust (`package_store::resolve_project`); this
+ *  is a thin marshal. */
+async function doResolveProject(config: string, versionIndex?: unknown) {
+  const w = await ensureWasm();
+  if (!w.resolve_project) throw new Error('engine lacks resolve_project (rebuild wasm)');
+  const idxJson = versionIndex ? JSON.stringify(versionIndex) : '';
+  return JSON.parse(w.resolve_project(config, idxJson));
+}
+
 /** Tier-1 in-engine ValueSet expansion (spec §6 tier 1). Pure function of IG
  *  content — no tx, no mounted packages needed beyond the resources passed in. */
 async function doExpandValueSet(valueSetJson: string, resourcesJson: string) {
@@ -210,6 +223,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
       case 'mountBundles':
         result = await doMountBundles(msg.bundles);
+        break;
+      case 'resolveProject':
+        result = await doResolveProject(msg.config, msg.versionIndex);
         break;
       case 'expandValueSet':
         result = await doExpandValueSet(msg.valueSetJson, msg.resourcesJson);
