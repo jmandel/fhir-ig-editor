@@ -56,7 +56,6 @@ export default defineConfig({
       // Use the BROWSER build of react-dom/server (the `default`/node build needs
       // node's `util`/`stream` and dies in the worker with "reading 'prototype'").
       { find: /^react-dom\/server$/, replacement: resolve(HERE, 'node_modules/react-dom/server.browser.js') },
-      { find: /^liquidjs$/, replacement: resolve(HERE, 'node_modules/liquidjs') },
       { find: /^markdown-it$/, replacement: resolve(HERE, 'node_modules/markdown-it') },
       { find: /^markdown-it-anchor$/, replacement: resolve(HERE, 'node_modules/markdown-it-anchor') },
       { find: /^fast-xml-parser$/, replacement: resolve(HERE, 'node_modules/fast-xml-parser') },

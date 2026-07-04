@@ -211,9 +211,18 @@ const handlers: Handlers = {
     };
     lastRows = unwrap<SiteDbRows>(s.buildSiteDb(JSON.stringify(input)));
     // Enumerate pages (needs the render module; imported lazily so the wasm-only
-    // paths don't pull React/liquid into their critical path).
-    const { listPages } = await import('../preview/render');
-    const pages = listPages(lastRows);
+    // paths don't pull React into their critical path).
+    const render = await import('../preview/render');
+    // Engine ContentApi hook (TS-liquid sunset): narrative Liquid runs in the
+    // wasm session; the render module supplies cycle's include tree + data.
+    render.setEngineContent({
+      renderLiquid: (source, dataJson) => unwrap<{ html: string }>(s.renderLiquid(source, dataJson)).html,
+      mountSite: (filesJson, optionsJson) => {
+        unwrap(s.mountSite(filesJson, optionsJson));
+      },
+    });
+    render.mountEngineSite(lastRows);
+    const pages = render.listPages(lastRows);
     const assets = lastRows.assets.map((a) => ({ name: a.Name, mime: a.Mime }));
     return { pages, assets, buildMs: performance.now() - t0 };
   },

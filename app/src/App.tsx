@@ -64,6 +64,9 @@ export function App() {
     (async () => {
       const engine = new EngineClient();
       engineRef.current = engine;
+      // Debug/verification hook: the e2e + fidelity harnesses drive the engine
+      // directly (render every page, hash outputs) without UI scraping.
+      (window as unknown as { __igDebug?: unknown }).__igDebug = { engine };
       const st = await ProjectStore.create();
       if (cancelled) return;
       setStore(st);
