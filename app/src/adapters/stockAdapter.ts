@@ -52,15 +52,20 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   label = 'FHIR IG template (Rust, stock)';
 
   private engine: EngineClient | null = null;
-  /** The packed site tree (fetched once; re-mounted per compile generation). */
+  /** The packed site tree (fetched once per project; re-mounted per compile). */
   private tree: Record<string, SiteTreeFile> | null = null;
+  private treeProject: string | null = null;
+  /** Multi-language (en/) vs flat page layout — detected from the bundle. */
+  private pagePrefix = '';
   private pages: PageInfo[] = [];
 
-  private async ensureTree(): Promise<Record<string, SiteTreeFile>> {
-    if (this.tree) return this.tree;
-    const resp = await fetch(`${BASE}data/sites/cycle-stock.json`);
-    if (!resp.ok) throw new Error(`stock site tree fetch -> ${resp.status}`);
+  private async ensureTree(projectId: string): Promise<Record<string, SiteTreeFile>> {
+    if (this.tree && this.treeProject === projectId) return this.tree;
+    const resp = await fetch(`${BASE}data/sites/${projectId}-stock.json`);
+    if (!resp.ok) throw new Error(`stock site tree fetch (${projectId}) -> ${resp.status}`);
     this.tree = (await resp.json()) as Record<string, SiteTreeFile>;
+    this.treeProject = projectId;
+    this.pagePrefix = Object.keys(this.tree).some((k) => k.startsWith('en/')) ? 'en/' : '';
     return this.tree;
   }
 
@@ -69,7 +74,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     // Fragment rendering snapshots the compiled SDs; the deferred (r5) bundle
     // is not needed for an R4 IG, but the context closure must be mounted —
     // App's acquireForProject already guarantees that before compile.
-    const packed = await this.ensureTree();
+    const packed = await this.ensureTree(ctx.project.projectId);
     // LIVE md staging (the publisher's exact transform, verified byte-level on
     // us-core AND cycle F0 builds): each input/pagecontent/<name>.md is staged
     // as (a) a byte-copy at _includes/<name>.md and (b) a CRLF front-matter
@@ -89,7 +94,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       // the static closure — the live overlay is their ONLY source.)
       tree[`_includes/en/${name}.md`] = { b64 };
       tree[`_includes/${name}.md`] = { b64 };
-      const shimKey = `en/${name}.html`;
+      const shimKey = `${this.pagePrefix}${name}.html`;
       if (!(shimKey in tree)) tree[shimKey] = SHIM;
     }
     await ctx.engine.mountSite(tree, {
@@ -98,10 +103,11 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       // engine-first is the default; stated for the contrast with cycle.
     });
     const { pages } = await ctx.engine.listSitePages();
+    const prefix = this.pagePrefix;
     this.pages = pages
-      .filter((p) => p.startsWith('en/'))
+      .filter((p) => (prefix ? p.startsWith(prefix) : !p.includes('/')))
       .map((p) => {
-        const name = p.slice(3);
+        const name = prefix ? p.slice(prefix.length) : p;
         return { file: p, title: name.replace(/\.html$/, ''), kind: classify(name) };
       });
   }

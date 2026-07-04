@@ -29,6 +29,9 @@ export interface ContentApi {
 /** The project inputs a site build consumes (the compile is already done by
  *  the time an adapter initializes; these feed site.db row building). */
 export interface AdapterProject {
+  /** The loaded project's id ('cycle', 'uscore') — selects e.g. the packed
+   *  stock site bundle. */
+  projectId: string;
   config: string;
   files: Record<string, string>;
   predefined: Record<string, unknown>;

@@ -22,8 +22,13 @@ export interface DemoIgMeta {
 }
 
 export async function loadDemoIg(store: ProjectStore): Promise<DemoIgMeta> {
+  return loadProject(store, 'cycle');
+}
+
+/** Load a baked project by id (`data/<id>/manifest.json`). */
+export async function loadProject(store: ProjectStore, projectId: string): Promise<DemoIgMeta> {
   const manifest: IgManifest = await (
-    await fetch(`${BASE}data/cycle/manifest.json`)
+    await fetch(`${BASE}data/${projectId}/manifest.json`)
   ).json();
   const files: ProjectFile[] = Object.entries(manifest.files).map(([path, text]) => ({
     path,

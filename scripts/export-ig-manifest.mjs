@@ -18,11 +18,17 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
-const CYCLE = path.join(REPO, 'vendor/cycle');
-const OUT_DIR = path.join(REPO, 'app/public/data/cycle');
+// Default: the cycle submodule -> data/cycle. `--src DIR --out NAME` exports
+// any publisher-shaped project dir (sushi-config.yaml + input/**) instead —
+// used for the US Core demo project (node scripts/export-ig-manifest.mjs
+// --src <us-core dir> --out uscore).
+const argv = process.argv.slice(2);
+const argOf = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
+const CYCLE = argOf('--src') ? path.resolve(argOf('--src')) : path.join(REPO, 'vendor/cycle');
+const OUT_DIR = path.join(REPO, 'app/public/data', argOf('--out') || 'cycle');
 
 if (!fs.existsSync(path.join(CYCLE, 'sushi-config.yaml'))) {
-  console.error('FATAL: vendor/cycle not checked out (run: git submodule update --init)');
+  console.error(`FATAL: no sushi-config.yaml under ${CYCLE}`);
   process.exit(2);
 }
 
@@ -55,6 +61,8 @@ for (const f of collect(path.join(CYCLE, 'input/resources'), ['json'])) addText(
 // S6 site content: page bodies + any liquid includes (text).
 for (const f of collect(path.join(CYCLE, 'input/pagecontent'), ['md', 'xml'])) addText(f);
 for (const f of collect(path.join(CYCLE, 'input/includes'), ['md', 'xml', 'xhtml', 'html', 'txt'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/intro-notes'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/data'), ['json', 'yaml', 'yml', 'csv'])) addText(f);
 // Images are binary → base64.
 for (const f of collect(path.join(CYCLE, 'input/images'), ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'])) addBinary(f);
 
@@ -69,5 +77,5 @@ const manifest = { name, fileCount, files, binaryFiles };
 fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), JSON.stringify(manifest));
 
 console.log(
-  `[export-ig-manifest] ${name}: ${Object.keys(files).length} text + ${Object.keys(binaryFiles).length} binary files -> app/public/data/cycle/manifest.json`,
+  `[export-ig-manifest] ${name}: ${Object.keys(files).length} text + ${Object.keys(binaryFiles).length} binary files -> ${OUT_DIR}/manifest.json`,
 );

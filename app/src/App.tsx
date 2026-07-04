@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EngineClient } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
-import { loadDemoIg } from './vfs/demoIg';
+import { loadProject } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
 import { getSiteGenerator, listSiteGenerators, registerSiteGenerator } from './adapters/types';
 import type { PageInfo } from './adapters/types';
@@ -21,6 +21,7 @@ import { stockAdapter } from './adapters/stockAdapter';
 registerSiteGenerator(cycleAdapter);
 registerSiteGenerator(stockAdapter);
 const GENERATOR_KEY = 'igEditor.siteGenerator';
+const PROJECT_KEY = 'igEditor.project';
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -37,6 +38,7 @@ export function App() {
   const engineRef = useRef<EngineClient | null>(null);
   const [store, setStore] = useState<ProjectStore | null>(null);
   const storeRef = useRef<ProjectStore | null>(null);
+  const projectIdRef = useRef<string>(localStorage.getItem(PROJECT_KEY) || 'cycle');
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
@@ -128,6 +130,7 @@ export function App() {
           renderMarkdown: (md, opts) => engine.renderMarkdown(md, opts).then((r) => r.html),
         },
         project: {
+          projectId: projectIdRef.current,
           config: st.config(),
           files: st.fshFiles(),
           predefined: st.predefinedResources(),
@@ -217,21 +220,28 @@ export function App() {
     }, DEBOUNCE_MS);
   }, [store, runCompile]);
 
-  // ---- open demo IG --------------------------------------------------------
-  const openDemo = useCallback(async () => {
+  // ---- open a baked project -------------------------------------------------
+  const openProject = useCallback(async (projectId: string) => {
     if (!store) return;
-    setStatus('Loading demo IG (cycle)…');
-    const meta = await loadDemoIg(store);
+    setStatus(`Loading ${projectId}…`);
+    localStorage.setItem(PROJECT_KEY, projectId);
+    projectIdRef.current = projectId;
+    const meta = await loadProject(store, projectId);
     setProjectLoaded(true);
     setStatus(`Loaded ${meta.name} — ${meta.fileCount} files.`);
-    // Open the first FSH file.
-    const first = store.list().find((p) => p.endsWith('.fsh')) ?? store.list()[0] ?? null;
+    // Open the first FSH file (or first pagecontent md for FSH-less projects).
+    const first =
+      store.list().find((p) => p.endsWith('.fsh')) ??
+      store.list().find((p) => /^input\/pagecontent\/.*\.md$/.test(p)) ??
+      store.list()[0] ??
+      null;
     if (first) {
       setActivePath(first);
       setActiveText(store.read(first) ?? '');
     }
     if (engineRef.current) void runCompile(store, engineRef.current);
   }, [store, runCompile]);
+  const openDemo = useCallback(() => openProject('cycle'), [openProject]);
 
   // ---- edit handling -------------------------------------------------------
   const onEdit = useCallback(
@@ -316,6 +326,9 @@ export function App() {
           <TxSettings onChange={() => setSettingsVersion((v) => v + 1)} />
           <button className="btn" disabled={!engineReady} onClick={openDemo}>
             Open demo IG
+          </button>
+          <button className="btn" disabled={!engineReady} onClick={() => void openProject('uscore')}>
+            Open US Core
           </button>
         </div>
       </header>
