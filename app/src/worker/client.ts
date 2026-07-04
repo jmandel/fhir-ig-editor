@@ -15,27 +15,26 @@ import EngineWorker from './engine.worker?worker';
 import type {
   BundleSpec,
   CompileResult,
+  EngineOps,
   ExpandResult,
   InitResult,
   MountResult,
+  Op,
   ProgressEvent,
   RenderPageResult,
   ResolutionStep,
   SitePreviewResult,
+  SiteTreeFile,
   SnapshotResult,
+  StockSiteOptions,
   VersionIndex,
   WorkerReply,
-  WorkerRequest,
 } from './protocol';
 import { readCachedBundle, writeCachedBundle } from './bundleCache';
 import type { ResolveOutcome } from './packageResolver';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
-
-/** Omit that distributes over a discriminated union (so each variant keeps its
- *  discriminant). Plain `Omit` collapses the union and loses the payload keys. */
-type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
 /** One bundle entry in the baked manifest. `defer:true` = not needed by the
  *  first compile (fetched lazily on first snapshot/site build). */
@@ -79,11 +78,13 @@ export class EngineClient {
     };
   }
 
-  private call<T>(msg: DistributiveOmit<WorkerRequest, 'id'>): Promise<T> {
+  /** ONE call path for every engine operation (ledger #2): the op table in
+   *  protocol.ts types both the args and the result. */
+  private call<K extends Op>(op: K, ...args: EngineOps[K]['args']): Promise<EngineOps[K]['result']> {
     const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.worker.postMessage({ ...msg, id } as WorkerRequest);
+      this.worker.postMessage({ id, op, args });
     });
   }
 
@@ -149,7 +150,7 @@ export class EngineClient {
     }
 
     this.progressCb?.({ stage: 'bundle-mount', message: 'Mounting packages in engine…' });
-    const res = await this.call<InitResult>({ type: 'init', bundles });
+    const res: InitResult = await this.call('init', bundles);
     this.inited = true;
     this.progressCb?.({
       stage: 'ready',
@@ -175,7 +176,7 @@ export class EngineClient {
         stage: 'bundle-mount',
         message: `Mounting ${specs.map((s) => s.label).join(', ')}…`,
       });
-      const r = await this.call<MountResult>({ type: 'mountBundles', bundles: specs });
+      const r: MountResult = await this.call('mountBundles', specs);
       // Mounted now; clear the deferred list so we don't re-fetch.
       this.deferred = [];
       this.progressCb?.({
@@ -213,7 +214,7 @@ export class EngineClient {
   /** Ask the engine to resolve the project's package sets against the CURRENTLY
    *  mounted bundles. The resolution logic is entirely in Rust; this is transport.*/
   async resolveStep(config: string, versionIndex?: VersionIndex): Promise<ResolutionStep> {
-    return this.call<ResolutionStep>({ type: 'resolveProject', config, versionIndex });
+    return this.call('resolveProject', config, versionIndex);
   }
 
   /** Run the full resolve → fetch → mount → resolve acquisition loop for a
@@ -229,8 +230,7 @@ export class EngineClient {
       {
         resolveStep: (cfg, idx) => this.resolveStep(cfg, idx),
         mount: async (bundles) => {
-          const r = await this.call<MountResult>({ type: 'mountBundles', bundles });
-          void r;
+          await this.call('mountBundles', bundles);
         },
         bakedBundle: (label) => {
           const e = this.bakedByLabel.get(label);
@@ -251,7 +251,7 @@ export class EngineClient {
   ): Promise<CompileResult> {
     // Every compile invalidates memoized snapshots (resources may have changed).
     this.snapshotCache.clear();
-    return this.call<CompileResult>({ type: 'compile', config, files, predefined });
+    return this.call('compile', config, files, predefined);
   }
 
   async snapshot(url: string): Promise<SnapshotResult> {
@@ -259,7 +259,7 @@ export class EngineClient {
     if (cached) return cached;
     // Snapshots need the deferred (R5 core) bundle — mount it lazily first.
     await this.ensureSnapshotBundles();
-    const res = await this.call<SnapshotResult>({ type: 'snapshot', url });
+    const res: SnapshotResult = await this.call('snapshot', url);
     this.snapshotCache.set(url, res);
     return res;
   }
@@ -268,7 +268,7 @@ export class EngineClient {
    *  content — needs no mounted packages beyond the resources passed in, so it
    *  runs even before the deferred bundles are mounted. */
   async expandValueSet(valueSetJson: string, resourcesJson: string): Promise<ExpandResult> {
-    return this.call<ExpandResult>({ type: 'expandValueSet', valueSetJson, resourcesJson });
+    return this.call('expandValueSet', valueSetJson, resourcesJson);
   }
 
   // ---- M2 site preview ----
@@ -283,24 +283,40 @@ export class EngineClient {
   ): Promise<SitePreviewResult> {
     // The site build snapshots every SD, so it needs the deferred bundle too.
     await this.ensureSnapshotBundles();
-    return this.call<SitePreviewResult>({
-      type: 'buildSite',
-      config,
-      files,
-      predefined,
-      siteFiles,
-      buildEpochSecs,
-    });
+    return this.call('buildSite', config, files, predefined, siteFiles, buildEpochSecs);
   }
 
   /** Render one page to HTML (render-on-demand per visible page). */
   async renderPage(file: string): Promise<RenderPageResult> {
-    return this.call<RenderPageResult>({ type: 'renderPage', file });
+    return this.call('renderPage', file);
   }
 
   /** Fetch an asset's bytes (base64) for serving into the preview iframe. */
   async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string } | null> {
-    return this.call<{ name: string; mime: string; base64: string } | null>({ type: 'assetBytes', name });
+    return this.call('assetBytes', name);
+  }
+
+  // ---- F6 stock-template render surface (engine-side pages/fragments) ----
+
+  /** Mount (REPLACE) the engine's site tree for the stock-template renderer. */
+  async mountSite(files: Record<string, SiteTreeFile>, options?: StockSiteOptions): Promise<{ mounted: number }> {
+    return this.call('mountSite', files, options);
+  }
+
+  /** Renderable page rel paths from the engine's mounted site tree. */
+  async listSitePages(): Promise<{ pages: string[] }> {
+    return this.call('listSitePages');
+  }
+
+  /** Render one page through the engine's stock-template surface. */
+  async renderSitePage(name: string): Promise<{ html: string; renderMs: number }> {
+    return this.call('renderSitePage', name);
+  }
+
+  /** Render one publisher fragment (`{Type}-{id}`, kind) — the engine-backed
+   *  FragmentApi every site-generator adapter shares. */
+  async renderFragment(ref: string, kind: string): Promise<{ html: string }> {
+    return this.call('renderFragment', ref, kind);
   }
 
   get initialized() {

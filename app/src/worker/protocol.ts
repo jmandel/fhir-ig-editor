@@ -209,36 +209,63 @@ export interface VersionIndex {
   versions: Record<string, string[]>;
 }
 
-export type WorkerRequest =
-  | { id: number; type: 'init'; bundles: BundleSpec[] }
-  | { id: number; type: 'mountBundles'; bundles: BundleSpec[] }
-  | { id: number; type: 'resolveProject'; config: string; versionIndex?: VersionIndex }
-  | { id: number; type: 'expandValueSet'; valueSetJson: string; resourcesJson: string }
-  | {
-      id: number;
-      type: 'compile';
-      config: string;
-      files: Record<string, string>;
-      predefined: Record<string, unknown>;
-    }
-  | { id: number; type: 'snapshot'; url: string }
-  | {
-      id: number;
-      type: 'buildSite';
-      config: string;
-      files: Record<string, string>;
-      predefined: Record<string, unknown>;
-      siteFiles: Record<string, string>;
-      buildEpochSecs: number;
-    }
-  | { id: number; type: 'renderPage'; file: string }
-  | { id: number; type: 'assetBytes'; name: string };
+// ---- the op table (ledger #2: ONE protocol shape) --------------------------
+//
+// Every engine operation is one row here: its positional args and its result
+// type. The worker implements exactly this table (a handler per op); the client
+// exposes exactly this table (`call(op, ...args)`). Adding an operation = adding
+// a row + a handler — no new message shapes, no per-op plumbing.
 
 /** A package bundle to mount: a label + its inflated `{name: base64}` files. */
 export interface BundleSpec {
   label: string;
   files: Record<string, string>;
 }
+
+/** Site-tree file value for `mountSite`: UTF-8 text or base64 bytes. */
+export type SiteTreeFile = string | { b64: string };
+
+/** Options for the stock-template render surface (engine `mountSite`). */
+export interface StockSiteOptions {
+  activeTables?: boolean;
+  runUuid?: string;
+}
+
+export interface EngineOps {
+  init: { args: [bundles: BundleSpec[]]; result: InitResult };
+  mountBundles: { args: [bundles: BundleSpec[]]; result: MountResult };
+  resolveProject: { args: [config: string, versionIndex?: VersionIndex]; result: ResolutionStep };
+  expandValueSet: { args: [valueSetJson: string, resourcesJson: string]; result: ExpandResult };
+  compile: {
+    args: [config: string, files: Record<string, string>, predefined: Record<string, unknown>];
+    result: CompileResult;
+  };
+  snapshot: { args: [url: string]; result: SnapshotResult };
+  // M2 cycle-generator preview path (rows built in the worker, TS render there).
+  buildSite: {
+    args: [
+      config: string,
+      files: Record<string, string>,
+      predefined: Record<string, unknown>,
+      siteFiles: Record<string, string>,
+      buildEpochSecs: number,
+    ];
+    result: SitePreviewResult;
+  };
+  renderPage: { args: [file: string]; result: RenderPageResult };
+  assetBytes: { args: [name: string]; result: { name: string; mime: string; base64: string } | null };
+  // F6 stock-template render surface (engine-side pages/fragments).
+  mountSite: { args: [files: Record<string, SiteTreeFile>, options?: StockSiteOptions]; result: { mounted: number } };
+  listSitePages: { args: []; result: { pages: string[] } };
+  renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
+  renderFragment: { args: [ref: string, kind: string]; result: { html: string } };
+}
+
+export type Op = keyof EngineOps;
+
+export type WorkerRequest = {
+  [K in Op]: { id: number; op: K; args: EngineOps[K]['args'] };
+}[Op];
 
 // ---- reply messages (worker -> UI) ----------------------------------------
 
