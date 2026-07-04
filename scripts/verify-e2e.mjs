@@ -378,6 +378,7 @@ try {
   })()`);
   results.editTitleResult = editTitle;
   if (editTitle === 'ok') {
+    const tEdit = Date.now();
     await waitFor(ws, `(() => {
       const f = document.querySelector('.preview-frame');
       const doc = f && (f.contentDocument || f.contentWindow?.document);
@@ -385,6 +386,55 @@ try {
       return doc && (/E2E Preview Title Changed/.test(doc.title) || /E2E Preview Title Changed/.test(doc.body.textContent));
     })()`, 30000, 'preview reflects edited title');
     results.previewUpdatedAfterEdit = true;
+    results.editToPreviewMs = Date.now() - tEdit;
+  }
+
+  // ---- stock-template adapter (F6): switch generators, render, warm-edit ----
+  await evalJs(ws, `(() => {
+    const sel = document.querySelector('.preview-generator-select select');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(sel, 'hl7.fhir.template');
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return sel.value;
+  })()`);
+  await waitFor(ws, `(() => {
+    const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
+    return opts.some(v => v.startsWith('en/'));
+  })()`, 60000, 'stock template page list');
+  await evalJs(ws, `(() => {
+    const sel = document.querySelector('.preview-page-select select');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(sel, 'en/index.html');
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(ws, `(() => {
+    const f = document.querySelector('.preview-frame');
+    const doc = f && (f.contentDocument || f.contentWindow?.document);
+    return doc && doc.body && doc.body.textContent.length > 500;
+  })()`, 60000, 'stock template index rendered');
+  results.stockIndexLen = await evalJs(ws, `(() => {
+    const f = document.querySelector('.preview-frame');
+    const doc = f && (f.contentDocument || f.contentWindow?.document);
+    return doc.body.textContent.length;
+  })()`);
+  // WARM EDIT (the F6 gate): the engine + template tree are mounted; edit the
+  // already-open index.md and time source-edit -> stock-rendered page update.
+  const stockEdit = await evalJs(ws, `(() => {
+    const ed = window.monaco && window.monaco.editor.getEditors()[0];
+    if (!ed) return 'no-editor';
+    const m = ed.getModel();
+    m.setValue(m.getValue().replace(/^# .*/m, '# Stock Warm Edit Marker'));
+    return 'ok';
+  })()`);
+  results.stockEditResult = stockEdit;
+  if (stockEdit === 'ok') {
+    const t0 = Date.now();
+    await waitFor(ws, `(() => {
+      const f = document.querySelector('.preview-frame');
+      const doc = f && (f.contentDocument || f.contentWindow?.document);
+      return doc && /Stock Warm Edit Marker/.test(doc.body.textContent);
+    })()`, 30000, 'stock preview reflects warm edit');
+    results.stockWarmEditMs = Date.now() - t0;
   }
 
   console.log(JSON.stringify(results, null, 2));
@@ -403,6 +453,14 @@ try {
   if (!(results.previewTextLen > 200)) { console.error('assert: preview page did not render'); ok = false; }
   if (!results.previewHasIgContent) { console.error('assert: preview missing IG content'); ok = false; }
   if (results.editTitleResult === 'ok' && !results.previewUpdatedAfterEdit) { console.error('assert: preview did not update after FSH/page edit'); ok = false; }
+  // F6 stock-template gates: renders + the <1s WARM-EDIT bound. The waitFor
+  // poll ticks at 120ms, so the measured span includes up to one poll interval;
+  // the gate bound stays 1000ms as specified (edit debounce + compile + stage +
+  // liquid render + fragment fills all inside it).
+  if (!(results.stockIndexLen > 500)) { console.error('assert: stock template index did not render'); ok = false; }
+  if (results.stockEditResult === 'ok' && !(results.stockWarmEditMs < 1000)) {
+    console.error('assert: stock warm edit took', results.stockWarmEditMs, 'ms (gate: <1000)'); ok = false;
+  }
 
   // ---- cold-start progress + lazy-loading gates (spec §1) ----------------
   if (!results.progressSeen) { console.error('assert: cold-start progress bar never appeared'); ok = false; }

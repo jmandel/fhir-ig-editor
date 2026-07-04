@@ -69,7 +69,29 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     // Fragment rendering snapshots the compiled SDs; the deferred (r5) bundle
     // is not needed for an R4 IG, but the context closure must be mounted —
     // App's acquireForProject already guarantees that before compile.
-    const tree = await this.ensureTree();
+    const packed = await this.ensureTree();
+    // LIVE md staging (the publisher's exact transform, verified byte-level on
+    // us-core AND cycle F0 builds): each input/pagecontent/<name>.md is staged
+    // as (a) a byte-copy at _includes/<name>.md and (b) a CRLF front-matter
+    // shim page `{% include template-page-md.html %}`. Overlaying the CURRENT
+    // project bytes here makes pagecontent edits live: compile -> re-init ->
+    // re-mount -> the page renders from the edited markdown.
+    const tree: Record<string, SiteTreeFile> = { ...packed };
+    const SHIM = '---\r\n---\r\n{% include template-page-md.html %}';
+    for (const [path, b64] of Object.entries(ctx.project.siteFiles)) {
+      const m = path.match(/^input\/pagecontent\/([^/]+)\.md$/);
+      if (!m) continue;
+      const name = m[1];
+      // The template's shim resolves `{{page.path | split '.html'}}.md` — the
+      // PAGE-DIR-prefixed include name (`en/<name>.md` in multi-language
+      // layouts). Mount BOTH forms so flat layouts work too. (The packed
+      // bundle can't carry these: they are dynamic include names invisible to
+      // the static closure — the live overlay is their ONLY source.)
+      tree[`_includes/en/${name}.md`] = { b64 };
+      tree[`_includes/${name}.md`] = { b64 };
+      const shimKey = `en/${name}.html`;
+      if (!(shimKey in tree)) tree[shimKey] = SHIM;
+    }
     await ctx.engine.mountSite(tree, {
       activeTables: true,
       runUuid: RUN_UUID,
