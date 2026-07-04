@@ -19,3 +19,6 @@ node_modules/
 
 # scratch
 /scratch/
+
+# #40: throwaway template-materialization work dir (build-template-bundle.sh)
+.template-cache/

@@ -130,8 +130,29 @@ jobs:
           bash scripts/bundle-packages.sh
           node scripts/export-ig-manifest.mjs
           node scripts/copy-site-assets.mjs
+          # Stage the packed IG site bundles (the *-stock.json files at the
+          # site-bundles ROOT). The templates/ subdir is a SEPARATE artifact set
+          # (staged below), so copy only the top-level *.json here.
           mkdir -p app/public/data/sites
-          cp -r site-bundles/. app/public/data/sites/
+          for f in site-bundles/*.json; do [ -e "$f" ] && cp "$f" app/public/data/sites/; done
+
+      # --- Template warm-start artifacts (#40): the loader-produced
+      # `fig packages bundle --template` trees the stock adapter fetches for a warm
+      # start. Build `fig` from the pinned submodule (build-time dependency) and
+      # stage the committed artifacts + the E2E fixtures.
+      - name: Stage template artifacts (#40)
+        env:
+          FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
+        run: |
+          # fig is the build-time dependency; build it once from the submodule.
+          ( cd vendor/sushi-rs && cargo build --release -p fig )
+          # The committed warm-start artifacts are loader-produced and checked in
+          # under site-bundles/templates/ — stage them (they are large but stable).
+          mkdir -p app/public/data/templates
+          cp -r site-bundles/templates/. app/public/data/templates/ 2>/dev/null || true
+          # E2E fixtures (the synthetic bad-ant template for the AntHookError gate).
+          mkdir -p app/public/data/fixtures
+          cp -r scripts/fixtures/bad-ant-template/. app/public/data/fixtures/ 2>/dev/null || true
 
       # --- Drift gate: wasm output byte-matches native for the whole cycle IG.
       - name: Byte-match gate (wasm vs native)
@@ -145,6 +166,15 @@ jobs:
             target/wasm32-unknown-unknown/release/wasm_api.wasm
           cd "$GITHUB_WORKSPACE"
           node scripts/byte-check.mjs .pkg-node app/public/data/bundles vendor/cycle .native-out/fsh-generated/resources
+
+      # --- Template-parity gate (#40): the LIVE mountTemplate tree == the packed
+      # `fig` warm-start artifact (both from the ONE loader) — "pages rendered via
+      # the live-mounted template == the packed-artifact path". Uses the nodejs
+      # wasm from the byte-check step + the repacked template chain bundles.
+      - name: Template-parity gate (live mountTemplate == packed artifact)
+        run: |
+          node scripts/template-parity.mjs .pkg-node app/public/data/bundles \
+            "site-bundles/templates/hl7.fhir.template%231.0.0.json"
 
       # --- Consistency gate: the in-engine tier-1 expander (expand_enumerable)
       # must agree with the committed expansion cache on the shared domain

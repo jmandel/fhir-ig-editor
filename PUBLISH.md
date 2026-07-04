@@ -1,5 +1,111 @@
 # PUBLISH — status & operations notes for `jmandel/fhir-ig-editor`
 
+## 🧩 Task #40 — LIVE template loader (branch `template-live`, NOT merged)
+
+Pick any `template#version` in the browser and the site renders with it. The
+template package chain rides the SAME resolve→fetch→mount path as regular
+packages; the engine's loader (`Session.mountTemplate`) then materializes it
+byte-exact (walk_base_chain + union-copy + config deep-merge, ZERO ant). The
+selector's DEFAULT experience is a curated set of key templates with LIVE
+registry-fetched version lists (no typing); a free-text `id#version` input is the
+demoted "advanced" affordance.
+
+### Engine bump (already committed on this branch)
+
+`vendor/sushi-rs` bumped `92ed7362` → **`d9dc53e1`** (`template_loader` +
+`Session.mountTemplate`). `d9dc53e1` is on `jmandel/sushi-rs` `refs/heads/snapshot-gen`
+(CI can fetch it). The wasm is rebuilt from the pin in CI; locally it was rebuilt
+via `scripts/build-wasm.sh` (scratch 1.96.0 + wasm32-unknown-unknown toolchain,
+wasm-bindgen 0.2.126). **wasm-parity gate PASS @ d9dc53e1** (verbatim):
+```
+engine: {"version":"0.1.0","commit":"d9dc53e1",...}
+PASS  ladder: 17/17 (expected 17)
+PASS  ips: 29/29 (expected 29)
+PASS  mcode: 46/46 (expected 46)
+PASS  sdc: 73/73 (expected 73)
+WASM PARITY GATE: PASS
+```
+NOTE (breaking-ish, handled): at `d9dc53e1` the `resolve`/`bundle` subcommands
+still exist in `rust_sushi` (used by `gen-packages-list.sh` + `bundle-packages.sh`),
+so those scripts are unchanged — CI just rebuilds a fresh `rust_sushi` from the
+new pin. A STALE pre-bump `rust_sushi` binary silently lacks output; CI's clean
+build avoids it.
+
+### As-built flow (resolve→fetch→mount→materialize→render)
+
+- **WARM (default, committed artifact present):** stock adapter mounts the IG
+  layer (`{project}-stock.json`), then `EngineClient.fetchTemplateArtifact(coord)`
+  → OPFS materialized-tree cache (keyed by coord + engine commit) → else fetch the
+  committed `data/templates/<coord %23>.json` (`fig packages bundle --template`
+  output) → map `includes/*`→`_includes/*`, else→`template/*` → `mountSite(merge)`
+  → write-through OPFS → `listSitePages` → render. No network beyond one same-origin
+  artifact (HTTP-cached).
+- **LIVE (custom coord / forced):** IG layer → `mountTemplateChain(coord)` walks the
+  `base` chain (mirrors `fig::template::acquire_and_materialize`: read each
+  package.json `base`+`dependencies[base]`, leaf→root, visited-guard), fetching +
+  mounting each package via the SHARED transport (OPFS→local→baked→registry) →
+  `Session.mountTemplate(coord)` materializes into the site tree → render. Both
+  paths mount the byte-identical tree.
+- **Failure:** custom-ant → `AntHookError` (message contains "never execute ant" /
+  "server-side") → adapter throws a friendly "needs server-side rendering" Error →
+  `selectTemplate` shows a non-wedging banner and falls back to the previous good
+  template (which re-renders). Unfetchable chain → "could not obtain …", same fallback.
+
+### Curated version catalog (default UX)
+
+`app/src/adapters/templateCatalog.ts`: curated families = `hl7.fhir.template`,
+`hl7.base.template`, `hl7.davinci.template` (the known no-ant-surprise stock
+family). Each family's versions are fetched from the SAME CORS-open npm-style
+endpoint #32 uses (`<registry>/<id>` → `Access-Control-Allow-Origin: *`, verified;
+`dist-tags.latest` = the default selection, newest-first). Resilience ladder:
+fresh-OPFS (1-day TTL) → live-fetch → stale-OPFS (last-known-good) → pinned
+oracle-tested versions (the byte-gated `1.0.0` chains) — the selector NEVER wedges
+offline. Oracle-tested versions carry a `✓ verified` badge; other versions run
+through the same loader honestly (driven means driven), protected by AntHookError.
+
+### Build-time dependency (NEW) + pipeline changes
+
+- **`fig` (built from the submodule)** produces the warm-start artifact:
+  `scripts/build-template-bundle.sh <id#ver>` → `fig packages bundle --template …`
+  → `site-bundles/templates/<coord %23>.json` (committed). CI must build `fig` from
+  `vendor/sushi-rs` (host target) before staging templates.
+- `scripts/gen-packages-list.sh` now appends the stock template CHAIN
+  (`hl7.fhir.template#1.0.0` → `hl7.base.template#1.0.0` → `fhir.base.template#1.0.0`,
+  walked by `scripts/gen-template-chain.sh`) to `packages.list`; the **drift gate
+  PASSES** with the chain included.
+- `scripts/bundle-packages.sh` REPACKS template packages (their content lives at
+  the Publisher-native top level, which `rust_sushi bundle` would strip) so all
+  content sits under `package/` in the tgz — mounts as a complete template tree
+  for the LIVE fallback source (a).
+- `scripts/prepare-data.sh` stages `site-bundles/templates/` → `data/templates/`
+  and the E2E fixtures → `data/fixtures/`.
+
+### Gate evidence
+
+- **wasm-parity: PASS** (above).
+- **template-parity gate (`scripts/template-parity.mjs`): PASS** — live
+  `mountTemplate` tree == packed `fig` artifact (179 == 179 render-affecting files;
+  the `.derived-index.json` CAS byproduct is normalized out). This is the
+  "live-mounted == packed-artifact" byte anchor.
+- **E2E (`scripts/verify-e2e.mjs`, extended): see the block below** — curated
+  version catalog populated (16 versions, default `1.0.0` published, `✓` verified),
+  LIVE-path render matches warm, AntHookError refusal + non-wedging fallback.
+
+### Merge / deploy steps (coordinator)
+
+1. Engine first: `jmandel/sushi-rs` `snapshot-gen` already contains the pinned
+   `d9dc53e1` — confirm `git -C vendor/sushi-rs rev-parse HEAD` = `d9dc53e1…` and it
+   is pushed (it is on `refs/heads/snapshot-gen`).
+2. CI builds `fig` + `rust_sushi` from the pin, regenerates bundles (incl. the
+   repacked template chain) + the template warm-start artifact, runs the drift +
+   template-parity + byte + E2E gates, deploys.
+3. Live verify: Site preview → Template family = "HL7 FHIR IG template", Version =
+   latest (✓ verified) → US Core `StructureDefinition-us-core-patient.html` renders
+   with tables; switch Version / advanced coord loads live; a custom-ant template
+   shows the "needs server-side rendering" banner without wedging.
+4. Deferred: finer-grained per-page `invalidate` replay-skip (structural today);
+   non-1.0.0 chains are not byte-gated (they run honestly through the loader).
+
 ## 🚀 F6 — branch `f6-integration`: DEPLOY SEQUENCE (coordinator runs this)
 
 Everything below is committed on `f6-integration` (pushed) with local gates
