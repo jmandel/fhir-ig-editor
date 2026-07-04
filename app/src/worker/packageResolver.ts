@@ -231,6 +231,34 @@ async function obtainPackage(
   return null;
 }
 
+/** Obtain + mount ONE package by label, reusing the exact source ladder (#40
+ *  template chain). The runtime resolver (`acquireForProject`) is DRIVEN by the
+ *  engine's ResolutionStep; the template loader instead needs a specific chain
+ *  package fetched on demand (the chain walk is the loader's decision — see
+ *  templateChain.ts). This shares the OPFS→local→baked→registry ladder so template
+ *  packages ride the SAME transport as regular packages, and mounts the result so
+ *  a later `Session.mountTemplate` can read it. Returns the inflated `{name:
+ *  base64}` files (also used to read the package.json for the next chain step), or
+ *  null if no source could supply it. */
+export async function obtainAndMountPackage(
+  host: ResolverHost,
+  label: string,
+  onProgress: ResolveProgress,
+): Promise<Record<string, string> | null> {
+  const hash = label.lastIndexOf('#');
+  const missing: MissingPackage = {
+    package_id: hash > 0 ? label.slice(0, hash) : label,
+    version: hash > 0 ? label.slice(hash + 1) : '',
+    reason: { kind: 'not_mounted' },
+    set: 'context',
+  };
+  const blocked: BlockedPackage[] = [];
+  const spec = await obtainPackage(host, label, missing, onProgress, blocked);
+  if (!spec) return null;
+  await host.mount([spec]);
+  return spec.files;
+}
+
 /** Fetch a package tarball from the configured registries (packages.fhir.org →
  *  packages2 → …), each optionally wrapped through the proxy. Returns a mountable
  *  spec, or null if every registry failed. */

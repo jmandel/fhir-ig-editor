@@ -28,6 +28,7 @@ interface WasmSession {
   buildSiteDb(inputJson: string): string;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
   mountSite(filesJson: string, optionsJson: string): string;
+  mountTemplate(coord: string): string;
   renderLiquid(source: string, dataJson: string): string;
   renderMarkdown(md: string, optsJson: string): string;
   listPages(): string;
@@ -246,6 +247,17 @@ const handlers: Handlers = {
   async mountSite(files: Record<string, SiteTreeFile>, options?: StockSiteOptions) {
     const s = await ensureSession();
     return unwrap(s.mountSite(JSON.stringify(files), options ? JSON.stringify(options) : ''));
+  },
+
+  /** Materialize a template `id#ver` chain from the MOUNTED bundle packages and
+   *  merge it into the engine site tree (Rust: walk_base_chain + union-copy +
+   *  config deep-merge, byte-exact, no ant). The whole base chain must already
+   *  be mounted (the host fetched it on the resolve→fetch→mount path). A custom-
+   *  ant template surfaces here as `mountTemplate <coord>: … never execute ant`
+   *  (unwrap re-throws it as an Error the adapter maps to a friendly message). */
+  async mountTemplate(coord: string) {
+    const s = await ensureSession();
+    return unwrap<{ files: number }>(s.mountTemplate(coord));
   },
 
   async listSitePages() {

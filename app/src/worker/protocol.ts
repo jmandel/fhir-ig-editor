@@ -258,6 +258,12 @@ export interface EngineOps {
   assetBytes: { args: [name: string]; result: { name: string; mime: string; base64: string } | null };
   // F6 stock-template render surface (engine-side pages/fragments).
   mountSite: { args: [files: Record<string, SiteTreeFile>, options?: StockSiteOptions]; result: { mounted: number } };
+  // Live template loader (#40): materialize a template `id#ver` chain from the
+  // MOUNTED bundle packages (base-chain walk + union-copy, in Rust) and merge
+  // its tree (includes/*→_includes/*) into the site tree. The host must have
+  // fetched+mounted the whole base chain first (Rust decides which packages via
+  // walk_base_chain; JS fetches them on the SAME resolve→fetch→mount path).
+  mountTemplate: { args: [coord: string]; result: { files: number } };
   listSitePages: { args: []; result: { pages: string[] } };
   renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
   renderFragment: { args: [ref: string, kind: string]; result: { html: string } };

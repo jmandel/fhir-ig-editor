@@ -65,6 +65,15 @@ export class EngineClient {
    *  share one fetch of the deferred bundles. */
   private deferredMount: Promise<void> | null = null;
   private progressCb: ProgressCb | null = null;
+  /** The mounted engine's commit — the invalidation key for the OPFS materialized-
+   *  template cache (#40 scope 4): a wasm bump changes this, so stale trees are
+   *  never served. Captured on init. */
+  private engineCommit = 'unknown';
+  /** Verification hook (#40 E2E): force the LIVE template path (resolve→fetch→
+   *  mount→mountTemplate) by suppressing the warm-start artifact + cache, so the
+   *  live materialization can be gated even for a coord that HAS a committed
+   *  artifact. Set via `__igDebug.engine.forceLiveTemplate = true`. */
+  forceLiveTemplate = false;
 
   constructor() {
     this.worker = new EngineWorker();
@@ -152,6 +161,7 @@ export class EngineClient {
     this.progressCb?.({ stage: 'bundle-mount', message: 'Mounting packages in engine…' });
     const res: InitResult = await this.call('init', bundles);
     this.inited = true;
+    this.engineCommit = res.version?.commit || 'unknown';
     this.progressCb?.({
       stage: 'ready',
       message: `Engine ready — mounted ${res.mounted} packages${
@@ -301,6 +311,77 @@ export class EngineClient {
   /** Mount (REPLACE) the engine's site tree for the stock-template renderer. */
   async mountSite(files: Record<string, SiteTreeFile>, options?: StockSiteOptions): Promise<{ mounted: number }> {
     return this.call('mountSite', files, options);
+  }
+
+  /** Live template loader (#40): materialize a template `id#ver` chain (already
+   *  mounted as bundle packages) into the engine site tree. Throws if the chain
+   *  is incomplete or the template needs server-side rendering (custom ant). */
+  async mountTemplate(coord: string): Promise<{ files: number }> {
+    return this.call('mountTemplate', coord);
+  }
+
+  /** LIVE template load (#40): the full resolve→fetch→mount→materialize path.
+   *  Walks the template's `base` chain (Rust's rule, mirrored in JS because
+   *  `mountTemplate` consumes an already-mounted chain), fetching + mounting each
+   *  chain package via the SAME transport regular packages use, then calls
+   *  `Session.mountTemplate` to materialize the tree into the engine site tree.
+   *  Any AntHookError (custom-ant template) propagates as an Error whose message
+   *  contains "never execute ant" — the adapter maps that to a friendly refusal. */
+  async mountTemplateChain(coord: string): Promise<{ chain: string[]; files: number }> {
+    const { mountTemplateChain } = await import('./templateChain');
+    const host = {
+      // Template chain packages are not sushi-config deps, so resolveStep/bakedBundle
+      // are reused only for their transport (baked bundle lookup + registry fetch);
+      // the CHAIN decision lives in the walk, not in resolveStep.
+      resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
+      mount: async (bundles: BundleSpec[]) => {
+        await this.call('mountBundles', bundles);
+      },
+      bakedBundle: (label: string) => {
+        const e = this.bakedByLabel.get(label);
+        return e ? { tgz: e.tgz, bytes: e.bytes } : undefined;
+      },
+      fetchBaked: (label: string, tgz: string) => this.loadBundle({ label, tgz }, 'Loading (template)'),
+    };
+    const { chain } = await mountTemplateChain(host, coord, (ev) =>
+      this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+    );
+    this.progressCb?.({ stage: 'bundle-mount', label: coord, message: `Materializing template ${coord}…` });
+    const { files } = await this.mountTemplate(coord);
+    this.progressCb?.({ stage: 'ready', message: `Template ${coord} materialized — ${files} files.` });
+    return { chain, files };
+  }
+
+  /** WARM-START template layer (#40): fetch the committed `fig packages bundle
+   *  --template` artifact and map it to the engine site tree EXACTLY as the engine
+   *  `mount_template` does (`includes/*`→`_includes/*`, everything else →
+   *  `template/*`), so the warm and live paths mount byte-identical trees (the
+   *  byte gate). Returns the mapped `mountSite` files, or null on 404 (no committed
+   *  artifact for this coord → the caller falls back to the live path). */
+  async fetchTemplateArtifact(coord: string): Promise<Record<string, SiteTreeFile> | null> {
+    // Verification hook: force the LIVE path (return null → adapter falls through
+    // to mountTemplateChain). Used by the E2E live-template gate.
+    if (this.forceLiveTemplate) return null;
+    // OPFS materialized-tree cache first (#40 scope 4): a mapped tree we already
+    // materialized under THIS engine commit — a pure read, no network/re-map.
+    const { readCachedTemplateTree, writeCachedTemplateTree } = await import('./templateTreeCache');
+    const cached = await readCachedTemplateTree(coord, this.engineCommit);
+    if (cached) {
+      this.progressCb?.({ stage: 'bundle-cache-hit', label: coord, message: `Template ${coord} (materialized cache)`, fromCache: true });
+      return cached;
+    }
+    const url = `${BASE}data/templates/${coord.replaceAll('#', '%23')}.json`;
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    const doc = (await resp.json()) as { files: Record<string, SiteTreeFile> };
+    const mapped: Record<string, SiteTreeFile> = {};
+    for (const [rel, val] of Object.entries(doc.files)) {
+      const inc = rel.startsWith('includes/') ? `_includes/${rel.slice('includes/'.length)}` : `template/${rel}`;
+      mapped[inc] = val;
+    }
+    // Write-through so the next load (any session) skips the fetch + re-map.
+    void writeCachedTemplateTree(coord, this.engineCommit, mapped);
+    return mapped;
   }
 
   /** Renderable page rel paths from the engine's mounted site tree. */
