@@ -47,7 +47,11 @@ const LABELS = [
   'hl7.fhir.uv.extensions.r4#5.3.0',
   'hl7.fhir.r5.core#5.0.0',
 ];
-mod.init(JSON.stringify(LABELS.map((label) => ({ label, files: untarGz(path.join(BUNDLE_DIR, `${label}.tgz`)) }))));
+const session = mod.Session.global();
+{
+  const env = JSON.parse(session.init(JSON.stringify(LABELS.map((label) => ({ label, files: untarGz(path.join(BUNDLE_DIR, `${label}.tgz`)) })))));
+  if (!env.ok) throw new Error(`session.init failed: ${env.error?.message}`);
+}
 
 function walk(dir, exts) {
   const out = [];
@@ -65,7 +69,9 @@ const predefined = {};
 const resDir = path.join(CYCLE_DIR, 'input/resources');
 if (fs.existsSync(resDir)) for (const f of walk(resDir, ['json'])) predefined[path.relative(CYCLE_DIR, f)] = JSON.parse(fs.readFileSync(f, 'utf8'));
 
-const out = JSON.parse(mod.compile(JSON.stringify(files), config, JSON.stringify(predefined)));
+const compileEnv = JSON.parse(session.compile(JSON.stringify(files), config, JSON.stringify(predefined)));
+if (!compileEnv.ok) throw new Error(`session.compile failed: ${compileEnv.error?.message}`);
+const out = compileEnv.result;
 
 let match = 0, diff = 0, miss = 0;
 for (const r of out.resources) {
