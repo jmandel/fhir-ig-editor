@@ -39,8 +39,15 @@ const cacheDir = path.resolve(
 );
 
 const mod = await import(path.join(wasmDir, 'wasm_api.js'));
-if (typeof mod.expand_enumerable !== 'function') {
-  console.error('FATAL: wasm module lacks expand_enumerable (rebuild the wasm)');
+// nodejs-target builds auto-init on import; web-target builds need explicit init.
+if (typeof mod.default === 'function') {
+  const wasmPath = path.join(wasmDir, 'wasm_api_bg.wasm');
+  if (fs.existsSync(wasmPath)) {
+    await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
+  }
+}
+if (typeof mod.Session !== 'function') {
+  console.error('FATAL: wasm module lacks Session (rebuild the wasm)');
   process.exit(2);
 }
 
@@ -62,7 +69,9 @@ function memberSet(expansion) {
  *  golden `expansion`, on the shared DOMAIN (the `system|code` set). Returns
  *  { ok, detail }. */
 function compareOnDomain(vs, refs, goldenExpansion) {
-  const raw = JSON.parse(mod.expand_enumerable(JSON.stringify(vs), JSON.stringify(refs ?? [])));
+  const env = JSON.parse(mod.Session.global().expandValueSet(JSON.stringify(vs), JSON.stringify(refs ?? [])));
+  if (!env.ok) throw new Error(`expandValueSet transport error: ${env.error?.message}`);
+  const raw = env.result; // old-export payload verbatim: {ok, expansion, ...} | {ok:false, notEnumerable}
   if (!raw.ok) {
     return { ok: false, detail: `evaluator REFUSED an enumerable golden: ${raw.notEnumerable?.display}` };
   }
