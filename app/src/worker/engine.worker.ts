@@ -9,6 +9,7 @@
 //
 // The wasm module is emitted by scripts/build-wasm.sh into app/public/pkg/ and
 // served as a static asset; we import it at runtime via the app base URL.
+declare const __ENGINE_COMMIT__: string;
 
 import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, SiteTreeFile, StockSiteOptions } from './protocol';
 import type { SiteDbRows } from '../preview/rowStore';
@@ -46,8 +47,9 @@ let wasmMod: WasmModule | null = null;
 
 async function ensureSession(): Promise<WasmSession> {
   if (session) return session;
-  const mod = (await import(/* @vite-ignore */ `${BASE}pkg/wasm_api.js`)) as WasmModule;
-  await mod.default(`${BASE}pkg/wasm_api_bg.wasm`);
+  const v = encodeURIComponent(__ENGINE_COMMIT__);
+  const mod = (await import(/* @vite-ignore */ `${BASE}pkg/wasm_api.js?v=${v}`)) as WasmModule;
+  await mod.default(`${BASE}pkg/wasm_api_bg.wasm?v=${v}`);
   wasmMod = mod;
   session = new mod.Session();
   return session;

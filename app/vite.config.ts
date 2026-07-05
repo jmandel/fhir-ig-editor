@@ -1,4 +1,13 @@
 import { defineConfig } from 'vite';
+import { execSync } from 'node:child_process';
+
+const ENGINE_COMMIT = (() => {
+  try {
+    return execSync('git -C ../vendor/sushi-rs rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+  } catch {
+    return process.env.ENGINE_COMMIT ?? 'dev';
+  }
+})();
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -71,6 +80,11 @@ export default defineConfig({
   // breaks them). Bare `process` is shimmed to `{ env: {} }` for the SITE_PROJECT
   // membership check without touching NODE_ENV reads.
   define: {
+    // Cache-buster for the un-hashed pkg/ engine assets (wasm + bindgen js):
+    // they sit outside vite's content-hashing, so without this a browser HTTP
+    // cache can pair an OLD engine with NEW app bundles after a redeploy —
+    // which breaks in maximally confusing ways (raw liquid served as pages).
+    __ENGINE_COMMIT__: JSON.stringify(ENGINE_COMMIT),
     'process.env.SITE_PROJECT': 'undefined',
     'process.env.OUT_DIR': 'undefined',
     'process.env.SITE_DESIGN_DIR': 'undefined',

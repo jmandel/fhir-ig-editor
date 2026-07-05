@@ -1,3 +1,4 @@
+declare const __ENGINE_COMMIT__: string | undefined;
 // UI-side handle to the engine worker. Wraps postMessage in promises, owns the
 // package-bundle fetch+inflate + OPFS cache, and memoizes per-profile snapshots.
 // The rest of the app talks only to this class — the worker protocol is the
@@ -162,6 +163,14 @@ export class EngineClient {
     const res: InitResult = await this.call('init', bundles);
     this.inited = true;
     this.engineCommit = res.version?.commit || 'unknown';
+    // Stale-mix guard: the app bundle was built against a specific engine
+    // commit; if the served (HTTP-cached) wasm reports a different one, the
+    // user has a stale engine + fresh app (or vice versa) — reload fixes it.
+    if (typeof __ENGINE_COMMIT__ !== 'undefined' && __ENGINE_COMMIT__ !== 'dev' && this.engineCommit !== __ENGINE_COMMIT__) {
+      const msg = `Engine version mismatch: app expects ${__ENGINE_COMMIT__}, loaded ${this.engineCommit}. Hard-reload the page (a redeploy left a stale cached engine).`;
+      console.error(msg);
+      this.progressCb?.({ stage: 'ready', label: 'engine', message: msg });
+    }
     this.progressCb?.({
       stage: 'ready',
       message: `Engine ready — mounted ${res.mounted} packages${
