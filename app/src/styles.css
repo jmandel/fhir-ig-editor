@@ -281,8 +281,10 @@ body {
 }
 .preview-bar {
   display: flex;
+  flex-wrap: wrap;      /* narrow viewports: wrap instead of clipping the
+                           open-in-new-window button off-screen */
   align-items: center;
-  gap: 12px;
+  gap: 6px 12px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border, #2a2a35);
   font-size: 12px;
