@@ -655,6 +655,80 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* ---- project-open progress (US Core / demo IG open) -------------------- */
+/* A live, staged banner under the status line so a multi-MB open never looks
+   hung. Mobile-safe: the message line WRAPS (flex-wrap) rather than overflowing
+   the viewport — the preview-bar clipping lesson. */
+.open-progress {
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.open-progress-bar {
+  height: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.open-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.25s ease;
+}
+.open-progress-fill.indeterminate {
+  width: 40%;
+  animation: open-progress-slide 1.1s ease-in-out infinite;
+}
+.open-progress[data-stage='ready'] .open-progress-fill {
+  width: 100%;
+}
+@keyframes open-progress-slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.open-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 5px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  min-width: 0;
+}
+.open-progress-stage {
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.open-progress-cache {
+  color: var(--ok);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.open-progress-msg {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.open-progress-elapsed {
+  margin-left: auto;
+  color: var(--fg-dim);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+.open-progress-spinner {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: open-progress-spin 0.7s linear infinite;
+}
+@keyframes open-progress-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ---- tx settings (spec §6 tier 2) ------------------------------------- */
 .tx-settings {
   position: relative;

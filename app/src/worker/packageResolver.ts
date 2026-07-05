@@ -105,17 +105,24 @@ export async function acquireForProject(
     // metadata to pick a version) from not-mounted (need the bytes).
     const toFetch: MissingPackage[] = [];
     let learnedNewVersion = false;
+    // Packages whose version lookup failed because the registry was UNREACHABLE
+    // (network/CORS/offline) rather than genuinely absent — drives a truthful
+    // block message ("registry unreachable" vs "no versions found").
+    const unreachableIds = new Set<string>();
 
     for (const m of step.missing) {
       if (m.reason.kind === 'unresolved_version') {
         // Try to LEARN the available versions from the registry metadata so the
         // NEXT resolve round can pick one (decision stays in Rust). If we already
-        // have versions indexed for it, the engine simply couldn't match — skip.
+        // have versions indexed for it (e.g. seeded from the baked manifest), the
+        // engine simply couldn't match — skip the network.
         if (!index.versions[m.package_id]) {
-          const versions = await fetchRegistryVersions(m.package_id, onProgress);
+          const { versions, unreachable } = await fetchRegistryVersions(m.package_id, onProgress);
           if (versions.length) {
             index.versions[m.package_id] = versions;
             learnedNewVersion = true;
+          } else if (unreachable) {
+            unreachableIds.add(m.package_id);
           }
         }
       } else {
@@ -129,9 +136,13 @@ export async function acquireForProject(
 
     if (toFetch.length === 0 && !learnedNewVersion) {
       // Nothing fetchable AND nothing new learned: the remaining missing are all
-      // unresolved versions we couldn't learn. Block them.
+      // unresolved versions we couldn't learn. Block them — naming registry
+      // unreachability where that (not absence) is the cause.
       for (const m of step.missing) {
-        blocked.push(blockedFrom(m, 'no versions found in any configured registry'));
+        const why = unreachableIds.has(m.package_id)
+          ? 'registry unreachable — check your connection (or configure a package proxy in Settings)'
+          : 'no versions found in any configured registry';
+        blocked.push(blockedFrom(m, why));
       }
       break;
     }
@@ -290,29 +301,46 @@ async function fetchFromRegistry(
 }
 
 /** Query a registry's npm-style metadata for a package's available versions
- *  (used to build the engine's version index for `latest`/`x`). Returns [] if no
- *  registry answers. */
+ *  (used to build the engine's version index for `latest`/`x`). Returns the found
+ *  versions plus `unreachable: true` when EVERY registry threw (network/CORS/
+ *  offline) rather than answering — so a subsequent block can say "registry
+ *  unreachable" instead of falsely implying the package doesn't exist. */
 async function fetchRegistryVersions(
   id: string,
   onProgress: ResolveProgress,
-): Promise<string[]> {
+): Promise<{ versions: string[]; unreachable: boolean }> {
+  let anyReplied = false; // at least one registry answered (any HTTP status)
   for (const registry of getRegistries()) {
     const url = viaProxy(metadataUrl(registry, id));
     onProgress({ stage: 'registry-fetch', label: id, message: `Looking up ${id} versions…` });
     try {
       const resp = await fetch(url, { redirect: 'follow' });
+      anyReplied = true;
       if (!resp.ok) continue;
       const meta = await resp.json();
       const versions = meta?.versions ? Object.keys(meta.versions) : [];
-      if (versions.length) return versions;
+      if (versions.length) return { versions, unreachable: false };
     } catch {
-      /* try the next registry */
+      /* network-level failure for this registry — try the next */
     }
   }
-  return [];
+  // Unreachable = no registry ever produced an HTTP reply (all threw).
+  return { versions: [], unreachable: !anyReplied };
 }
 
-function mergeLabelsIntoIndex(index: VersionIndex, labels: string[]): void {
+/** Build a VersionIndex seed from `name#version` labels (e.g. the baked-manifest
+ *  labels). Seeding baked pins lets Rust resolve `latest`/`x` requests for
+ *  publisher-internal alias packages that DON'T exist on any registry (the `.r4`
+ *  alias set: hl7.fhir.uv.tools.r4 / hl7.terminology.r4 / hl7.fhir.uv.extensions.r4)
+ *  with zero network — otherwise a `latest` request hard-blocks with "no versions
+ *  found in any configured registry" even though the bytes are already mounted. */
+export function indexFromLabels(labels: Iterable<string>): VersionIndex {
+  const index: VersionIndex = { versions: {} };
+  mergeLabelsIntoIndex(index, [...labels]);
+  return index;
+}
+
+export function mergeLabelsIntoIndex(index: VersionIndex, labels: string[]): void {
   for (const label of labels) {
     const hash = label.lastIndexOf('#');
     if (hash <= 0) continue;

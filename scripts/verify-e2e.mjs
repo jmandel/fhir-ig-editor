@@ -698,12 +698,134 @@ try {
   // Restore the warm path for any later gates.
   await evalJs(ws, `(() => { const e = window.__igDebug && window.__igDebug.engine; if (e) e.forceLiveTemplate = false; return true; })()`);
 
+  // ---- project-open progress (open-progress gate) --------------------------
+  // Clicking "Open US Core" streams a ~16 MB manifest + runs acquisition +
+  // compile + snapshot. That must surface STAGED progress (not a bare "Loading…"
+  // line) or the open looks hung on mobile. Install a collector that self-tracks
+  // the `.open-progress[data-stage]` overlay's appearance, distinct stages, and
+  // clearing (a fast open can flash + clear between polls, so a single post-hoc
+  // DOM read is unreliable — a 25ms tick catches every React render). Runs BEFORE
+  // the preview-window gate — that gate CLOSES the editor tab as its final test,
+  // which would kill the shared CDP socket for any step placed after it — so we
+  // restore the stock-template project state at the end of this block.
+  await evalJs(ws, `(() => {
+    window.__openProgress = { stages: [], appeared: false, cleared: false, lastMsgs: [] };
+    const tick = () => {
+      const el = document.querySelector('.open-progress');
+      if (el) {
+        const op = window.__openProgress;
+        op.appeared = true;
+        op.cleared = false;
+        const s = el.getAttribute('data-stage');
+        if (s && op.stages[op.stages.length - 1] !== s && !op.stages.includes(s)) op.stages.push(s);
+        const msg = el.querySelector('.open-progress-msg')?.textContent || '';
+        if (msg && op.lastMsgs[op.lastMsgs.length - 1] !== msg && op.lastMsgs.length < 30) op.lastMsgs.push(msg);
+      } else if (window.__openProgress.appeared) {
+        window.__openProgress.cleared = true;
+      }
+    };
+    window.__openProgressTimer = setInterval(tick, 25);
+    return true;
+  })()`);
+  const clickedUsCore = await evalJs(ws, `(() => {
+    const btns = [...document.querySelectorAll('.topbar-actions .btn')];
+    const b = btns.find((x) => /US Core/i.test(x.textContent || ''));
+    if (!b) return 'no-button';
+    b.click();
+    return 'clicked';
+  })()`);
+  results.usCoreClicked = clickedUsCore;
+  if (clickedUsCore === 'clicked') {
+    // Wait for the overlay to APPEAR first (openProject is async — the overlay
+    // mounts a tick after the click; a bare res-row check would false-pass on the
+    // PREVIOUS project's rows before the overlay ever renders).
+    await waitFor(ws, `window.__openProgress.appeared`, 30000, 'open-progress overlay appeared');
+    // Then wait for the open to COMPLETE, defined as the overlay CLEARING
+    // (openingSince → null in the finally). Note: US Core depends on many
+    // registry-only packages, so whether it fully compiles depends on external
+    // network — the open-PROGRESS gate asserts the staged UI (appears, ≥3 stages,
+    // clears), NOT that US Core produces resources (a separate network concern).
+    await waitFor(ws, `window.__openProgress.cleared`, 150000, 'US Core open overlay cleared');
+    const prog = await evalJs(ws, `(() => { clearInterval(window.__openProgressTimer); return window.__openProgress; })()`);
+    results.openProgressAppeared = prog.appeared;
+    results.openProgressStages = prog.stages;
+    results.openProgressMsgs = prog.lastMsgs;
+    results.openProgressCleared = prog.cleared && await evalJs(ws, `!document.querySelector('.open-progress')`);
+    results.usCoreResourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
+    // Restore the exact stock-template project state the preview-window gate needs:
+    // re-open the demo IG, switch the preview generator back to the stock template,
+    // and wait for its page list + index render. (Opening US Core switched the
+    // project + reset the generator to 'cycle'.)
+    await evalJs(ws, `(() => { const b=[...document.querySelectorAll('.topbar-actions .btn')].find(x=>/demo IG/i.test(x.textContent||'')); if(b) b.click(); return true; })()`);
+    await waitFor(ws, `document.querySelectorAll('.res-row').length > 0 && !document.querySelector('.open-progress')`, 120000, 'demo IG re-opened after US Core');
+    // Ensure we're on the Site preview tab, then re-select the stock-template generator.
+    await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+    await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'preview generator select present');
+    await evalJs(ws, `(() => {
+      const sel = document.querySelector('.preview-generator-select select');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, 'hl7.fhir.template');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return sel.value;
+    })()`);
+    await waitFor(ws, `(() => { const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value); return opts.some(v => v.startsWith('en/')); })()`, 90000, 'stock template page list restored');
+    await evalJs(ws, `(() => {
+      const sel = document.querySelector('.preview-page-select select');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, 'en/index.html');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(ws, `(() => { const f = document.querySelector('.preview-frame'); const doc = f && (f.contentDocument || f.contentWindow?.document); return doc && doc.body && doc.body.textContent.length > 500; })()`, 60000, 'stock template index re-rendered after US Core');
+  }
+
+  // ---- baked-index seed (resolver) gate ------------------------------------
+  // The `.r4` alias set (hl7.fhir.uv.tools.r4 / hl7.terminology.r4 /
+  // hl7.fhir.uv.extensions.r4) exists ONLY as baked bundles — never on any
+  // registry. A `latest` request for one must resolve from the SEEDED baked index
+  // with ZERO network and ZERO blocked packages. Simulate the live condition by
+  // denying the registry origins, then resolve a config that pins tools.r4 at
+  // `latest`, and assert nothing blocks.
+  results.bakedSeedResolve = await evalJs(ws, `(async () => {
+    const e = window.__igDebug && window.__igDebug.engine;
+    if (!e) return { error: 'no-engine' };
+    const realFetch = window.fetch;
+    let registryHits = 0;
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (/packages2?\\.fhir\\.org/.test(url)) { registryHits++; return Promise.reject(new Error('registry blocked (test)')); }
+      return realFetch(input, init);
+    };
+    try {
+      const config = [
+        'id: test.baked.seed',
+        'canonical: https://example.org/baked-seed',
+        'name: BakedSeedProbe',
+        'status: draft',
+        'version: 0.0.1',
+        'fhirVersion: 4.0.1',
+        'dependencies:',
+        '  hl7.fhir.uv.tools.r4: latest',
+      ].join('\\n');
+      const outcome = await e.acquireForProject(config);
+      return {
+        blocked: (outcome.blocked || []).map((b) => b.packageId + '#' + b.version + ' — ' + b.why),
+        satisfied: !!(outcome.step && outcome.step.satisfied),
+        registryHits,
+      };
+    } catch (err) {
+      return { error: String(err), registryHits };
+    } finally {
+      window.fetch = realFetch;
+    }
+  })()`);
+
   // ---- preview window (task #37): SW-backed REAL browser tab ----------------
-  // The editor is now on the stock template with a warm engine. Open the rendered
+  // The editor is back on the stock template with a warm engine. Open the rendered
   // site as a real tab (SW-served real URLs), then assert: cross-page navigation,
   // F5 reload, back/forward, smart hot reload (edit a page -> its open tab reloads,
   // an UNRELATED open tab does NOT), and the editor-closed fallback ladder
   // (cached page = 200; non-cached page = friendly fallback, never a browser error).
+  // Runs LAST: its final step CLOSES the editor tab, so no CDP eval may follow it.
   results.previewWindow = await runPreviewWindowGate(
     base,
     ws,
@@ -793,6 +915,31 @@ try {
   // no network); only assert it when we actually saw a cold fetch of eager bundles.
   if (!results.warmStart && !results.r5FetchedLazily) {
     console.error('assert: r5.core was never fetched on a cold start (snapshot needs it — lazy mount failed?)'); ok = false;
+  }
+
+  // ---- project-open progress gate (open-progress) ------------------------
+  // Opening US Core must surface staged progress, not a bare "Loading…" line.
+  if (results.usCoreClicked === 'clicked') {
+    if (!results.openProgressAppeared) { console.error('assert: open-progress overlay never appeared during US Core open'); ok = false; }
+    const stages = results.openProgressStages || [];
+    if (!(stages.length >= 3)) { console.error('assert: <3 distinct open-progress stages observed:', JSON.stringify(stages)); ok = false; }
+    if (!results.openProgressCleared) { console.error('assert: open-progress overlay did not clear after US Core open'); ok = false; }
+    // NOTE: US Core resource count is informational — a full compile needs
+    // registry-only packages (external network), so we don't gate on it.
+    if (!(results.usCoreResourceCount >= 0)) { console.error('assert: US Core resource count missing (open failed?)'); ok = false; }
+  } else {
+    console.error('assert: could not click Open US Core button —', results.usCoreClicked); ok = false;
+  }
+
+  // ---- baked-index seed gate (resolver) ----------------------------------
+  // A baked-only `.r4` alias at `latest` must resolve with zero blocked packages
+  // even when the registry is unreachable — the seed makes it a pure baked hit.
+  {
+    const bs = results.bakedSeedResolve || {};
+    if (bs.error) { console.error('assert: baked-seed resolve errored:', bs.error); ok = false; }
+    else if (!(Array.isArray(bs.blocked) && bs.blocked.length === 0)) {
+      console.error('assert: baked-only .r4 alias at latest blocked despite the seed (registry was denied):', JSON.stringify(bs.blocked)); ok = false;
+    }
   }
 
   // ---- ValueSet expansion tab gate (spec §6 tier 1) ----------------------

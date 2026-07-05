@@ -5,8 +5,15 @@
 // fetch + one loadAll gives an offline-capable working project.
 
 import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
+import type { ProgressEvent } from '../worker/protocol';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
+
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
 
 interface IgManifest {
   name: string;
@@ -25,11 +32,24 @@ export async function loadDemoIg(store: ProjectStore): Promise<DemoIgMeta> {
   return loadProject(store, 'cycle');
 }
 
-/** Load a baked project by id (`data/<id>/manifest.json`). */
-export async function loadProject(store: ProjectStore, projectId: string): Promise<DemoIgMeta> {
-  const manifest: IgManifest = await (
-    await fetch(`${BASE}data/${projectId}/manifest.json`)
-  ).json();
+/** Load a baked project by id (`data/<id>/manifest.json`). The optional
+ *  `onProgress` surfaces the manifest fetch (with byte count when the response
+ *  carries Content-Length) so the project-open overlay reads as alive. */
+export async function loadProject(
+  store: ProjectStore,
+  projectId: string,
+  onProgress?: (ev: ProgressEvent) => void,
+): Promise<DemoIgMeta> {
+  const resp = await fetch(`${BASE}data/${projectId}/manifest.json`);
+  if (!resp.ok) throw new Error(`fetch ${projectId} manifest -> ${resp.status}`);
+  const len = Number(resp.headers.get('content-length')) || 0;
+  onProgress?.({
+    stage: 'manifest',
+    label: projectId,
+    bytes: len || undefined,
+    message: `Loading ${projectId} project files${len ? ` (${fmtBytes(len)})` : ''}…`,
+  });
+  const manifest: IgManifest = await resp.json();
   const files: ProjectFile[] = Object.entries(manifest.files).map(([path, text]) => ({
     path,
     text,

@@ -52,6 +52,12 @@ export function App() {
   const [status, setStatus] = useState('Booting…');
   // Cold-start progress (spec §1): staged phase + per-bundle progress.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  // Project-open progress: while a baked project is opening/switching (US Core,
+  // demo IG) we surface the SAME staged progress the boot path shows — otherwise
+  // the ~14 MB of bundle fetch + mount + compile + snapshot looks hung (mobile).
+  // `openingSince` is the start ms so the overlay can show elapsed seconds even on
+  // indeterminate stages; null = not opening.
+  const [openingSince, setOpeningSince] = useState<number | null>(null);
   // Bumped when the tx endpoint changes, so the VS tab re-evaluates.
   const [settingsVersion, setSettingsVersion] = useState(0);
 
@@ -340,23 +346,47 @@ export function App() {
   // ---- open a baked project -------------------------------------------------
   const openProject = useCallback(async (projectId: string) => {
     if (!store) return;
-    setStatus(`Loading ${projectId}…`);
+    const engine = engineRef.current;
+    // Surface the SAME staged progress the boot path shows for the whole open:
+    // manifest fetch → package acquisition (bundle fetch/mount) → compile →
+    // snapshot data mount → site render. Every stage flows through `setProgress`;
+    // `openingSince` keeps the overlay mounted (with elapsed seconds) across the
+    // inner cb swaps runCompile/runBuildSite make. Without this the open is a bare
+    // "Loading …" statusline while ~14 MB streams — indistinguishable from hung.
+    setOpeningSince(Date.now());
+    const emit = (ev: ProgressEvent) => {
+      setProgress(ev);
+      setStatus(ev.message);
+    };
+    emit({ stage: 'manifest', message: `Loading ${projectId} project files…` });
+    engine?.setProgress(emit);
     localStorage.setItem(PROJECT_KEY, projectId);
     projectIdRef.current = projectId;
-    const meta = await loadProject(store, projectId);
-    setProjectLoaded(true);
-    setStatus(`Loaded ${meta.name} — ${meta.fileCount} files.`);
-    // Open the first FSH file (or first pagecontent md for FSH-less projects).
-    const first =
-      store.list().find((p) => p.endsWith('.fsh')) ??
-      store.list().find((p) => /^input\/pagecontent\/.*\.md$/.test(p)) ??
-      store.list()[0] ??
-      null;
-    if (first) {
-      setActivePath(first);
-      setActiveText(store.read(first) ?? '');
+    try {
+      const meta = await loadProject(store, projectId, emit);
+      setProjectLoaded(true);
+      emit({ stage: 'bundle-mount', message: `Loaded ${meta.name} — ${meta.fileCount} files. Compiling…` });
+      // Open the first FSH file (or first pagecontent md for FSH-less projects).
+      const first =
+        store.list().find((p) => p.endsWith('.fsh')) ??
+        store.list().find((p) => /^input\/pagecontent\/.*\.md$/.test(p)) ??
+        store.list()[0] ??
+        null;
+      if (first) {
+        setActivePath(first);
+        setActiveText(store.read(first) ?? '');
+      }
+      // runCompile drives acquisition (bundle fetch/mount), compile, snapshot, and
+      // the site render — all of which report through the engine progress cb we
+      // set above. Await it so the overlay stays up until the project is usable.
+      if (engine) await runCompile(store, engine);
+      emit({ stage: 'ready', message: `${meta.name} ready.` });
+    } catch (e) {
+      emit({ stage: 'ready', message: `Failed to open ${projectId}: ${String(e)}` });
+    } finally {
+      engine?.setProgress(null);
+      setOpeningSince(null);
     }
-    if (engineRef.current) void runCompile(store, engineRef.current);
   }, [store, runCompile]);
   const openDemo = useCallback(() => openProject('cycle'), [openProject]);
 
@@ -589,7 +619,10 @@ export function App() {
         </div>
       )}
 
-      {projectLoaded && progress && !engineReady && (
+      {openingSince != null && progress && (
+        <OpenProgress progress={progress} since={openingSince} />
+      )}
+      {projectLoaded && progress && !engineReady && openingSince == null && (
         <div className="lazy-progress" title={progress.message}>{progress.message}</div>
       )}
 
@@ -618,6 +651,55 @@ function StartupProgress({ progress }: { progress: ProgressEvent }) {
       <div className="startup-msg">
         {progress.fromCache && <span className="startup-cache">⚡ cached</span>}
         {progress.message}
+      </div>
+    </div>
+  );
+}
+
+/** Human stage labels for the project-open overlay. Keeps the tiny per-item
+ *  `message` (which names the specific bundle/file) but headlines the PHASE so a
+ *  narrow screen still reads what's happening. */
+const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
+  wasm: 'Starting engine',
+  manifest: 'Loading project',
+  resolve: 'Resolving packages',
+  'bundle-fetch': 'Fetching packages',
+  'bundle-cache-hit': 'Loading packages',
+  'bundle-mount': 'Mounting packages',
+  'registry-fetch': 'Fetching from registry',
+  'package-blocked': 'Package unavailable',
+  'lazy-fetch': 'Fetching snapshot data',
+  ready: 'Ready',
+};
+
+/** Project-open progress (US Core / demo IG): a mobile-safe banner under the
+ *  status line. Reuses the same staged `ProgressEvent` the boot path emits, adds
+ *  a determinate-or-animated bar, a distinct cache marker, and a ticking elapsed
+ *  counter so nothing ever looks hung. Wraps on narrow widths — never overflows. */
+function OpenProgress({ progress, since }: { progress: ProgressEvent; since: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const elapsed = Math.max(0, Math.round((now - since) / 1000));
+  const pct = progress.fraction != null ? Math.round(progress.fraction * 100) : null;
+  const determinate = pct != null;
+  const done = progress.stage === 'ready';
+  return (
+    <div className="open-progress" data-stage={progress.stage} role="status" aria-live="polite">
+      <div className="open-progress-bar">
+        <div
+          className={`open-progress-fill${determinate ? '' : ' indeterminate'}`}
+          style={determinate ? { width: `${pct}%` } : undefined}
+        />
+      </div>
+      <div className="open-progress-line">
+        {!done && <span className="open-progress-spinner" aria-hidden="true" />}
+        <span className="open-progress-stage">{OPEN_STAGE_LABEL[progress.stage]}</span>
+        {progress.fromCache && <span className="open-progress-cache">⚡ from cache</span>}
+        <span className="open-progress-msg">{progress.message}</span>
+        <span className="open-progress-elapsed">{elapsed}s</span>
       </div>
     </div>
   );

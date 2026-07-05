@@ -244,7 +244,15 @@ export class EngineClient {
    *  `blocked` list for the UI. Safe to call before every compile of an arbitrary
    *  IG; it is a no-op once the closure is already mounted. */
   async acquireForProject(config: string): Promise<ResolveOutcome> {
-    const { acquireForProject } = await import('./packageResolver');
+    const { acquireForProject, indexFromLabels } = await import('./packageResolver');
+    // Seed the resolver's version index with the baked manifest's pinned labels so
+    // a `latest`/`x` request for a package that exists ONLY as a baked bundle (the
+    // publisher-internal `.r4` alias set — hl7.fhir.uv.tools.r4 / hl7.terminology.r4
+    // / hl7.fhir.uv.extensions.r4, none of which are on packages.fhir.org) resolves
+    // to its baked pin with ZERO network. Without this the engine reports the coord
+    // as an unresolved_version, the registry can never answer, and it hard-blocks
+    // with "no versions found" even though the bytes are already mounted.
+    const seedIndex = indexFromLabels(this.bakedByLabel.keys());
     return acquireForProject(
       {
         resolveStep: (cfg, idx) => this.resolveStep(cfg, idx),
@@ -260,6 +268,7 @@ export class EngineClient {
       },
       config,
       (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+      seedIndex,
     );
   }
 
