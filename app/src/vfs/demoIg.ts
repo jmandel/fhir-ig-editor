@@ -6,8 +6,22 @@
 
 import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
 import type { ProgressEvent } from '../worker/protocol';
+import { loadGithubIg, type GithubIgSpec } from './githubIg';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
+
+/** A featured/openable project whose SOURCE is fetched live from a GitHub repo
+ *  @ ref (no baked data/<id>/manifest.json). The loader is rendering-path-
+ *  agnostic — the produced project is the same shape as a baked one. Add a
+ *  preset here (or bump `ref`) to feature a new IG. */
+export const GITHUB_PROJECTS: Record<string, GithubIgSpec> = {
+  ips: {
+    owner: 'HL7',
+    repo: 'fhir-ips',
+    ref: '2.0.1',
+    name: 'International Patient Summary (IPS)',
+  },
+};
 
 function fmtBytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -40,6 +54,11 @@ export async function loadProject(
   projectId: string,
   onProgress?: (ev: ProgressEvent) => void,
 ): Promise<DemoIgMeta> {
+  // Live GitHub-sourced projects (no baked manifest) go through the runtime
+  // loader; everything else is a baked data/<id>/manifest.json fetch.
+  const gh = GITHUB_PROJECTS[projectId];
+  if (gh) return loadGithubIg(store, gh, onProgress);
+
   const resp = await fetch(`${BASE}data/${projectId}/manifest.json`);
   if (!resp.ok) throw new Error(`fetch ${projectId} manifest -> ${resp.status}`);
   const len = Number(resp.headers.get('content-length')) || 0;

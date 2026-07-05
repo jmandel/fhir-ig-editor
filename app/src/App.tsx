@@ -58,6 +58,10 @@ export function App() {
   // `openingSince` is the start ms so the overlay can show elapsed seconds even on
   // indeterminate stages; null = not opening.
   const [openingSince, setOpeningSince] = useState<number | null>(null);
+  // A project-open FAILURE (manifest/network/CORS/parse). Kept as a persistent,
+  // dismissible banner — the open overlay clears on error, so without this the
+  // failure would only flash in the status line (the silent dead-click bug).
+  const [openError, setOpenError] = useState<{ projectId: string; message: string } | null>(null);
   // Bumped when the tx endpoint changes, so the VS tab re-evaluates.
   const [settingsVersion, setSettingsVersion] = useState(0);
 
@@ -368,6 +372,7 @@ export function App() {
     // inner cb swaps runCompile/runBuildSite make. Without this the open is a bare
     // "Loading …" statusline while ~14 MB streams — indistinguishable from hung.
     setOpeningSince(Date.now());
+    setOpenError(null); // clear any prior failure the moment a new open starts
     const emit = (ev: ProgressEvent) => {
       setProgress(ev);
       setStatus(ev.message);
@@ -396,7 +401,11 @@ export function App() {
       if (engine) await runCompile(store, engine);
       emit({ stage: 'ready', message: `${meta.name} ready.` });
     } catch (e) {
-      emit({ stage: 'ready', message: `Failed to open ${projectId}: ${String(e)}` });
+      // Surface the failure VISIBLY (persistent banner) — a fetch/CORS/HTTP/parse
+      // error must never be a silent dead click (the exact US Core 404 bug).
+      const message = String(e).replace(/^Error:\s*/, '');
+      setStatus(`Failed to open ${projectId}: ${message}`);
+      setOpenError({ projectId, message });
     } finally {
       engine?.setProgress(null);
       setOpeningSince(null);
@@ -487,6 +496,14 @@ export function App() {
           <TxSettings onChange={() => setSettingsVersion((v) => v + 1)} />
           <button className="btn" disabled={!engineReady} onClick={openDemo}>
             Open demo IG
+          </button>
+          <button
+            className="btn btn-featured"
+            disabled={!engineReady}
+            onClick={() => void openProject('ips')}
+            title="Load the HL7 International Patient Summary IG source live from GitHub"
+          >
+            Open IPS
           </button>
           <button className="btn" disabled={!engineReady} onClick={() => void openProject('uscore')}>
             Open US Core
@@ -630,6 +647,22 @@ export function App() {
               )}
             </div>
           </section>
+        </div>
+      )}
+
+      {openError && (
+        <div className="open-error" role="alert">
+          <div className="open-error-body">
+            <strong>Couldn't open {openError.projectId}.</strong> {openError.message}
+          </div>
+          <div className="open-error-actions">
+            <button className="btn" onClick={() => void openProject(openError.projectId)}>
+              Retry
+            </button>
+            <button className="btn" onClick={() => setOpenError(null)} aria-label="Dismiss">
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 

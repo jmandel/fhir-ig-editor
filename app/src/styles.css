@@ -80,6 +80,30 @@ body {
   opacity: 0.5;
   cursor: default;
 }
+.btn-featured {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.open-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: #fdecec;
+  border-bottom: 1px solid #e07070;
+  color: #7a1414;
+  font-size: 12px;
+}
+.open-error-body {
+  flex: 1 1 260px;
+  min-width: 0;
+  word-break: break-word;
+}
+.open-error-actions {
+  display: flex;
+  gap: 8px;
+}
 .btn-primary {
   background: var(--accent);
   color: #06121c;
