@@ -205,6 +205,10 @@ export class ProjectStore {
       if (
         p.startsWith('input/pagecontent/') ||
         p.startsWith('input/includes/') ||
+        // input/data/* are the IG-authored site.data files the publisher copies
+        // into temp/pages/_data/* — the source-driven stock adapter (task #45)
+        // stages them alongside the producer-emitted _data model.
+        p.startsWith('input/data/') ||
         (p.startsWith('input/resources/') && p.endsWith('.json'))
       ) {
         out[p] = utf8ToBase64(t);

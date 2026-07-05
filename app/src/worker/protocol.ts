@@ -264,6 +264,13 @@ export interface EngineOps {
   // fetched+mounted the whole base chain first (Rust decides which packages via
   // walk_base_chain; JS fetches them on the SAME resolve→fetch→mount path).
   mountTemplate: { args: [coord: string]; result: { files: number } };
+  // Source-driven stock site (task #45): synthesize the per-artifact page SHELLS
+  // + the `_data/*` site-data model from the CURRENT compile (compiled + predefined
+  // resources) and the mounted template's `config.json`/`layouts`, merging them
+  // into the engine site tree (shells at the root, `_data/*` under `_data/`). This
+  // replaces the pre-baked `{id}-stock.json` warm-start bundle: mount resources →
+  // mountTemplate → produceStockSite → stage pagecontent → render.
+  produceStockSite: { args: []; result: { pages: number; data: number } };
   listSitePages: { args: []; result: { pages: string[] } };
   renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
   renderFragment: { args: [ref: string, kind: string]; result: { html: string } };

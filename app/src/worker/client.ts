@@ -338,6 +338,14 @@ export class EngineClient {
     return this.call('mountTemplate', coord);
   }
 
+  /** Source-driven stock site (task #45): synthesize the artifact page shells +
+   *  the `_data` model from the CURRENT compile + the mounted template, merging
+   *  both into the engine site tree. Call AFTER compile + mountTemplate. Replaces
+   *  the pre-baked `{id}-stock.json` warm-start bundle. */
+  async produceStockSite(): Promise<{ pages: number; data: number }> {
+    return this.call('produceStockSite');
+  }
+
   /** LIVE template load (#40): the full resolve→fetch→mount→materialize path.
    *  Walks the template's `base` chain (Rust's rule, mirrored in JS because
    *  `mountTemplate` consumes an already-mounted chain), fetching + mounting each

@@ -30,6 +30,7 @@ interface WasmSession {
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
   mountSite(filesJson: string, optionsJson: string): string;
   mountTemplate(coord: string): string;
+  produceStockSite(): string;
   renderLiquid(source: string, dataJson: string): string;
   renderMarkdown(md: string, optsJson: string): string;
   listPages(): string;
@@ -260,6 +261,14 @@ const handlers: Handlers = {
   async mountTemplate(coord: string) {
     const s = await ensureSession();
     return unwrap<{ files: number }>(s.mountTemplate(coord));
+  },
+
+  /** Source-driven stock site (task #45): produce the artifact page shells + the
+   *  `_data` model from the current compile + mounted template, merging both into
+   *  the engine site tree. Replaces the pre-baked `{id}-stock.json` bundle. */
+  async produceStockSite() {
+    const s = await ensureSession();
+    return unwrap<{ pages: number; data: number }>(s.produceStockSite());
   },
 
   async listSitePages() {
