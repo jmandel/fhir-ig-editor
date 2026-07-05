@@ -99,8 +99,17 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
 
   private async ensureTree(projectId: string): Promise<Record<string, SiteTreeFile>> {
     if (this.tree && this.treeProject === projectId) return this.tree;
-    const resp = await fetch(`${BASE}data/sites/${projectId}-stock.json`);
-    if (!resp.ok) throw new Error(`stock site tree fetch (${projectId}) -> ${resp.status}`);
+    const url = `${BASE}data/sites/${projectId}-stock.json`;
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      throw new Error(
+        `stock site tree fetch failed: ${url} (${e}). If the app was just ` +
+          `redeployed, reload the page to pick up the new version.`,
+      );
+    }
+    if (!resp.ok) throw new Error(`stock site tree fetch ${url} -> HTTP ${resp.status}`);
     this.tree = (await resp.json()) as Record<string, SiteTreeFile>;
     this.treeProject = projectId;
     this.pagePrefix = Object.keys(this.tree).some((k) => k.startsWith('en/')) ? 'en/' : '';

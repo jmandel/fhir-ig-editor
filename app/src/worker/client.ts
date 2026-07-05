@@ -371,7 +371,15 @@ export class EngineClient {
       return cached;
     }
     const url = `${BASE}data/templates/${coord.replaceAll('#', '%23')}.json`;
-    const resp = await fetch(url);
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      // Network-level failure (offline, CORS, stale app shell mid-deploy) must
+      // NOT abort the ladder — fall through to the live chain-mount path.
+      console.warn(`template warm artifact fetch failed (${url}): ${e}`);
+      return null;
+    }
     if (!resp.ok) return null;
     const doc = (await resp.json()) as { files: Record<string, SiteTreeFile> };
     const mapped: Record<string, SiteTreeFile> = {};
