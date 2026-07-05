@@ -573,6 +573,64 @@ try {
     const doc = f && (f.contentDocument || f.contentWindow?.document);
     return doc.body.textContent.length;
   })()`);
+
+  // ---- ONLINE fragment-content gate ("titles, no content" regression guard) ----
+  // A stock-template PROFILE page BODY is fragments materialized from the CURRENT
+  // compile's StructureDefinitions (the snapshot/diff HierarchicalTableGenerator
+  // tables, class="hierarchy"). With the registry ALLOWED (normal online use), a
+  // compiled profile page MUST carry that real table markup — not just its title.
+  // This is the exact surface that can regress to title-only; assert on the markup
+  // (and resourceCount>0) so it can't silently come back. Runs on the default demo
+  // IG (cycle: FSH-authored → real compiled resources). NOTE: registry is NOT
+  // blocked here — offline full-render is explicitly out of scope.
+  {
+    const target = await evalJs(ws, `(() => {
+      const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
+      return opts.find(v => /^en\\/StructureDefinition-[^/]+\\.html$/.test(v)
+        && !/-(definitions|mappings|examples|testing)\\.html$/.test(v)) || '';
+    })()`);
+    if (target) {
+      // The profile id (e.g. basal-body-temperature) appears on the rendered
+      // profile page (canonical URL / headings) but NOT on the index — use it to
+      // confirm the frame actually navigated to the PROFILE (a bare length check
+      // false-passes on the already-rendered index).
+      const pid = target.replace(/^en\/StructureDefinition-/, '').replace(/\.html$/, '');
+      await evalJs(ws, `(() => {
+        const sel = document.querySelector('.preview-page-select select');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(sel, ${JSON.stringify(target)});
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await waitFor(ws, `(() => { const f=document.querySelector('.preview-frame'); const doc=f&&(f.contentDocument||f.contentWindow?.document); return doc && doc.body && doc.body.textContent.includes(${JSON.stringify(pid)}); })()`, 60000, 'stock profile page rendered');
+      results.stockProfilePage = await evalJs(ws, `(() => {
+        const f = document.querySelector('.preview-frame');
+        const doc = f && (f.contentDocument || f.contentWindow?.document);
+        const html = doc && doc.body ? doc.body.innerHTML : '';
+        const text = doc && doc.body ? doc.body.textContent : '';
+        const tables = doc ? [...doc.querySelectorAll('table')].map(t => t.getAttribute('class') || '(noclass)') : [];
+        return {
+          target: ${JSON.stringify(target)},
+          htmlLen: html.length,
+          textLen: text.length,
+          hasHierarchy: /class="?hierarchy"?/.test(html),
+          hasFragNotice: /fragments? (unavailable|still loading)/i.test(text),
+          tableCount: tables.length,
+          tableClasses: tables.slice(0, 12),
+        };
+      })()`);
+      // Restore the index page so the warm-edit gate below sees index.md's marker.
+      await evalJs(ws, `(() => {
+        const sel = document.querySelector('.preview-page-select select');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(sel, 'en/index.html');
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await waitFor(ws, `(() => { const f=document.querySelector('.preview-frame'); const doc=f&&(f.contentDocument||f.contentWindow?.document); return doc && doc.body && doc.body.textContent.length > 500; })()`, 30000, 'stock index restored after profile check');
+    } else {
+      results.stockProfilePage = { target: '', htmlLen: 0, textLen: 0, hasHierarchy: false };
+    }
+  }
+
   // WARM EDIT (the F6 gate): the engine + template tree are mounted; edit the
   // already-open index.md and time source-edit -> stock-rendered page update.
   const stockEdit = await evalJs(ws, `(() => {
@@ -839,6 +897,16 @@ try {
   // assertions
   let ok = true;
   if (results.resourceCount < 5) { console.error('assert: too few resources'); ok = false; }
+  // ONLINE fragment-content gate: a compiled profile page must render real table
+  // markup in its body, not just a title ("titles, no content" regression guard).
+  {
+    const pp = results.stockProfilePage || {};
+    if (!(results.resourceCount > 0)) { console.error('assert: example IG compiled 0 resources'); ok = false; }
+    if (!pp.target) { console.error('assert: no stock profile page found to content-check'); ok = false; }
+    else if (!(pp.hasHierarchy && pp.textLen > 1000)) {
+      console.error('assert: stock profile page body lacks real fragment/table content (title-only regression?) —', JSON.stringify(pp)); ok = false;
+    }
+  }
   // preview-window gates (task #37).
   const pw = results.previewWindow || {};
   if (pw.skipped) {
