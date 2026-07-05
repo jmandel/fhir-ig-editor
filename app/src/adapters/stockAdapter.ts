@@ -54,6 +54,23 @@ function mimeFor(name: string): string {
   );
 }
 
+/** A small, self-contained (inline-styled — the preview iframe carries the
+ *  template's CSS, not the app's) inline notice shown when a page's content
+ *  fragments can't materialize at render time (packages still loading / blocked),
+ *  in place of a silently empty body. */
+function gapNoticeHtml(n: number): string {
+  const frag = `${n} fragment${n === 1 ? '' : 's'}`;
+  return (
+    `<div role="status" style="margin:0 0 14px;padding:10px 14px;border:1px solid #d98c00;` +
+    `border-left-width:4px;border-radius:4px;background:#fff6e6;color:#7a4d00;` +
+    `font:13px/1.5 system-ui,sans-serif;">` +
+    `<strong>${frag} unavailable</strong> — packages are still loading or were blocked, ` +
+    `so this page's content could not be generated yet. It will fill in once the ` +
+    `required packages finish downloading (or are provided for an offline/blocked network).` +
+    `</div>`
+  );
+}
+
 function classify(name: string): PageInfo['kind'] {
   if (name.startsWith('StructureDefinition-')) return 'profile';
   if (name.startsWith('ValueSet-')) return 'valueset';
@@ -202,7 +219,57 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
 
   async renderPage(file: string): Promise<{ html: string; renderMs?: number }> {
     if (!this.engine) throw new Error('stock adapter not initialized');
-    return this.engine.renderSitePage(file);
+    const out = await this.engine.renderSitePage(file);
+    // Fragment-gap UX: page BODIES are fragments materialized from the CURRENT
+    // compile (snapshot/diff/binding tables from compiled SDs). When the compile
+    // is incomplete — packages still loading, or blocked on a denied network —
+    // those fragments can't materialize; the publisher's include mechanism emits
+    // NOTHING for a miss, so the page renders title-only with a SILENTLY empty
+    // body (the exact "titles and no content" failure). Surface it instead: probe
+    // this page's own-resource fragment includes and, if the engine can't produce
+    // them (FragError::Gap / NoSuchResource surfaces as a thrown renderFragment),
+    // prepend a small visible inline notice rather than shipping an empty body.
+    try {
+      const gaps = await this.countFragmentGaps(file, out.html);
+      if (gaps > 0) return { html: gapNoticeHtml(gaps) + out.html, renderMs: out.renderMs };
+    } catch {
+      /* gap-probe is best-effort UX; never fail a render over it */
+    }
+    return out;
+  }
+
+  /** Count this page's OWN-resource fragment includes that the engine cannot
+   *  materialize right now. The page source (packed tree) references fragments as
+   *  `{% include {stem}-{kind}.xhtml %}` where `stem` is the page's resource id —
+   *  so the (ref, kind) split is trivial (ref = stem, kind = the suffix) with no
+   *  coupling to the engine's kind registry. A materialized fragment is a cached
+   *  hit (renderSitePage just produced it); a GAP throws — that is the signal. */
+  private async countFragmentGaps(file: string, renderedHtml: string): Promise<number> {
+    const engine = this.engine;
+    const tree = this.tree;
+    if (!engine || !tree) return 0;
+    // Fast path: a materialized snapshot/diff table (HierarchicalTableGenerator)
+    // means the compile fed this page — no need to probe.
+    if (/class="?hierarchy"?/.test(renderedHtml)) return 0;
+    const src = tree[file] ?? tree[`${this.pagePrefix}${file}`];
+    if (typeof src !== 'string') return 0; // only Liquid page sources carry includes
+    const stem = file.slice(file.lastIndexOf('/') + 1).replace(/\.html$/, '');
+    const names = new Set<string>();
+    const re = /\{%\s*include\s+([A-Za-z0-9._-]+\.xhtml)/g;
+    for (let m = re.exec(src); m; m = re.exec(src)) {
+      if (m[1].startsWith(`${stem}-`)) names.add(m[1]);
+    }
+    if (names.size === 0) return 0;
+    let gaps = 0;
+    for (const name of names) {
+      const kind = name.slice(stem.length + 1, -'.xhtml'.length);
+      try {
+        await engine.renderFragment(stem, kind);
+      } catch {
+        gaps++; // FragError::Gap / NoSuchResource — the fragment can't render now
+      }
+    }
+    return gaps;
   }
 
   /** Serve assets straight from the packed tree (the pages reference them
