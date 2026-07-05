@@ -810,6 +810,83 @@ try {
     results.openProgressMsgs = prog.lastMsgs;
     results.openProgressCleared = prog.cleared && await evalJs(ws, `!document.querySelector('.open-progress')`);
     results.usCoreResourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
+    console.error('[diag] usCoreResourceCount =', results.usCoreResourceCount);
+
+    // ---- US CORE online content gate (predefined-resource IG renders LIVE) ----
+    // US Core is a PREDEFINED-resource IG: 0 FSH, every profile lives as
+    // input/resources/StructureDefinition-*.json. The engine must route those into
+    // the render set AND snapshot-complete them against the FULL package closure
+    // (us-core-questionnaireresponse is based on the EXTERNAL sdc profile) — else
+    // the us-core-patient page renders title-only (the exact bug). With the
+    // registry ALLOWED, drive the stock template to the us-core-patient page and
+    // assert its BODY carries the real HierarchicalTableGenerator hierarchy table
+    // and NO fragment-gap notice. This is the pass/fail for the predef-render task.
+    {
+      // Switch to the Site preview tab + the stock template generator (US Core is
+      // rendered by hl7.fhir.template, not the cycle custom generator).
+      await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+      await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'US Core preview generator select present');
+      await evalJs(ws, `(() => {
+        const sel = document.querySelector('.preview-generator-select select');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(sel, 'hl7.fhir.template');
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return sel.value;
+      })()`);
+      await waitFor(ws, `(() => { const opts=[...document.querySelectorAll('.preview-page-select option')].map(o=>o.value); return opts.some(v=>/(^|\\/)StructureDefinition-us-core-/i.test(v)); })()`, 120000, 'US Core stock page list loaded');
+      // Prefer the us-core-patient profile page; fall back to any us-core profile.
+      // US Core's page layout is FLAT (no en/ prefix), so match with an optional
+      // page-dir prefix and skip the derived -definitions/-mappings/-examples/
+      // -testing and *.profile.history pages (they are not the profile body).
+      const target = await evalJs(ws, `(() => {
+        const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
+        return opts.find(v => /(^|\\/)StructureDefinition-us-core-patient\\.html$/i.test(v))
+          || opts.find(v => /(^|\\/)StructureDefinition-us-core-[^/]+\\.html$/i.test(v)
+               && !/-(definitions|mappings|examples|testing)\\.html$/i.test(v)
+               && !/\\.profile\\.history\\.html$/i.test(v)) || '';
+      })()`);
+      if (target) {
+        const pid = target.replace(/^.*\//, '').replace(/^StructureDefinition-/, '').replace(/\.html$/, '');
+        await evalJs(ws, `(() => {
+          const sel = document.querySelector('.preview-page-select select');
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+          setter.call(sel, ${JSON.stringify(target)});
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        try {
+          await waitFor(ws, `(() => { const f=document.querySelector('.preview-frame'); const doc=f&&(f.contentDocument||f.contentWindow?.document); return doc && doc.body && doc.body.textContent.includes(${JSON.stringify(pid)}); })()`, 120000, 'US Core us-core-patient page rendered');
+        } catch (e) {
+          const dump = await evalJs(ws, `(() => {
+            const f=document.querySelector('.preview-frame');
+            const doc=f&&(f.contentDocument||f.contentWindow?.document);
+            const body=doc&&doc.body?doc.body.textContent:'(no frame body)';
+            const errEl=document.querySelector('.preview-error');
+            return { pid:${JSON.stringify(pid)}, bodySnippet:(body||'').slice(0,600), previewError: errEl?errEl.textContent.slice(0,400):null, renderErrGlobal: (window.__lastRenderErr||null) };
+          })()`);
+          console.error('[diag] us-core-patient render FAILED to match pid. Frame state:', JSON.stringify(dump, null, 1));
+          throw e;
+        }
+        results.usCoreProfilePage = await evalJs(ws, `(() => {
+          const f = document.querySelector('.preview-frame');
+          const doc = f && (f.contentDocument || f.contentWindow?.document);
+          const html = doc && doc.body ? doc.body.innerHTML : '';
+          const text = doc && doc.body ? doc.body.textContent : '';
+          const tables = doc ? [...doc.querySelectorAll('table')].map(t => t.getAttribute('class') || '(noclass)') : [];
+          return {
+            target: ${JSON.stringify(target)},
+            htmlLen: html.length,
+            textLen: text.length,
+            hasHierarchy: /class="?hierarchy"?/.test(html),
+            hasFragNotice: /fragments? (unavailable|still loading)/i.test(text),
+            tableCount: tables.length,
+            tableClasses: tables.slice(0, 12),
+          };
+        })()`);
+      } else {
+        results.usCoreProfilePage = { target: '', htmlLen: 0, textLen: 0, hasHierarchy: false };
+      }
+    }
+
     // Restore the exact stock-template project state the preview-window gate needs:
     // re-open the demo IG, switch the preview generator back to the stock template,
     // and wait for its page list + index render. (Opening US Core switched the
@@ -905,6 +982,21 @@ try {
     if (!pp.target) { console.error('assert: no stock profile page found to content-check'); ok = false; }
     else if (!(pp.hasHierarchy && pp.textLen > 1000)) {
       console.error('assert: stock profile page body lacks real fragment/table content (title-only regression?) —', JSON.stringify(pp)); ok = false;
+    }
+  }
+  // US CORE online content gate (predef-render): a PREDEFINED-resource IG must
+  // render its profiles LIVE. Open US Core → us-core-patient page body carries the
+  // real hierarchy table, resourceCount>0, and NO fragment-gap notice.
+  if (results.usCoreClicked === 'clicked') {
+    const up = results.usCoreProfilePage || {};
+    if (!(results.usCoreResourceCount > 0)) {
+      console.error('assert: US Core opened 0 resources (predefined resources not surfaced?)'); ok = false;
+    }
+    if (!up.target) { console.error('assert: no US Core profile page found to content-check'); ok = false; }
+    else if (up.hasFragNotice) {
+      console.error('assert: US Core us-core-patient page shows a fragment-gap notice (profiles not materialized) —', JSON.stringify(up)); ok = false;
+    } else if (!(up.hasHierarchy && up.textLen > 1000)) {
+      console.error('assert: US Core us-core-patient page body lacks real hierarchy/table content (predefined-IG title-only regression?) —', JSON.stringify(up)); ok = false;
     }
   }
   // preview-window gates (task #37).

@@ -67,6 +67,12 @@ export function App() {
   const [revealLine, setRevealLine] = useState<number | undefined>(undefined);
 
   const [compile, setCompile] = useState<CompileResult | null>(null);
+  // Predefined conformance resources (input/resources/**.json) for the resource
+  // panel — a predefined-resource IG (US Core / IPS: 0 FSH) has SUSHI emit
+  // nothing, so without these the panel is empty though the IG is full of
+  // profiles. Captured at compile time (parallel to `compile.resources`, which
+  // stays byte-exact SUSHI output).
+  const [predefinedResources, setPredefinedResources] = useState<CompileResult['resources']>([]);
   const [compiling, setCompiling] = useState(false);
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
@@ -310,11 +316,18 @@ export function App() {
       }
       const result = await engine.compile(cfg, st.fshFiles(), st.predefinedResources());
       setCompile(result);
+      // Predefined conformance resources are part of the IG's browsable resource
+      // set even though SUSHI (FSH-only) does not re-emit them (see the state
+      // decl). Merge them for the panel, deduped by filename against SUSHI output.
+      const sushiNames = new Set(result.resources.map((r) => r.filename));
+      const predef = st.predefinedDisplayResources().filter((r) => !sushiNames.has(r.filename));
+      setPredefinedResources(predef);
+      const allResources = [...result.resources, ...predef];
       // Default-select the first StructureDefinition for the inspector.
       setSelectedResource((cur) => {
-        if (cur && result.resources.some((r) => r.filename === cur)) return cur;
-        const firstSd = result.resources.find((r) => r.resourceType === 'StructureDefinition' && r.url);
-        return firstSd?.filename ?? result.resources[0]?.filename ?? null;
+        if (cur && allResources.some((r) => r.filename === cur)) return cur;
+        const firstSd = allResources.find((r) => r.resourceType === 'StructureDefinition' && r.url);
+        return firstSd?.filename ?? allResources[0]?.filename ?? null;
       });
       // Rebuild the site preview rows (only when the compile had no fatal errors —
       // a broken IG can't produce a coherent site.db). Fire-and-forget.
@@ -322,6 +335,7 @@ export function App() {
       if (!hasError) void runBuildSite(st, engine, localStorage.getItem(GENERATOR_KEY) || 'cycle').catch(() => {});
       else setSiteError('Fix the FSH errors to update the site preview.');
     } catch (e) {
+      setPredefinedResources([]);
       setCompile({
         resources: [],
         diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
@@ -432,7 +446,7 @@ export function App() {
     return m;
   }, [diagnostics]);
 
-  const resources = compile?.resources ?? [];
+  const resources = compile ? [...compile.resources, ...predefinedResources] : [];
   const activeResource = resources.find((r) => r.filename === selectedResource) ?? null;
 
   return (

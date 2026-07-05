@@ -236,6 +236,40 @@ export class ProjectStore {
     return out;
   }
 
+  /** Predefined conformance resources (input/resources/**.json) shaped like the
+   *  compiler's CompiledResource, for the "Compiled resources" panel. A
+   *  predefined-resource IG (0 FSH; e.g. US Core, IPS) authors its profiles as
+   *  input/resources JSON, so SUSHI emits nothing — without these the panel is
+   *  empty even though the IG is full of conformance resources. These are
+   *  display/browse entries (the compile output list stays byte-exact SUSHI). */
+  predefinedDisplayResources(): Array<{
+    filename: string;
+    text: string;
+    resourceType?: string;
+    id?: string;
+    url?: string;
+  }> {
+    const out: Array<{ filename: string; text: string; resourceType?: string; id?: string; url?: string }> = [];
+    for (const [p, t] of this.cache) {
+      if (!(p.startsWith('input/resources/') && p.endsWith('.json'))) continue;
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(t) as Record<string, unknown>;
+      } catch {
+        continue; // malformed — surfaced by the compiler diagnostics
+      }
+      out.push({
+        filename: p.slice(p.lastIndexOf('/') + 1),
+        text: t,
+        resourceType: typeof body.resourceType === 'string' ? body.resourceType : undefined,
+        id: typeof body.id === 'string' ? body.id : undefined,
+        url: typeof body.url === 'string' ? body.url : undefined,
+      });
+    }
+    out.sort((a, b) => a.filename.localeCompare(b.filename));
+    return out;
+  }
+
   config(): string {
     return this.cache.get('sushi-config.yaml') ?? '';
   }
