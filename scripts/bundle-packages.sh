@@ -91,16 +91,41 @@ done
 # ~6.8 MB tgz off the cold-start critical path is the bulk of the speedup, and it
 # is fetched + mounted lazily on the first snapshot / site-preview build.
 #
-# The rule is derived, not hand-listed: a bundle is deferrable iff it is an
-# R5 core AND the IG is not itself R5 (so removing it cannot change compile
-# output). We detect "IG is R5" from the exported cycle config's fhirVersion.
+# The rule is derived, not hand-listed. A bundle is deferrable iff EITHER:
+#  (1) it is an R5 core AND the IG is not itself R5 (removing it cannot change
+#      compile output — r5.core is pulled only by SNAPSHOT generation); OR
+#  (2) it is a SUPERSESSION-SHADOWED lower version: a package id for which a
+#      strictly HIGHER version of the SAME id is also in the closure (bundle-closure).
+#      The cold-start compile loads auto-deps at `latest` → the HIGHER version
+#      (terminology.r4 7.2.0, extensions.r4 5.3.0); the shadowed lower pins
+#      (7.1.0 / 5.2.0) are needed ONLY by the transitive context_closure of a user
+#      IG that CONFIGURES the declaring package as a dep — never by cold start.
+# We detect "IG is R5" from the cycle config's fhirVersion.
 IG_FHIR_VERSION="$(grep -E '^fhirVersion:' "$REPO/vendor/cycle/sushi-config.yaml" 2>/dev/null | head -1 | sed 's/[^0-9.]//g')"
+
+# Highest version seen per id across the closure (numeric-dotted compare, enough
+# for the terminology/extensions pins here — same rule the engine's `latest` uses).
+declare -A MAX_VER=()
+ver_gt() { # ver_gt A B  → 0 (true) iff A > B
+  [ "$1" = "$2" ] && return 1
+  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+for l in "${LABELS[@]}"; do
+  id="${l%%#*}"; v="${l##*#}"
+  cur="${MAX_VER[$id]:-}"
+  if [ -z "$cur" ] || ver_gt "$v" "$cur"; then MAX_VER["$id"]="$v"; fi
+done
+
 is_deferrable() {
   local label="$1"
+  local id="${label%%#*}" v="${label##*#}"
   case "$label" in
     hl7.fhir.r5.core#*) case "$IG_FHIR_VERSION" in 5.*) return 1 ;; *) return 0 ;; esac ;;
-    *) return 1 ;;
   esac
+  # Supersession-shadowed lower version → deferrable.
+  local top="${MAX_VER[$id]:-$v}"
+  if [ "$top" != "$v" ] && ver_gt "$top" "$v"; then return 0; fi
+  return 1
 }
 
 {

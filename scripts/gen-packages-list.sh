@@ -54,6 +54,16 @@ HEADER="$(cat <<'EOF'
 #                             resolve→fetch→mount path then calls mountTemplate.
 #                             Bundling them lets the LIVE path source the chain from
 #                             same-origin baked bundles. Walked by gen-template-chain.sh.
+#   hl7.terminology.r4#7.1.0  — CLOSURE-COMPLETENESS (bundle-closure): the EXACT dep
+#   hl7.fhir.uv.extensions.r4#5.2.0  versions tools.r4#1.1.2's package.json DECLARES.
+#                             The compile loads 7.2.0/5.3.0 (auto-dep `latest`); but
+#                             the TRANSITIVE context_closure over a CONFIGURED
+#                             tools.r4 dep demands these EXACT pins. Registry-denied
+#                             live envs block without them (baked-seed E2E gate).
+#                             `defer:true` — no cold-start compile needs them; only a
+#                             user IG that configures tools.r4 as a dep does. Derived,
+#                             not hand-listed: appended from the closure's own
+#                             package.json declared exact-version deps.
 EOF
 )"
 
@@ -82,6 +92,45 @@ while IFS= read -r tl; do
   grep -q "^${tl%%#*}#" <<<"$LABELS" || LABELS="$LABELS
 $tl"
 done <<<"$TEMPLATE_CHAIN"
+
+# CLOSURE-COMPLETENESS: transitively-declared EXACT dep versions (bundle-closure).
+# The compile load is NON-TRANSITIVE (stock SUSHI parity): auto-deps resolve at
+# `latest` → highest cached (terminology.r4 → 7.2.0, extensions.r4 → 5.3.0), and
+# cycle declares no `dependencies`, so its resolver closure never walks a package's
+# package.json. But the engine's TRANSITIVE context_closure (resolve.rs, ported
+# from package-deps.cjs) DOES walk a CONFIGURED dep's package.json and demands its
+# declared deps at their EXACT pinned version. Any user IG (or the baked-seed E2E
+# probe) that configures e.g. `hl7.fhir.uv.tools.r4: latest` therefore needs
+# tools.r4#1.1.2's declared `hl7.terminology.r4#7.1.0` AND
+# `hl7.fhir.uv.extensions.r4#5.2.0` — DIFFERENT versions than the `latest`-picked
+# 7.2.0/5.3.0 the compile uses. Both versions can be mounted at once (the engine's
+# by_name index is multi-version). Without these, a registry-denied live env blocks
+# (the failing baked-seed gate). We DERIVE them from the closure's own package.json
+# files: every declared `id#exactVersion` not already present is appended.
+scan_labels() { printf '%s\n' "$LABELS"; }
+declare -A HAVE_ID_VER=()
+while IFS= read -r l; do [ -z "$l" ] && continue; HAVE_ID_VER["$l"]=1; done < <(scan_labels)
+EXTRA=""
+while IFS= read -r l; do
+  [ -z "$l" ] && continue
+  pj="$CACHE/$l/package/package.json"
+  [ -f "$pj" ] || continue
+  # Emit each declared dependency as id#version, EXACT versions only (skip
+  # latest/current/dev/x/* — those the resolver picks, they are not extra bundles).
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    dv="${dep##*#}"
+    case "$dv" in latest|current|dev|*x*|*'*'*) continue ;; esac
+    if [ -z "${HAVE_ID_VER[$dep]:-}" ]; then
+      grep -q "^$dep$" <<<"$EXTRA" || EXTRA="$EXTRA$dep
+"
+    fi
+  done < <(python3 -c "import json,sys; d=json.load(open('$pj')); [print(f'{k}#{v}') for k,v in (d.get('dependencies') or {}).items()]" 2>/dev/null)
+done < <(scan_labels)
+if [ -n "$EXTRA" ]; then
+  LABELS="$LABELS
+$(printf '%s' "$EXTRA" | sed '/^$/d')"
+fi
 
 GENERATED="$HEADER
 $LABELS"

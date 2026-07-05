@@ -354,7 +354,10 @@ package registry (`packages.fhir.org`, fallback `packages2.fhir.org`):
   (bundle). It documents WHY each package is present. Notably **r5.core stays
   even though cycle is an R4 IG**: the snapshot walk engine is R5-internal, so
   R4 profile bases resolve against r5.core during snapshot generation — without
-  it the snapshot-tree view (a core M1 deliverable) breaks.
+  it the snapshot-tree view (a core M1 deliverable) breaks. It ALSO carries the
+  **transitively-declared exact-version pins** `hl7.terminology.r4#7.1.0` and
+  `hl7.fhir.uv.extensions.r4#5.2.0` (branch `bundle-closure`) — see the
+  closure-completeness note below.
 - **`scripts/fetch-packages.sh`** — idempotent per-package download+extract to
   `.fhir-cache/<id>#<ver>/package/`; the engine derives its
   `.derived-index.json` sidecar itself, so plain registry tarballs suffice.
@@ -368,6 +371,41 @@ package registry (`packages.fhir.org`, fallback `packages2.fhir.org`):
   the first deployed wasm died at init in the browser with
   `Table.grow(): failed to grow table by 4` (caught by the live headless-Chromium
   check). `build-wasm.sh` also skips wasm-opt below binaryen 116 as a backstop.
+
+### Known limit — exact-version transitive deps (branch `bundle-closure`)
+
+The engine's compile load is NON-transitive (stock SUSHI parity): automatic deps
+(`hl7.fhir.uv.tools.r4` / `hl7.terminology.r4` / `hl7.fhir.uv.extensions.r4`)
+resolve at `latest` = highest cached, so cycle's cold-start compile loads
+terminology.r4 **7.2.0** and extensions.r4 **5.3.0**. But the engine's separate
+TRANSITIVE `context_closure` (`crates/package_store/src/resolve.rs`, ported from
+`snapshot/package-deps.cjs`) walks a **configured** dependency's `package.json`
+and demands its declared deps at their EXACT pin. `tools.r4#1.1.2` declares
+`hl7.terminology.r4#7.1.0` + `hl7.fhir.uv.extensions.r4#5.2.0` — DIFFERENT
+versions than the compile's `latest`-picked 7.2.0/5.3.0.
+
+- **Impact**: any user IG (or the baked-seed E2E probe) that lists
+  `hl7.fhir.uv.tools.r4` under `dependencies:` needs BOTH versions present. On a
+  registry-denied live env, the closure blocked on 7.1.0/5.2.0 (they weren't
+  baked) — the baked-seed E2E gate failed against production.
+- **Fix (closure-completeness)**: `scripts/gen-packages-list.sh` now appends every
+  declared **exact-version** dep of a closure package that isn't already present
+  (DERIVED from the packages' own `package.json`, not hand-listed), so
+  `packages.list` + the baked bundles carry 7.1.0/5.2.0. `bundle-packages.sh`
+  marks them `defer:true` (supersession-shadowed: a strictly higher version of the
+  same id is in the closure, so no cold-start compile needs them — only a
+  configured-`tools.r4` context walk does). Added ~5.4 MB of bundles, ALL deferred
+  off the cold-start critical path (fetched lazily / on the acquisition ladder).
+  The engine's `by_name` index mounts both versions of an id simultaneously, so
+  this is additive — the compile set is unchanged and byte-check stays **10/10**.
+- **Why it masked locally**: `obtainPackage`'s first ladder rung is the OPFS warm
+  cache. A prior local session that opened US Core (whose closure DOES pull
+  terminology.r4#7.1.0/extensions.r4#5.2.0, then from a reachable registry)
+  OPFS-cached those tgz, so the probe served them from OPFS with zero registry
+  hits and passed. CI (fresh Chromium profile → empty OPFS) had no such cache and
+  blocked. **Repro the CI state**: delete `app/public/data/bundles` +
+  `app/dist/data/bundles`, rebuild from `packages.list`, and run E2E against a
+  fresh `--user-data-dir` profile.
 
 ---
 
