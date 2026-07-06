@@ -1,0 +1,17 @@
+{
+  "note": "Baked-IG catalog: CI downloads each repo's publisher-input subset and bakes it to app/public/data/<id>/source.tgz (a same-origin 'worst CDN' — one gzipped fetch per IG, no CORS, offline after first load). Loaded by the loadTgz path in demoIg.ts; opened from the catalog dropdown in App.tsx. Each baked .tgz MUST stay under the 20 MB budget (scripts/bake-catalog.mjs enforces it). Anything not listed here still loads live from GitHub via GITHUB_PROJECTS.",
+  "igs": [
+    { "id": "uscore", "owner": "HL7", "repo": "US-Core", "ref": "9.0.0", "name": "US Core" },
+    { "id": "ips", "owner": "HL7", "repo": "fhir-ips", "ref": "2.0.1", "name": "International Patient Summary (IPS)" },
+    { "id": "mcode", "owner": "HL7", "repo": "fhir-mCODE-ig", "ref": "master", "name": "mCODE" },
+    { "id": "carin-bb", "owner": "HL7", "repo": "carin-bb", "ref": "master", "name": "CARIN Blue Button" },
+    { "id": "sdoh", "owner": "HL7", "repo": "fhir-sdoh-clinicalcare", "ref": "master", "name": "SDOH Clinical Care" },
+    { "id": "pdex", "owner": "HL7", "repo": "davinci-epdx", "ref": "master", "name": "Da Vinci PDex" },
+    { "id": "genomics", "owner": "HL7", "repo": "genomics-reporting", "ref": "master", "name": "Genomics Reporting" },
+    { "id": "crd", "owner": "HL7", "repo": "davinci-crd", "ref": "master", "name": "Da Vinci CRD" },
+    { "id": "dtr", "owner": "HL7", "repo": "davinci-dtr", "ref": "master", "name": "Da Vinci DTR" },
+    { "id": "pas", "owner": "HL7", "repo": "davinci-pas", "ref": "master", "name": "Da Vinci PAS" },
+    { "id": "sdc", "owner": "HL7", "repo": "sdc", "ref": "master", "name": "Structured Data Capture (SDC)" },
+    { "id": "pacio-rt", "owner": "HL7", "repo": "fhir-pacio-rt", "ref": "master", "name": "PACIO Re-Assessment Timepoints" }
+  ]
+}

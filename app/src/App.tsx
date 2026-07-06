@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EngineClient } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
-import { loadProject } from './vfs/demoIg';
+import { loadProject, CATALOG_IGS } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
 import { getSiteGenerator, listSiteGenerators, registerSiteGenerator } from './adapters/types';
 import type { PageInfo } from './adapters/types';
@@ -497,17 +497,26 @@ export function App() {
           <button className="btn" disabled={!engineReady} onClick={openDemo}>
             Open demo IG
           </button>
-          <button
-            className="btn btn-featured"
+          <select
+            className="btn btn-featured open-ig-select"
             disabled={!engineReady}
-            onClick={() => void openProject('ips')}
-            title="Load the HL7 International Patient Summary IG source live from GitHub"
+            value=""
+            title="Open a published HL7 IG (baked source, loads from this site)"
+            onChange={(e) => {
+              const id = e.target.value;
+              e.target.value = '';
+              if (id) void openProject(id);
+            }}
           >
-            Open IPS
-          </button>
-          <button className="btn" disabled={!engineReady} onClick={() => void openProject('uscore')}>
-            Open US Core
-          </button>
+            <option value="" disabled>
+              Open published IG…
+            </option>
+            {CATALOG_IGS.map((ig) => (
+              <option key={ig.id} value={ig.id}>
+                {ig.name}
+              </option>
+            ))}
+          </select>
         </div>
       </header>
 

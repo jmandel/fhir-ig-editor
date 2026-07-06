@@ -129,6 +129,10 @@ jobs:
         run: |
           bash scripts/bundle-packages.sh
           node scripts/export-ig-manifest.mjs
+          # Bake the catalog IGs into same-origin source.tgz archives (the "worst
+          # CDN"): one gzipped fetch per IG, no CORS, offline after first load.
+          # Enforces the per-IG 20 MB budget (fails the build if an IG exceeds it).
+          node scripts/bake-catalog.mjs
           node scripts/copy-site-assets.mjs
           # Stage the packed IG site bundles (the *-stock.json files at the
           # site-bundles ROOT). The templates/ subdir is a SEPARATE artifact set
