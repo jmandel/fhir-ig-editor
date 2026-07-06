@@ -21,6 +21,12 @@ export const GITHUB_PROJECTS: Record<string, GithubIgSpec> = {
     ref: '2.0.1',
     name: 'International Patient Summary (IPS)',
   },
+  uscore: {
+    owner: 'HL7',
+    repo: 'US-Core',
+    ref: '9.0.0',
+    name: 'US Core Implementation Guide',
+  },
 };
 
 function fmtBytes(n: number): string {
