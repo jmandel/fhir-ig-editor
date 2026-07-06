@@ -49,6 +49,18 @@ export async function ensurePreviewServiceWorker(): Promise<boolean> {
     swRegistration = await navigator.serviceWorker.register(`${BASE}preview-sw.js`, {
       scope: PREVIEW_ROOT,
     });
+    // Wait until the SW is ACTIVATED so it can serve preview/ requests (the embedded
+    // iframe navigates there immediately). NOT `navigator.serviceWorker.ready` — that
+    // resolves only when a SW controls THIS page, but our scope is preview/ (the app
+    // shell at `/` is intentionally never controlled), so `.ready` would hang forever.
+    const sw = swRegistration.active ?? swRegistration.waiting ?? swRegistration.installing;
+    if (sw && sw.state !== 'activated') {
+      await new Promise<void>((res) => {
+        const check = () => { if (sw.state === 'activated') { sw.removeEventListener('statechange', check); res(); } };
+        sw.addEventListener('statechange', check);
+        check();
+      });
+    }
     swCapable = true;
   } catch (e) {
     console.warn('[igpreview] SW registration failed; preview window disabled:', e);
@@ -129,6 +141,10 @@ export function preparePreviewHtml(
 // ---- render responder + hot-reload coordinator ---------------------------------
 
 export interface PreviewSource {
+  /** The IG id — the URL-scheme KEY (`preview/<igId>/<path>`). Content is identified
+   *  by the IG, so the SAME URL works embedded (iframe src) and external (new tab),
+   *  and IGs with overlapping page names never collide. */
+  igId: string;
   /** The generator id whose adapter is currently initialized in this editor tab. */
   generatorId: string;
   adapter: SiteGeneratorAdapter;
@@ -231,8 +247,9 @@ async function answerRender(
 ): Promise<void> {
   try {
     const src = source;
-    if (!src || src.generatorId !== generator) {
-      // We don't hold this generator initialized — decline; the SW falls back.
+    // `generator` is the first URL segment — now the IG id (the scheme's key).
+    if (!src || src.igId !== generator) {
+      // We don't hold this IG loaded — decline; the SW falls back.
       port.postMessage({ ok: false });
       return;
     }
@@ -280,13 +297,13 @@ async function refreshOpenPreviews(): Promise<void> {
   for (const path of paths) {
     if (myToken !== refreshToken) return; // a newer generation superseded us
     try {
-      const pathname = pagePathname(src.generatorId, path);
+      const pathname = pagePathname(src.igId, path);
       // The bytes the tab CURRENTLY shows live in the SW cache (what was last served,
       // whether via live render or a cache hit) — that is the correct baseline. Read
       // it BEFORE overwriting so an unrelated page (identical bytes) isn't reloaded.
       const before = await readCachedPage(pathname);
       const { html } = await src.adapter.renderPage(path);
-      const prepared = preparePreviewHtml(html, src.generatorId, path, gen);
+      const prepared = preparePreviewHtml(html, src.igId, path, gen);
       // Always refresh the current-generation cache so a reload serves the new bytes.
       await writeCachedPage(pathname, prepared, gen);
       openPreviews.set(path, gen);
@@ -299,7 +316,7 @@ async function refreshOpenPreviews(): Promise<void> {
     }
   }
   if (myToken !== refreshToken) return;
-  if (changed.length) channel.postMessage({ type: 'reload', generator: src.generatorId, generation: gen, paths: changed });
+  if (changed.length) channel.postMessage({ type: 'reload', generator: src.igId, generation: gen, paths: changed });
 }
 
 /** Remove the parts of the injected HTML that change every generation (the snippet's

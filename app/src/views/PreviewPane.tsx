@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageInfo, SiteGeneratorAdapter } from '../adapters/types';
 import { CURATED_TEMPLATES, isVerified } from '../adapters/templateCatalog';
 import type { TemplateCatalog } from '../adapters/templateCatalog';
-import { previewUrl } from '../preview/previewWindow';
+import { previewUrl, ensurePreviewServiceWorker, PREVIEW_ROOT } from '../preview/previewWindow';
 
 /** The stock adapter's id — the template picker below only shows for it (#40). */
 const STOCK_ID = 'hl7.fhir.template';
@@ -19,6 +19,9 @@ const STOCK_ID = 'hl7.fhir.template';
 const ADVANCED = '__advanced__';
 
 interface Props {
+  /** The loaded IG id — the preview URL-scheme key. `preview/<igId>/<path>` is the
+   *  SAME URL embedded (iframe src) and external (new tab), so they never diverge. */
+  igId: string;
   adapter: SiteGeneratorAdapter;
   generators: { id: string; label: string }[];
   onSelectGenerator: (id: string) => void;
@@ -43,13 +46,27 @@ interface Props {
   templateCatalogs: Record<string, TemplateCatalog> | null;
 }
 
-export function PreviewPane({ adapter, generators, onSelectGenerator, pages, generation, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
+export function PreviewPane({ igId, adapter, generators, onSelectGenerator, pages, generation, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
   const [current, setCurrent] = useState<string>('index.html');
-  const [html, setHtml] = useState<string>('');
-  const [renderMs, setRenderMs] = useState<number | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
-  const [rendering, setRendering] = useState(false);
-  const blobUrls = useRef<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [swReady, setSwReady] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  // The page the iframe is actually showing (parsed from its URL). Prevents a
+  // navigation loop: a selector change drives the iframe; a link click inside the
+  // iframe drives the selector — both settle here so neither re-fires the other.
+  const shownRef = useRef<string>('');
+
+  // Register the preview SW so the EMBEDDED iframe is served the SAME real
+  // `preview/<igId>/<path>` URLs as a new tab. Until it controls the scope we can't
+  // point the iframe at those URLs (they'd hit the network → 404).
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const ok = await ensurePreviewServiceWorker(); // resolves once the SW is ACTIVATED
+      if (alive) setSwReady(ok);
+    })();
+    return () => { alive = false; };
+  }, []);
 
   // Keep the selected page valid when the page list changes.
   useEffect(() => {
@@ -62,96 +79,40 @@ export function PreviewPane({ adapter, generators, onSelectGenerator, pages, gen
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages]);
 
-  // Rewrite referenced asset names to blob URLs (adapter-served bytes), then
-  // inject the adapter's <base> for statically-served design assets.
-  const prepareHtml = useCallback(
-    async (raw: string): Promise<string> => {
-      for (const u of blobUrls.current) URL.revokeObjectURL(u);
-      blobUrls.current = [];
-
-      // Collect candidate relative refs (skip absolute URLs, anchors, data:).
-      const names = new Set<string>();
-      const collect = (val: string) => {
-        const base = val.split(/[?#]/)[0];
-        if (!base || /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(base)) return;
-        names.add(base);
-      };
-      for (const m of raw.matchAll(/\b(?:src|href)=(["'])([^"']+)\1/g)) collect(m[2]);
-      for (const m of raw.matchAll(/\bsrcset=(["'])([^"']+)\1/g)) {
-        for (const part of m[2].split(',')) collect(part.trim().split(/\s+/)[0] ?? '');
-      }
-
-      const urlByName = new Map<string, string>();
-      for (const name of names) {
-        const a = await adapter.assetBytes(name).catch(() => null);
-        if (!a) continue;
-        const bin = atob(a.base64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const url = URL.createObjectURL(new Blob([bytes], { type: a.mime }));
-        urlByName.set(name, url);
-        blobUrls.current.push(url);
-      }
-
-      let out = raw.replace(/\b(src|href)=(["'])([^"']+)\2/g, (m: string, attr: string, q: string, val: string) => {
-        const base = val.split(/[?#]/)[0];
-        if (urlByName.has(base)) return `${attr}=${q}${urlByName.get(base)}${q}`;
-        return m;
-      });
-      out = out.replace(/\bsrcset=(["'])([^"']+)\1/g, (_m: string, q: string, val: string) => {
-        const rewritten = val
-          .split(',')
-          .map((part: string) => {
-            const [u, ...rest] = part.trim().split(/\s+/);
-            const base = u.split(/[?#]/)[0];
-            return urlByName.has(base) ? [urlByName.get(base), ...rest].join(' ') : part.trim();
-          })
-          .join(', ');
-        return `srcset=${q}${rewritten}${q}`;
-      });
-
-      if (adapter.baseHref) {
-        const baseTag = `<base href="${adapter.baseHref}">`;
-        if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
-        else out = baseTag + out;
-      }
-      return out;
-    },
-    [adapter],
-  );
-
-  // Render the current page whenever it changes or the site rebuilds.
+  // Selector / IG / generation → navigate the iframe to the SW-served preview URL.
+  // A new compile generation refreshes the SAME page (the SW re-renders on demand).
   useEffect(() => {
-    let cancelled = false;
-    if (!pages || !pages.some((p) => p.file === current)) {
-      setHtml('');
-      return;
+    if (!swReady || !igId) return;
+    const fr = iframeRef.current;
+    if (!fr) return;
+    // Navigate only when the iframe isn't already on this page (i.e. `current` was
+    // set by the selector, not synced FROM a link click) — or on a recompile.
+    if (shownRef.current !== current || fr.dataset.gen !== String(generation)) {
+      fr.dataset.gen = String(generation);
+      setLoading(true);
+      fr.src = previewUrl(igId, current);
     }
-    setRendering(true);
-    setRenderErr(null);
-    (async () => {
-      try {
-        const res = await adapter.renderPage(current);
-        if (cancelled) return;
-        const prepared = await prepareHtml(res.html);
-        if (cancelled) return;
-        setHtml(prepared);
-        setRenderMs(res.renderMs ?? null);
-      } catch (e) {
-        if (!cancelled) setRenderErr(String(e));
-      } finally {
-        if (!cancelled) setRendering(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, pages, generation]);
+  }, [current, igId, swReady, generation]);
 
-  useEffect(() => () => {
-    for (const u of blobUrls.current) URL.revokeObjectURL(u);
-  }, []);
+  // Sync the selector FROM iframe navigation (link clicks, back/forward): parse the
+  // iframe's URL back to a page path. Same-origin (preview/ is under the app origin),
+  // so reading its location is allowed.
+  const onIframeLoad = useCallback(() => {
+    setLoading(false);
+    const prefix = `${PREVIEW_ROOT}${encodeURIComponent(igId)}/`;
+    try {
+      const p = iframeRef.current?.contentWindow?.location?.pathname ?? '';
+      if (p.startsWith(prefix)) {
+        const page = decodeURIComponent(p.slice(prefix.length));
+        shownRef.current = page;
+        if (page && page !== current) setCurrent(page);
+      }
+    } catch {
+      /* an external link opened in-frame is cross-origin — leave the selector as-is */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, igId]);
 
   // Template picker (#40 DEFAULT UX): a curated FAMILY select + a VERSION select
   // whose options come LIVE from the registry catalog (newest first, default =
@@ -308,34 +269,42 @@ export function PreviewPane({ adapter, generators, onSelectGenerator, pages, gen
           </select>
         </label>
         <span className="preview-status">
-          {building ? 'rebuilding…' : rendering ? 'rendering…' : renderErr ? 'render error' : renderMs != null ? `rendered in ${renderMs.toFixed(0)} ms` : ''}
+          {building ? 'rebuilding…' : loading ? 'loading…' : ''}
         </span>
-        <span className="preview-note" title="render-on-demand per visible page">on-demand render</span>
+        <span className="preview-note" title="served by the preview Service Worker at this URL">
+          {igId ? `preview/${igId}/` : 'preview'}
+        </span>
         <button
           className="preview-open-window"
-          disabled={!previewCapable}
+          disabled={!previewCapable || !igId}
           title={
             previewCapable
-              ? 'Open this page as a real site in a new browser tab (live navigation + hot reload)'
+              ? 'Open this exact URL as a real site in a new browser tab (same content, live navigation)'
               : 'Preview window needs a Service Worker (unavailable in this browser/context)'
           }
           onClick={() => {
-            if (!previewCapable) return;
-            window.open(previewUrl(adapter.id, current), '_blank', 'noopener');
+            if (!previewCapable || !igId) return;
+            // The SAME URL the embedded iframe shows — internal == external.
+            window.open(previewUrl(igId, current), '_blank', 'noopener');
           }}
         >
           Open site in new window ↗
         </button>
       </div>
-      {renderErr ? (
-        <div className="preview-error"><pre>{renderErr}</pre></div>
-      ) : (
+      {swReady ? (
         <iframe
+          ref={iframeRef}
           className="preview-frame"
           title="IG page preview"
-          sandbox="allow-same-origin"
-          srcDoc={html}
+          sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+          onLoad={onIframeLoad}
         />
+      ) : (
+        <div className="panel-empty">
+          {previewCapable === false
+            ? 'Site preview needs a Service Worker (unavailable in this browser/context).'
+            : 'Starting preview…'}
+        </div>
       )}
     </div>
   );

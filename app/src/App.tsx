@@ -245,7 +245,7 @@ export function App() {
       // the SW answer ladder, and the smart hot-reload of any open preview tabs.
       setSiteGeneration((g) => {
         const nextGen = g + 1;
-        updatePreviewSource({ generatorId: genId, adapter, generation: nextGen });
+        updatePreviewSource({ igId: projectIdRef.current, generatorId: genId, adapter, generation: nextGen });
         return nextGen;
       });
     } catch (e) {
@@ -645,6 +645,7 @@ export function App() {
                 )
               ) : engineRef.current ? (
                 <PreviewPane
+                  igId={projectIdRef.current}
                   adapter={getSiteGenerator(generatorId) ?? cycleAdapter}
                   generators={listSiteGenerators().map((g) => ({ id: g.id, label: g.label }))}
                   onSelectGenerator={switchGenerator}

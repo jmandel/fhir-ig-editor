@@ -302,9 +302,15 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   /** Serve assets the rendered HTML references by name (template css/js/images +
    *  the project's own input/images); the preview rewrites to blob URLs by name. */
   async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string } | null> {
-    const key = name.replace(/^(?:\.\.\/)+/, '').replace(/^assets\//, '');
+    // Pages live under the page-dir prefix (e.g. `en/`), so an asset referenced
+    // relative to a page resolves WITH that prefix (`en/assets/css/x.css`), but the
+    // template asset map is keyed at the site root (`assets/css/x.css`). Strip the
+    // prefix so both the prefixed and flat forms resolve.
+    let n = name.replace(/^(?:\.\.\/)+/, '');
+    if (this.pagePrefix && n.startsWith(this.pagePrefix)) n = n.slice(this.pagePrefix.length);
+    const key = n.replace(/^assets\//, '');
     const entry =
-      this.assets[name] ?? this.assets[key] ?? this.assets[`assets/${key}`] ?? this.assets[key.slice(key.lastIndexOf('/') + 1)];
+      this.assets[n] ?? this.assets[key] ?? this.assets[`assets/${key}`] ?? this.assets[key.slice(key.lastIndexOf('/') + 1)];
     if (entry == null) return null;
     const base64 =
       typeof entry === 'string' ? btoa(unescape(encodeURIComponent(entry))) : entry.b64;
