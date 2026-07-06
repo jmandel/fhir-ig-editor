@@ -316,6 +316,19 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       typeof entry === 'string' ? btoa(unescape(encodeURIComponent(entry))) : entry.b64;
     return { name, mime: mimeFor(name), base64 };
   }
+
+  /** The whole asset set (keyed by its STORED name, exactly as `assetBytes`
+   *  resolves against), so the SW can be provisioned with it once per generation
+   *  and serve every asset without a round-trip back to this tab. `pagePrefix` is
+   *  handed along so the SW normalizes request paths the same way `assetBytes` does. */
+  assetManifest(): { pagePrefix: string; assets: Record<string, { mime: string; b64: string }> } {
+    const assets: Record<string, { mime: string; b64: string }> = {};
+    for (const [k, v] of Object.entries(this.assets)) {
+      const b64 = typeof v === 'string' ? btoa(unescape(encodeURIComponent(v))) : v.b64;
+      assets[k] = { mime: mimeFor(k), b64 };
+    }
+    return { pagePrefix: this.pagePrefix, assets };
+  }
 }
 
 export const stockAdapter = new StockTemplateAdapter();

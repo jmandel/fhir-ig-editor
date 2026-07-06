@@ -60,6 +60,12 @@ export interface SiteGeneratorAdapter {
   /** Optional <base href> injected into the preview iframe for design assets
    *  served from the app's static tree (the cycle adapter uses this). */
   baseHref?: string;
+  /** The COMPLETE static asset set (template css/js/images + IG images) the
+   *  preview can reference, so the SW can be provisioned with it ONCE per compile
+   *  generation and serve every asset itself — no per-asset round-trip to this
+   *  tab's main thread. `pagePrefix` mirrors the key-normalization `assetBytes`
+   *  applies. Omit to fall back to per-asset `assetBytes` serving. */
+  assetManifest?(): { pagePrefix: string; assets: Record<string, { mime: string; b64: string }> };
   /** Ledger hook (F6 scope 4): invalidate render caches for dirty nodes. */
   invalidate?(dirty: string[]): void;
 }

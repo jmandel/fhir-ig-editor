@@ -37,6 +37,15 @@ const KEEP_GENERATIONS = 2;
 // fetches cache under it. Starts at 0 (unknown) — any editor announcement wins.
 let currentGeneration = 0;
 
+// The COMPLETE static asset set for the current generation, pushed by the editor in
+// one message (igpreview:provisionAssets). Serving assets from here means ZERO
+// per-asset round-trips to the editor's (contended) main thread — the fix for slow
+// navigation. Shape: { generation, igId, pagePrefix, assets: Map<key, {mime, bytes}> }.
+// Held in memory: if the SW is idle-killed this resets to null and the first asset
+// request self-heals by asking the editor to re-provision (see requestReprovision).
+let provisioned = null;
+let lastReprovisionAsk = 0;
+
 self.addEventListener('install', () => {
   // Take over as the active SW without waiting for old clients to close.
   self.skipWaiting();
@@ -63,7 +72,55 @@ self.addEventListener('message', (event) => {
     // Reply so the editor can confirm the SW is active + which generation it holds.
     event.ports[0]?.postMessage({ type: 'igpreview:pong', generation: currentGeneration });
   }
+  if (msg.type === 'igpreview:provisionAssets' && Array.isArray(msg.assets)) {
+    // Wholesale-replace the asset set for this generation (deterministic, not lazy).
+    const assets = new Map();
+    for (const a of msg.assets) assets.set(a.key, { mime: a.mime, bytes: a.bytes });
+    provisioned = {
+      generation: msg.generation,
+      igId: msg.igId,
+      pagePrefix: msg.pagePrefix || '',
+      assets,
+    };
+  }
 });
+
+// ---- provisioned asset serving (no editor round-trip) --------------------------
+
+/** Resolve a request path (the part after `preview/<igId>/`) to a provisioned asset,
+ *  mirroring stockAdapter.assetBytes' key normalization EXACTLY so the two agree:
+ *  strip leading `../`, strip the page-dir prefix (e.g. `en/`), then try the name,
+ *  the `assets/`-stripped name, the `assets/`-prefixed name, and the basename. */
+function provisionedAsset(igId, pathAfterIg) {
+  const p = provisioned;
+  if (!p || p.igId !== igId) return null;
+  let n = pathAfterIg.replace(/^(?:\.\.\/)+/, '');
+  if (p.pagePrefix && n.startsWith(p.pagePrefix)) n = n.slice(p.pagePrefix.length);
+  const key = n.replace(/^assets\//, '');
+  const base = key.slice(key.lastIndexOf('/') + 1);
+  return (
+    p.assets.get(n) || p.assets.get(key) || p.assets.get('assets/' + key) || p.assets.get(base) || null
+  );
+}
+
+function assetResponse(asset) {
+  return new Response(asset.bytes, {
+    status: 200,
+    headers: { 'Content-Type': asset.mime, 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'provisioned' },
+  });
+}
+
+/** The SW lost its in-memory asset set (idle-killed) — ask any editor tab to re-push
+ *  it. Debounced so a burst of asset misses triggers just one re-provision. */
+async function requestReprovision() {
+  const now = Date.now();
+  if (now - lastReprovisionAsk < 1000) return;
+  lastReprovisionAsk = now;
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const c of clients) {
+    if (!new URL(c.url).pathname.startsWith(PREVIEW_ROOT)) c.postMessage({ type: 'igpreview:needAssets' });
+  }
+}
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
@@ -77,6 +134,30 @@ self.addEventListener('fetch', (event) => {
 });
 
 async function handlePreview(request, url) {
+  const parsed = parsePreviewPath(url.pathname);
+
+  // (0) Assets: serve from the generation's provisioned set — no editor round-trip,
+  // no main-thread contention. This is the fast path for the ~80 static icons/css/js
+  // a page pulls, and the whole point of the provisioning design.
+  if (parsed && !parsed.isPage) {
+    const asset = provisionedAsset(parsed.generator, parsed.path);
+    if (asset) return assetResponse(asset);
+    // The provisioned set is the COMPLETE asset inventory for this IG's generation.
+    // So if it's present for this IG, a miss means the asset genuinely doesn't exist
+    // (e.g. tree icons/backgrounds the template package doesn't ship) — answer 404
+    // IMMEDIATELY, with NO editor round-trip. Round-tripping ~68 absent images per
+    // page (each to the contended main thread) was the whole cause of slow nav.
+    if (provisioned && provisioned.igId === parsed.generator) {
+      return new Response('', {
+        status: 404,
+        headers: { 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'absent' },
+      });
+    }
+    // No set at all (SW was idle-killed) — ask the editor to re-push it, and fall
+    // through to the legacy render-via-client path for this one request.
+    void requestReprovision();
+  }
+
   const gen = currentGeneration;
   // (a) Cache: try the current generation, then the previous one (freshness policy:
   // keep last-2 so a lazily-refilling new generation still serves via the old one).
@@ -84,7 +165,6 @@ async function handlePreview(request, url) {
   if (cached) return cached;
 
   // (b) Live render via an open editor tab.
-  const parsed = parsePreviewPath(url.pathname);
   if (parsed) {
     const live = await renderViaClient(parsed);
     if (live) {

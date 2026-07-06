@@ -80,6 +80,39 @@ export async function announceGenerationToSW(generation: number): Promise<void> 
   }
 }
 
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+
+/** Push the CURRENT generation's COMPLETE static asset set to the SW in one message,
+ *  so the SW serves every asset (the ~80 table icons/css/js a page pulls) itself —
+ *  no per-asset round-trip to this tab's main thread (the thing that made navigation
+ *  slow). Deterministic + generation-keyed (a recompile pushes a fresh set), so it is
+ *  NOT a lazy cache guessing at staleness. Bytes ride as transferables (zero-copy). */
+export async function provisionAssetsToSW(src: PreviewSource): Promise<void> {
+  try {
+    if (!src.adapter.assetManifest) return;
+    const reg = swRegistration ?? (await navigator.serviceWorker?.ready);
+    const sw = reg?.active ?? navigator.serviceWorker?.controller;
+    if (!sw) return;
+    const { pagePrefix, assets } = src.adapter.assetManifest();
+    const entries = Object.entries(assets).map(([key, a]) => ({
+      key,
+      mime: a.mime,
+      bytes: base64ToArrayBuffer(a.b64),
+    }));
+    sw.postMessage(
+      { type: 'igpreview:provisionAssets', generation: src.generation, igId: src.igId, pagePrefix, assets: entries },
+      entries.map((e) => e.bytes), // transfer the ArrayBuffers (neuters our copies; we re-decode on re-provision)
+    );
+  } catch {
+    /* best-effort: the SW just falls back to per-asset serving until next provision */
+  }
+}
+
 // ---- HTML rewriting for preview-served pages -----------------------------------
 
 /** The injected client snippet: reports this tab's path to the editor and reloads
@@ -204,6 +237,7 @@ export function updatePreviewSource(next: PreviewSource): void {
   const prevGen = source?.generation ?? -1;
   source = next;
   void announceGenerationToSW(next.generation);
+  void provisionAssetsToSW(next); // hand the SW this generation's whole asset set
   if (next.generation !== prevGen) void refreshOpenPreviews();
 }
 
@@ -215,7 +249,13 @@ export function wirePreviewResponder(): void {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (event) => {
       const msg = event.data;
-      if (!msg || msg.type !== 'igpreview:render') return;
+      if (!msg) return;
+      // The SW restarted (idle-killed) and lost its provisioned asset set — re-push it.
+      if (msg.type === 'igpreview:needAssets') {
+        if (source) void provisionAssetsToSW(source);
+        return;
+      }
+      if (msg.type !== 'igpreview:render') return;
       const port = event.ports[0];
       if (!port) return;
       void answerRender(msg.generator, msg.path, !!msg.isPage, port);
