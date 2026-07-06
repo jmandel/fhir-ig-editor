@@ -381,6 +381,13 @@ export function App() {
     engine?.setProgress(emit);
     localStorage.setItem(PROJECT_KEY, projectId);
     projectIdRef.current = projectId;
+    // The `cycle` generator is bespoke to the cycle demo IG; every other IG (the
+    // catalog / published IGs) renders with the stock template generator. Default
+    // the preview generator PER PROJECT so the first preview isn't the cycle-only
+    // generator failing (`buildSiteDb: base not found …`) on a published IG.
+    const defaultGen = projectId === 'cycle' ? cycleAdapter.id : stockAdapter.id;
+    localStorage.setItem(GENERATOR_KEY, defaultGen);
+    setGeneratorId(defaultGen);
     try {
       const meta = await loadProject(store, projectId, emit);
       setProjectLoaded(true);
