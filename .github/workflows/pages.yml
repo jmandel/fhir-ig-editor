@@ -178,7 +178,7 @@ jobs:
       - name: Template-parity gate (live mountTemplate == packed artifact)
         run: |
           node scripts/template-parity.mjs .pkg-node app/public/data/bundles \
-            "site-bundles/templates/hl7.fhir.template%231.0.0.json"
+            "site-bundles/templates/hl7.fhir.template/1.0.0.json"
 
       # --- Consistency gate: the in-engine tier-1 expander (expand_enumerable)
       # must agree with the committed expansion cache on the shared domain

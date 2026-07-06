@@ -27,9 +27,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 ENGINE="$REPO/vendor/sushi-rs"
 
-# OPFS/URL-safe filename: '#' → %23 (the P0 fragment-delimiter gotcha). Default
-# lands under the committed templates dir, staged into app/public by prepare-data.
-DEFAULT_OUT="$REPO/site-bundles/templates/$(printf '%s' "$COORD" | sed 's/#/%23/g').json"
+# Decode-safe path: id#version -> <id>/<version>.json (NOT <id>%23<version>, which
+# 404s on servers that decode %23 back to '#', e.g. GitHub Pages — that silently
+# dropped the whole template's CSS/JS/images). Default lands under the committed
+# templates dir, staged into app/public by prepare-data.
+DEFAULT_OUT="$REPO/site-bundles/templates/${COORD%%#*}/${COORD#*#}.json"
 OUT="${2:-$DEFAULT_OUT}"
 
 # Optional scratch cargo/toolchain env (same knobs as build-wasm.sh).

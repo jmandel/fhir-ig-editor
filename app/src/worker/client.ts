@@ -396,7 +396,12 @@ export class EngineClient {
       this.progressCb?.({ stage: 'bundle-cache-hit', label: coord, message: `Template ${coord} (materialized cache)`, fromCache: true });
       return cached;
     }
-    const url = `${BASE}data/templates/${coord.replaceAll('#', '%23')}.json`;
+    // Nested path `data/templates/<id>/<version>.json` — NOT `<id>%23<version>`.
+    // A `%23` in the filename 404s on any server that decodes it back to `#`
+    // (GitHub Pages does), which silently dropped the whole template (CSS/JS/images
+    // → unstyled preview). Splitting id#version into path segments is decode-safe.
+    const [tplId, tplVer] = coord.split('#');
+    const url = `${BASE}data/templates/${tplId}/${tplVer ?? '1.0.0'}.json`;
     let resp: Response;
     try {
       resp = await fetch(url);
