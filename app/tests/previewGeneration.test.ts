@@ -31,10 +31,10 @@ function fakePreviewWorker(scriptURL: string, protocol?: number): ServiceWorker 
 test('hot-reload baseline never reads a cache from the newly published generation', () => {
   expect(
     previewCacheCandidates(
-      ['unrelated', 'igpreview::100', 'igpreview::102', 'igpreview::101', 'igpreview::99'],
+      ['unrelated', 'igpreview:v3::100', 'igpreview:v3::102', 'igpreview:v3::101', 'igpreview:v3::99'],
       101,
     ),
-  ).toEqual(['igpreview::101', 'igpreview::100', 'igpreview::99']);
+  ).toEqual(['igpreview:v3::101', 'igpreview:v3::100', 'igpreview:v3::99']);
 });
 
 test('a generation-only snippet change does not reload an unchanged page', () => {
@@ -78,6 +78,25 @@ test('preview preparation replaces an old control block instead of stacking list
   const script = profile.match(/<script data-igpreview="hot-reload">([\s\S]*?)<\/script>/)?.[1];
   expect(script).toBeTruthy();
   expect(() => new Function(script!)).not.toThrow();
+});
+
+test('preview base preserves same-document tab anchors without changing relative assets', () => {
+  const pagePath = 'en/StructureDefinition-us-core-careplan.html';
+  const prepared = preparePreviewHtml(
+    '<html><head></head><body><a href="#tabs-key">Key</a></body></html>',
+    'uscore',
+    pagePath,
+    7,
+  );
+  const baseHref = prepared.match(/<base data-igpreview="base" href="([^"]+)">/)?.[1];
+  expect(baseHref).toBe('/preview/uscore/en/StructureDefinition-us-core-careplan.html');
+
+  const origin = 'https://example.test';
+  const documentUrl = new URL(baseHref!, origin);
+  expect(new URL('#tabs-key', documentUrl).href).toBe(`${documentUrl.href}#tabs-key`);
+  expect(new URL('assets/site.css', documentUrl).pathname).toBe(
+    '/preview/uscore/en/assets/site.css',
+  );
 });
 
 test('preview worker URL and pong bind the rolling-deployment protocol', async () => {

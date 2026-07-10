@@ -25,7 +25,7 @@ const CHANNEL_NAME = 'igpreview';
  * incompatibly. The version is part of the script URL so an already-installed
  * worker cannot remain active merely because a browser reuses a cached
  * `preview-sw.js` registration during a rolling deployment. */
-export const PREVIEW_SW_PROTOCOL = 2;
+export const PREVIEW_SW_PROTOCOL = 3;
 
 export function previewWorkerScriptPath(base = BASE): string {
   return `${base.replace(/\/?$/, '/')}preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}`;
@@ -325,12 +325,12 @@ export function preparePreviewHtml(
     .replace(/<script\b[^>]*data-igpreview=["']hot-reload["'][^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<div\b[^>]*data-igpreview=["']stale-banner["'][^>]*>[\s\S]*?<\/div>/gi, '')
     .replace(/<base\b[^>]*data-igpreview=["']base["'][^>]*>/gi, '');
-  // <base>: relative asset names (assets/css/x.css, foo.png) resolve to
-  // `<base>preview/<gen>/<pageDir>/...` so the SW answers them all (the responder
-  // relays design assets it can't render — see answerRender). Point <base> at the
-  // page's directory under the preview root.
-  const pageDir = pagePath.includes('/') ? pagePath.slice(0, pagePath.lastIndexOf('/') + 1) : '';
-  const baseHref = previewUrl(generatorId, pageDir);
+  // <base>: use the page's FULL preview URL. Relative assets still resolve
+  // against its containing directory, while fragment-only links such as
+  // `#tabs-key` resolve to this exact document. A directory base makes jQuery
+  // UI classify those anchors as remote tabs; it then AJAX-loads `index.html`
+  // and inserts a complete second site shell into the tab panel.
+  const baseHref = previewUrl(generatorId, pagePath);
   const baseTag = `<base data-igpreview="base" href="${baseHref}">`;
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
   else out = `${baseTag}${out}`;
@@ -414,7 +414,7 @@ export async function commitPreviewGenerationWithFallback(
 /** Live source, updated by the editor as the selected generator / generation changes. */
 let source: PreviewSource | null = null;
 
-const CACHE_PREFIX = 'igpreview::';
+const CACHE_PREFIX = `igpreview:v${PREVIEW_SW_PROTOCOL}::`;
 
 /** Cache search law for hot-reload comparison: never inspect a generation newer
  * than the page set that was current before publication. */

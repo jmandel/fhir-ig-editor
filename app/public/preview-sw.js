@@ -27,13 +27,14 @@
 const BASE = new URL('./', self.location).pathname; // e.g. /fhir-ig-editor/
 const PREVIEW_ROOT = BASE + 'preview/'; // e.g. /fhir-ig-editor/preview/
 // Must match PREVIEW_SW_PROTOCOL in previewWindow.ts. The editor registers this
-// script with `?protocol=2` and refuses an older active worker before publishing.
-const PREVIEW_SW_PROTOCOL = 2;
+// script with `?protocol=3` and refuses an older active worker before publishing.
+const PREVIEW_SW_PROTOCOL = 3;
 
 // Cache naming: one cache per compile generation. Keep the last two generations so a
 // just-bumped generation (still lazily refilling) can fall back to the previous
 // complete one for a page it has not re-rendered yet.
-const CACHE_PREFIX = 'igpreview::';
+const CACHE_PREFIX = `igpreview:v${PREVIEW_SW_PROTOCOL}::`;
+const LEGACY_CACHE_PREFIXES = ['igpreview::', 'igpreview:v2::'];
 const KEEP_GENERATIONS = 2;
 
 // The editor tells us the current compile generation via a control message; new
@@ -282,11 +283,15 @@ async function orderedCacheNames(gen) {
 
 /** Keep only the newest KEEP_GENERATIONS caches; delete older ones. */
 async function pruneCaches() {
-  const keys = (await caches.keys()).filter((k) => k.startsWith(CACHE_PREFIX));
+  const allKeys = await caches.keys();
+  const keys = allKeys.filter((k) => k.startsWith(CACHE_PREFIX));
   const sorted = keys
     .map((k) => ({ k, g: Number(k.slice(CACHE_PREFIX.length)) || 0 }))
     .sort((a, b) => b.g - a.g);
-  const doomed = sorted.slice(KEEP_GENERATIONS).map((x) => x.k);
+  const doomed = [
+    ...sorted.slice(KEEP_GENERATIONS).map((x) => x.k),
+    ...allKeys.filter((key) => LEGACY_CACHE_PREFIXES.some((prefix) => key.startsWith(prefix))),
+  ];
   await Promise.all(doomed.map((k) => caches.delete(k)));
 }
 

@@ -18,6 +18,7 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
+const PREVIEW_SW_PROTOCOL = 3;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
@@ -104,7 +105,17 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     openedTabs.push(t.id);
     return { ws: tws, id: t.id };
   }
-  async function closeTab(tabId) { try { await fetch(`${cdpHttp}/json/close/${tabId}`); } catch { /* ignore */ } }
+  async function closeTab(tabId) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      await fetch(`${cdpHttp}/json/close/${tabId}`, { signal: controller.signal });
+    } catch {
+      /* Browser shutdown/crash: tab cleanup is already moot. */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   const tabEval = async (tws, expr) => {
     const r = await tabCdp(tws, 'Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ' :: ' + expr.slice(0, 80));
@@ -135,7 +146,7 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     // The served HTML (not the JS-rewritten DOM) must carry the injected snippet.
     out.snippetInjected = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return /data-igpreview="hot-reload"/.test(t); })()`);
     // Write-through: the editor's SW cache holds the page after it was served.
-    out.cachedWriteThrough = await editorEval(`(async () => { const ks = (await caches.keys()).filter(k => k.startsWith('igpreview::')); for (const k of ks) { const c = await caches.open(k); if (await c.match('${indexPath}')) return true; } return false; })()`);
+    out.cachedWriteThrough = await editorEval(`(async () => { const ks = (await caches.keys()).filter(k => k.startsWith('igpreview:')); for (const k of ks) { const c = await caches.open(k); if (await c.match('${indexPath}')) return true; } return false; })()`);
     // Latency numbers: live render (cache-busted) vs cache hit.
     out.liveRenderMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}?nocache=' + Date.now()); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
     out.cacheHitMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}'); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
@@ -225,7 +236,7 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       out.hotReloadDebug = await editorEval(`(async () => {
         const path = ${JSON.stringify(indexPath)};
         const cachesState = [];
-        for (const key of (await caches.keys()).filter(k => k.startsWith('igpreview::')).sort()) {
+        for (const key of (await caches.keys()).filter(k => k.startsWith('igpreview:')).sort()) {
           const response = await (await caches.open(key)).match(path);
           if (!response) continue;
           const html = await response.text();
@@ -415,7 +426,8 @@ try {
     });
     return { scriptURL: worker.scriptURL, protocol };
   })()`);
-  if (results.previewWorker.protocol !== 2 || !/[?&]protocol=2(?:&|$)/.test(results.previewWorker.scriptURL || '')) {
+  const protocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_PROTOCOL}(?:&|$)`);
+  if (results.previewWorker.protocol !== PREVIEW_SW_PROTOCOL || !protocolPattern.test(results.previewWorker.scriptURL || '')) {
     throw new Error('preview Service Worker protocol upgrade failed: ' + JSON.stringify(results.previewWorker));
   }
   // Bundles fetched BEFORE the engine became ready = the eager (compile-critical)
@@ -905,7 +917,7 @@ try {
 
   if (process.env.E2E_PREVIEW_SMOKE_ONLY === '1') {
     console.log(JSON.stringify(results, null, 2));
-    const smokeOk = results.previewWorker?.protocol === 2
+    const smokeOk = results.previewWorker?.protocol === PREVIEW_SW_PROTOCOL
       && results.previewHasIgContent
       && results.stockIndexLen > 500
       && results.stockProfilePage?.hasHierarchy
@@ -1102,10 +1114,8 @@ try {
         return sel.value;
       })()`);
       await waitFor(ws, `(() => { const opts=[...document.querySelectorAll('.preview-page-select option')].map(o=>o.value); return opts.some(v=>/(^|\\/)StructureDefinition-us-core-/i.test(v)); })()`, 120000, 'US Core stock page list loaded');
-      // Prefer the us-core-patient profile page; fall back to any us-core profile.
-      // US Core's page layout is FLAT (no en/ prefix), so match with an optional
-      // page-dir prefix and skip the derived -definitions/-mappings/-examples/
-      // -testing and *.profile.history pages (they are not the profile body).
+      // Keep the broad runtime-closure check on the patient profile, then run a
+      // focused no-nested-shell regression on CarePlan below.
       const target = await evalJs(ws, `(() => {
         const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
         return opts.find(v => /(^|\\/)StructureDefinition-us-core-patient\\.html$/i.test(v))
@@ -1131,7 +1141,7 @@ try {
               && (f?.contentWindow?.location.pathname || '').endsWith('/' + ${JSON.stringify(target)})
               && doc?.readyState === 'complete'
               && doc.body?.textContent.includes(${JSON.stringify(pid)});
-          })()`, 120000, 'US Core patient selection, URL, and document');
+          })()`, 120000, 'US Core profile selection, URL, and document');
         } catch (e) {
           const dump = await evalJs(ws, `(() => {
             const f=document.querySelector('.preview-frame');
@@ -1140,7 +1150,7 @@ try {
             const errEl=document.querySelector('.preview-error');
             return { pid:${JSON.stringify(pid)}, bodySnippet:(body||'').slice(0,600), previewError: errEl?errEl.textContent.slice(0,400):null, renderErrGlobal: (window.__lastRenderErr||null) };
           })()`);
-          console.error('[diag] us-core-patient render FAILED to match pid. Frame state:', JSON.stringify(dump, null, 1));
+          console.error('[diag] US Core profile render FAILED to match pid. Frame state:', JSON.stringify(dump, null, 1));
           throw e;
         }
         results.usCoreProfilePage = await evalJs(ws, `(() => {
@@ -1164,12 +1174,71 @@ try {
         // are never allowlisted; the pinned jQuery compatibility script is itself
         // verified by marker, path, execution flag, and script order.
         await sleep(1500);
+        results.usCoreProfilePage.shellCount = await evalJs(ws, `(() => {
+          const f = document.querySelector('.preview-frame');
+          const doc = f && (f.contentDocument || f.contentWindow?.document);
+          if (!doc) return null;
+          return {
+            html: doc.querySelectorAll('html').length,
+            body: doc.querySelectorAll('body').length,
+            header: doc.querySelectorAll('#segment-header').length,
+            footer: doc.querySelectorAll('#segment-footer').length,
+            nested: doc.querySelectorAll('#tabs #segment-header, #tabs #segment-footer').length,
+            remotePanels: doc.querySelectorAll('#tabs > div[id^="ui-id-"]').length,
+          };
+        })()`);
         results.usCoreRuntimeClosure = await evalJs(ws, runtimeClosureExpression(target));
         results.usCoreRuntimeExceptions = runtimeExceptions.slice(runtimeExceptionStart);
         results.usCoreRuntimeAssessment = assessRuntimeClosure(
           results.usCoreRuntimeClosure,
           results.usCoreRuntimeExceptions,
         );
+
+        // Exact regression for the reported page. A directory-level <base>
+        // made jQuery UI treat these hash tabs as remote, fetch en/index.html,
+        // and insert a complete second page shell under #tabs.
+        const carePlanTarget = await evalJs(ws, `(() => {
+          const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
+          return opts.find(v => /(^|\\/)StructureDefinition-us-core-careplan\\.html$/i.test(v)) || '';
+        })()`);
+        if (carePlanTarget) {
+          await evalJs(ws, `(() => {
+            const sel = document.querySelector('.preview-page-select select');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            setter.call(sel, ${JSON.stringify(carePlanTarget)});
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          })()`);
+          await waitForStable(ws, `(() => {
+            const f = document.querySelector('.preview-frame');
+            const doc = f && (f.contentDocument || f.contentWindow?.document);
+            return document.querySelector('.preview-page-select select')?.value === ${JSON.stringify(carePlanTarget)}
+              && (f?.contentWindow?.location.pathname || '').endsWith('/' + ${JSON.stringify(carePlanTarget)})
+              && doc?.readyState === 'complete'
+              && /US Core CarePlan/i.test(doc.body?.textContent || '');
+          })()`, 120000, 'US Core CarePlan selection, URL, and document');
+          await sleep(1500);
+          results.usCoreCarePlan = await evalJs(ws, `(() => {
+            const f = document.querySelector('.preview-frame');
+            const doc = f && (f.contentDocument || f.contentWindow?.document);
+            if (!doc) return null;
+            const current = f.contentWindow.location.href.split('#')[0];
+            const tabLinks = [...doc.querySelectorAll('#tabs > ul a[href^="#"]')];
+            return {
+              target: ${JSON.stringify(carePlanTarget)},
+              hasHierarchy: !!doc.querySelector('table [class~="hierarchy"]'),
+              baseHref: doc.querySelector('base[data-igpreview="base"]')?.href || '',
+              html: doc.querySelectorAll('html').length,
+              body: doc.querySelectorAll('body').length,
+              header: doc.querySelectorAll('#segment-header').length,
+              footer: doc.querySelectorAll('#segment-footer').length,
+              nested: doc.querySelectorAll('#tabs #segment-header, #tabs #segment-footer').length,
+              remotePanels: doc.querySelectorAll('#tabs > div[id^="ui-id-"]').length,
+              remoteTabLinks: tabLinks.filter(link => link.href.split('#')[0] !== current).length,
+            };
+          })()`);
+        } else {
+          results.usCoreCarePlan = null;
+        }
       } else {
         results.usCoreProfilePage = { target: '', htmlLen: 0, textLen: 0, hasHierarchy: false };
       }
@@ -1297,9 +1366,18 @@ try {
     }
     if (!up.target) { console.error('assert: no US Core profile page found to content-check'); ok = false; }
     else if (up.hasFragNotice) {
-      console.error('assert: US Core us-core-patient page shows a fragment-gap notice (profiles not materialized) —', JSON.stringify(up)); ok = false;
+      console.error('assert: US Core profile page shows a fragment-gap notice (profiles not materialized) —', JSON.stringify(up)); ok = false;
     } else if (!(up.hasHierarchy && up.textLen > 1000)) {
-      console.error('assert: US Core us-core-patient page body lacks real hierarchy/table content (predefined-IG title-only regression?) —', JSON.stringify(up)); ok = false;
+      console.error('assert: US Core profile page body lacks real hierarchy/table content (predefined-IG title-only regression?) —', JSON.stringify(up)); ok = false;
+    } else if (
+      up.shellCount?.html !== 1
+      || up.shellCount?.body !== 1
+      || up.shellCount?.header !== 1
+      || up.shellCount?.footer !== 1
+      || up.shellCount?.nested !== 0
+      || up.shellCount?.remotePanels !== 0
+    ) {
+      console.error('assert: US Core profile contains nested/duplicate page shells —', JSON.stringify(up)); ok = false;
     }
     const runtime = results.usCoreRuntimeAssessment;
     if (!runtime) {
@@ -1313,6 +1391,22 @@ try {
         }
         ok = false;
       }
+    }
+    const carePlan = results.usCoreCarePlan;
+    if (!carePlan?.target) {
+      console.error('assert: US Core CarePlan page was not available for the nested-shell regression'); ok = false;
+    } else if (
+      !carePlan.hasHierarchy
+      || carePlan.html !== 1
+      || carePlan.body !== 1
+      || carePlan.header !== 1
+      || carePlan.footer !== 1
+      || carePlan.nested !== 0
+      || carePlan.remotePanels !== 0
+      || carePlan.remoteTabLinks !== 0
+      || !carePlan.baseHref.endsWith('/' + carePlan.target)
+    ) {
+      console.error('assert: US Core CarePlan contains nested/remote tab content —', JSON.stringify(carePlan)); ok = false;
     }
   }
   // preview-window gates (task #37).
