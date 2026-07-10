@@ -68,19 +68,17 @@ const bundles = CHAIN.map((label) => ({ label, files: untarGz(path.join(BUNDLE_D
 unwrap(session.init(JSON.stringify(bundles)), 'init');
 const mt = unwrap(session.mountTemplate(COORD), 'mountTemplate');
 
-// `.derived-index.json` is a package-store CAS byproduct fig writes per package
-// during acquisition, NOT a template file that affects rendering. The LIVE path
-// mounts from registry-shaped bundles (no CAS pass), so it legitimately lacks
-// that one sidecar. Normalize it out on BOTH sides — the gate proves the
-// render-affecting template tree is identical.
-const SIDECAR = '.derived-index.json';
-const liveFiles = mt.files; // mountTemplate returns the count it merged (includes/*→_includes/*, else template/*).
-const packedFiles = artifact.fileCount - (artifact.files[SIDECAR] != null ? 1 : 0);
+// Package normalization now regenerates `.derived-index.json` in both hosts
+// before template materialization. It is therefore present on both sides and
+// must be counted symmetrically. (The old gate subtracted it only from Fig,
+// producing a false 180-vs-179 failure after the normalizer became shared.)
+const liveFiles = mt.files; // mountTemplate returns the complete merged tree count.
+const packedFiles = artifact.fileCount;
 
 console.log(`template:            ${COORD}`);
 console.log(`chain:               ${CHAIN.join(' -> ')}`);
 console.log(`live mountTemplate:  ${liveFiles} files`);
-console.log(`packed fig artifact: ${packedFiles} files (excl. ${SIDECAR} CAS sidecar)`);
+console.log(`packed fig artifact: ${packedFiles} files`);
 
 const ok = liveFiles === packedFiles && liveFiles > 0;
 console.log(ok ? '\nTEMPLATE-PARITY GATE: PASS' : '\nTEMPLATE-PARITY GATE: FAIL (live tree != packed tree)');
