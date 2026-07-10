@@ -35,13 +35,16 @@ by the app bundle and rejects a stale mix.
 ProjectStore -> immutable ProjectBuildSnapshot
      -> LatestTaskQueue (serialized, latest-wins publication)
      -> EngineClient -> Web Worker -> isolated WASM Session
+     -> resolveProject (exact mounted package fixpoint)
      -> compileProject (one exact source revision)
           |                              |
           v                              v
    Closed Cycle SiteBuild        native template site tree
-   + addressed site.db rows      + typed fragment resolver
+   + typed semantic roots        + typed fragment resolver
+   + raw asset roots             + captured page read sets
           |                              |
-   shared Cycle renderer          Rust Liquid/page renderer
+   verified semantic view         Rust Liquid/page renderer
+   + shared Cycle renderer        -> immutable successor revision
           +---------------+--------------+
                           v
                   pages + complete assets
@@ -51,13 +54,29 @@ ProjectStore -> immutable ProjectBuildSnapshot
               preview/<ig-id>/<page-path>
 ```
 
-`site.db` is an explicit compatibility artifact and the complete semantic-data
-handoff for the Cycle v1 render target. Generator code/configuration, design
-assets, and final output identity remain separate explicit inputs/outputs. The
-row projection is not the universal compiler/renderer API. The stock template
-path may discover generated fragments while evaluating Liquid; that path
-crosses one typed `ArtifactResolver` boundary and records semantic artifact
-reads.
+The preferred Cycle v2 handoff consists of four typed data roots (prepared FHIR
+resources, terminology products, recursive navigation, and parsed config) plus
+one raw CAS artifact per authored asset. The renderer receives a verified
+`ClosedSiteBuild`; there is no request-time compiler or fragment callback.
+The prepared model also carries the compiler-selected primary
+ImplementationGuide key separately from sorted resources, so IG examples do not
+become the site identity by row order.
+`site.db` survives only as the explicitly readable Cycle v1/SQLite migration
+path, not as the universal compiler/renderer API.
+
+Any fresh package mount invalidates resolution. `compileProject` refuses to run
+until the current config has a satisfied exact fixpoint, and Rust exposes only
+those package labels to compilation and snapshot completion. Raw
+`input/resources/*.json` bytes and parsed predefined objects must have identical
+path sets and semantic values; invalid or one-sided inputs fail loudly.
+
+The stock-template path may discover generated fragments only while evaluating
+Liquid. It crosses one typed `ArtifactResolver`, captures the exact bytes read,
+seals the complete HTML/read-set/fragment/asset outcome, and promotes the result
+to a new immutable SiteBuild revision whose plan roots
+are every final page and assembled asset. This is why the two render paths look
+different during execution while still converging on the same explicit
+manifest/CAS handoff.
 
 See the engine contract in
 [`vendor/sushi-rs/crates/site_build/README.md`](vendor/sushi-rs/crates/site_build/README.md)
@@ -79,6 +98,13 @@ browser and native builds read the same closed `SiteBuildView`. Only the
 explicit `SITE_DB` migration fallback injects the legacy read-only SQL
 capability.
 
+Two version labels intentionally describe different seams. `cycle-site/v2`
+(and render-target producer version `2`) identifies the typed input contract.
+The output receipt currently names renderer implementation `cycle-site@1`.
+Because v1 and v2 inputs feed the same renderer implementation, their ordinary
+site files can be byte-identical while their receipt ids remain different: each
+receipt also binds its exact input SiteBuild id.
+
 ## Code map and seams
 
 | Path | Responsibility |
@@ -86,7 +112,10 @@ capability.
 | `app/src/build/projectRevision.ts` | exact host-side identity for `compileProject` inputs |
 | `app/src/build/latestTaskQueue.ts` | serial mutable-engine access and latest-wins commit leases |
 | `vendor/cycle/site-gen/core/closed-build.ts` | shared independent verification of the Rust build id, read graph, transitive ready closure, and all reachable ready-artifact bytes |
-| `vendor/cycle/site-gen/core/json-site-build.ts` | shared portable `SiteBuildView` over the verified canonical Cycle rows |
+| `vendor/cycle/site-gen/core/open-site-build.ts` | generic CAS verification and exact Cycle v1/v2 contract dispatch |
+| `vendor/cycle/site-gen/core/semantic-site-build.ts` | strict v2 schemas and preloaded callback-free semantic/asset view |
+| `vendor/cycle/site-gen/core/json-site-build.ts` | readable v1 aggregate compatibility adapter |
+| `vendor/cycle/site-gen/core/output-receipt.ts` | browser-safe complete Cycle output identity; native publication uses the filesystem verifier beside it |
 | `app/src/worker/protocol.ts` | typed request/result table for every main-thread/worker operation |
 | `app/src/worker/client.ts` | package transport/cache, worker RPC, compile-revision reuse, template acquisition |
 | `app/src/worker/engine.worker.ts` | sole owner of the WASM `Session`; atomically installs the current Cycle runtime |
@@ -99,8 +128,18 @@ capability.
 
 `SiteGeneratorAdapter` is a host integration seam; it is not the semantic
 handoff. The semantic value is `SiteBuild`. The adapters currently retain
-per-generator mutable state behind the serialized build queue. Moving stock
-render state to immutable per-build handles is the next isolation step.
+per-generator mutable state behind the serialized build queue. Moving the
+browser stock host onto immutable per-build successor handles is the next
+isolation step; the Rust/Fig successor API is already explicit and pure. The
+native F0-root/predecessor association remains a documented trusted-producer
+assertion until the stock host reconstructs all native inputs from a closed
+build/CAS.
+
+Package resolution is config- and mount-generation-bound. A successful fresh
+deferred/dependency/template mount invalidates both Rust's fixpoint and the
+client's resolution/compile caches; the next compile resolves again. Operations
+on an already compiled revision use its captured label allow-list, so an extra
+mounted version cannot leak into snapshots or stock fragments.
 
 ## Repository shape
 

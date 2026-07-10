@@ -144,13 +144,17 @@ compatibility behavior, and no unexpected uncaught browser exceptions.
 4. cached fetch of `scripts/packages.list`;
 5. native engine build and resolver-generated package-list drift check;
 6. WASM build and canonical static-data assembly;
-7. native/WASM Cycle compile byte comparison;
+7. native/WASM compiler byte comparison;
 8. live-mounted versus packed-template parity;
 9. local-expansion versus committed-cache consistency machinery;
-10. Cycle shared-renderer and editor tests;
-11. production Vite build under `/<repository>/`;
-12. fresh-profile Chrome certification of the exact artifact; and
-13. Pages artifact upload/deployment.
+10. Cycle shared-renderer tests;
+11. a real Fig `cycle-site/v1` versus `cycle-site/v2` build whose complete
+    ordinary output trees must be byte-identical and whose input-bound receipts
+    must differ;
+12. editor data-contract tests and a production Vite build under
+    `/<repository>/`;
+13. fresh-profile Chrome certification of the exact artifact; and
+14. Pages artifact upload/deployment.
 
 The eight-IG `snapshot/package-deps-gate.sh` needs a separate corpus/cache and is
 explicitly reported as out of scope in Pages CI. A notice is not a green parity
@@ -224,8 +228,9 @@ unrelated WASM module.
 ## Known release limitations
 
 - Templates with custom `ant` hooks are refused; no browser path executes them.
-- Native demand-resolved fragments are typed and generation-scoped but are not
-  yet persisted as new CAS-backed `SiteBuild` revisions.
+- Native Fig can promote a captured stock render into a CAS-backed immutable
+  `SiteBuild` successor. The browser stock adapter does not yet publish that
+  successor through its worker/build-handle protocol.
 - Stock adapter/session state is still mutable behind the serial build queue;
   immutable per-build stock handles remain convergence work.
 - Direct `SITE_DB` still opens an unsealed compatibility database and enables

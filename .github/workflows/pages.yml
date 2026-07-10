@@ -189,7 +189,7 @@ jobs:
       # Exercise the actual portable native seam, not only its synthetic handle
       # tests. Archive the pinned Cycle source into a disposable tree so its
       # guide-specific example preprocessor cannot dirty the submodule checkout.
-      - name: Cycle closed Fig bundle integration
+      - name: Cycle closed Fig v1/v2 integration and output parity
         working-directory: vendor/cycle
         env:
           FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
@@ -203,10 +203,21 @@ jobs:
             bun "$WORK/ig/scripts/gen-example.ts"
           SOURCE_DATE_EPOCH=1783555200 "$FIG_BIN" prepare "$WORK/ig" \
             --target cycle-site/v1 \
-            --sushi-out "$WORK/fig-sushi" \
+            --sushi-out "$WORK/fig-sushi-v1" \
             --cache "$FHIR_CACHE" \
-            --out "$WORK/closed-build"
-          SITE_BUILD_DIR="$WORK/closed-build" bun site-gen/build.tsx
+            --out "$WORK/closed-v1"
+          SOURCE_DATE_EPOCH=1783555200 "$FIG_BIN" prepare "$WORK/ig" \
+            --target cycle-site/v2 \
+            --sushi-out "$WORK/fig-sushi-v2" \
+            --cache "$FHIR_CACHE" \
+            --out "$WORK/closed-v2"
+          OUT_DIR="$WORK/out-v1" SITE_BUILD_DIR="$WORK/closed-v1" bun site-gen/build.tsx
+          OUT_DIR="$WORK/out-v2" SITE_BUILD_DIR="$WORK/closed-v2" bun site-gen/build.tsx
+          V1_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputBuildId)' "$WORK/out-v1/cycle-output-receipt.json")"
+          V2_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputBuildId)' "$WORK/out-v2/cycle-output-receipt.json")"
+          test "$V1_RECEIPT" != "$V2_RECEIPT"
+          rm "$WORK/out-v1/cycle-output-receipt.json" "$WORK/out-v2/cycle-output-receipt.json"
+          diff -ru "$WORK/out-v1" "$WORK/out-v2"
 
       - name: App data-contract tests
         working-directory: app

@@ -1,6 +1,6 @@
 # fhir-ig-editor product and architecture contract
 
-Status: canonical landed cross-repository contract, 2026-07-09. This replaces
+Status: canonical landed cross-repository contract, 2026-07-10. This replaces
 the original M0–M2 demo plan. Historical task/branch notes are not normative;
 the running seams and acceptance laws below are.
 
@@ -43,6 +43,23 @@ to establish that the worker session contains the requested revision before an
 adapter reads session state. Same-revision projections reuse the compile;
 package acquisition or changed bytes invalidate it.
 
+A successful fresh package mount invalidates the prior resolver fixpoint.
+`compileProject` requires a satisfied fixpoint for its exact config bytes and
+compiles through a package view restricted to those selected labels. Compile
+and snapshot completion use the same full dependency closure; core is a
+validated distinguished member, not the only snapshot package. The worker's
+mounted-label mirror is replaced after `init` and extended only after a
+successful `mount`. `EngineClient` mirrors a package-mount generation: any
+fresh deferred, dependency, or template mount invalidates its resolution,
+compile, and snapshot caches. Every compile re-establishes resolution for the
+exact config/generation, and a Cycle site build mounts deferred data before it
+ensures the final compile revision.
+
+Every `input/resources/*.json` file has the raw site-file bytes as its source
+authority. Parsed predefined resources must have the identical key set and
+semantic JSON values. Invalid base64, UTF-8, JSON, or one-sided entries are
+transactional errors.
+
 For callback-free external builders, the Rust engine owns the authoritative
 immutable handoff:
 
@@ -60,45 +77,68 @@ must verify its id and referential integrity.
 transitive artifact reads, is ready. A callback-free renderer must accept a
 closed build, not a collection of optimistic optional inputs.
 
-The native Publisher-template branch currently retains its typed resolver
-results and page read sets in the isolated session generation. `SiteBuild` is
-also the target contract for that branch, but persisting each discovered result
-as a new CAS-backed build revision is not yet landed and is named explicitly
-under convergence work below.
+The native Publisher-template branch may discover generated artifacts while a
+page evaluates. It records exact page/data/include bytes and typed resolver
+outcomes, then `SiteBuild::successor` creates a new immutable manifest plus the
+new CAS objects. `collect_stock_revision` makes every advertised page and final
+assembled asset a plan root. Once that successor closes, the same output can be
+replayed from its CAS without a generator callback. Thus SiteBuild is the
+explicit handoff in both branches, but at a different point: before execution
+for a declarative external builder, and after discovery/capture for a native
+template.
 
 ## Renderer contracts
 
 ### Cycle external builder
 
-The Cycle target requires exactly the canonical compatibility artifact
-`compat.site_db/rows.json`. `buildSiteBuildFromCompile` derives it from the last
-exact compile, seals the build, and returns the manifest plus addressed bytes.
-The worker constructs Cycle's shared `ClosedBuildHandle`, which independently
-verifies:
+The preferred `cycle-site/v2` target has a complete, callback-free render plan:
 
-- `site-build/v1` schema;
-- `cycle-site` renderer version and `cycle-site/v1` contract parameter;
-- the complete content-derived build id;
-- exactly one required/declared compatibility artifact;
-- ready state; and
-- every reachable ready-artifact body's presence, byte length, and SHA-256.
+- `cycle.semantic/v1/resources.json` contains prepared FHIR objects and the
+  small set of publication facets that cannot be recovered from them;
+- `terminology.json` contains actual expansion products;
+- `navigation.json` contains recursive authored page and menu trees;
+- `config.json` contains parsed configuration; and
+- each authored asset is its own raw `Asset/Authored/<path>` CAS artifact with
+  its real media type.
 
-Source/package read references are checked against the manifest. A renderer
-does not redownload those potentially large producer inputs merely to consume a
-ready artifact; native Fig nevertheless includes and verifies their bodies when
-it emits the portable filesystem bundle.
+Numeric database keys, PascalCase columns, flattened tree ordinals,
+JSON-inside-JSON, and base64 asset bodies are absent from this wire. The current
+Rust projector is deliberately transitional: it reads the already-prepared
+`SiteDb` model, but `site.db` is neither the public handoff nor semantic
+identity. The next internal cleanup is to project both v2 and optional SQLite
+from one renderer-neutral prepared-site model.
+The current prepared model carries the compiler/exporter-selected primary
+ImplementationGuide key outside the legacy row serialization; additional IG
+instances remain independently addressed resources and render as ordinary
+resource pages.
 
-Only then may `JsonSiteBuildView` read the compatibility rows. `CycleSiteRenderer`
-and its content policy are callback-free over that view. Cycle CLI and browser use
-the same page selection, React SSR, LiquidJS policy, include handling, generated
-fragments, resource fragments, and Markdown implementation.
+`buildSiteBuildFromCompile` derives v2 from the last exact compile and returns
+`site-build-cas/v1`: the closed manifest plus a digest-to-base64 transport map
+of its raw artifact bodies. Base64 is only a JSON transport encoding; it is not
+stored in semantic artifacts. `openCycleSiteBuildPayload` verifies the manifest,
+required transitive closure, byte lengths, and SHA-256 digests, then dispatches
+solely from the exact renderer version and contract. `SemanticSiteBuildView`
+preloads the four JSON roots and raw assets and supplies the existing
+synchronous renderer view. A malformed v2 build cannot be reinterpreted as v1
+by artifact sniffing.
 
-Native `fig prepare --target cycle-site/v1` emits the same closed manifest and a
-filesystem CAS. Cycle's native CLI consumes it through the same
-`ClosedBuildHandle` and `JsonSiteBuildView`; portable/native and browser mode
-both omit SQL and fail loudly if a page requires it. `SqliteSiteBuildView` and
-read-only Liquid SQL remain only behind an explicitly selected `SITE_DB` legacy
-fallback.
+Cycle CLI and browser use the same page selection, React SSR, LiquidJS policy,
+include handling, generated fragments, resource fragments, and Markdown
+implementation. Native `fig prepare --target cycle-site/v2` emits the same
+closed contract in a filesystem CAS and verifies every addressed source,
+package, and artifact object. Portable browser/native modes omit SQL and fail
+loudly if authored Liquid requires it.
+
+The input-contract version and output-renderer version are separate identities.
+The v2 render target uses producer version `2`; Cycle's current output receipt
+uses renderer `cycle-site@1` because the output algorithm is shared with the v1
+adapter. Equal v1/v2 output bytes therefore have distinct `cob1` ids: the
+receipt also commits the exact input SiteBuild id.
+
+`cycle-site/v1` remains readable and explicitly producible during migration. It
+contains the old `compat.site_db/rows.json` aggregate and is adapted by
+`JsonSiteBuildView`. `SqliteSiteBuildView` and read-only Liquid SQL remain only
+behind an explicitly selected `SITE_DB` legacy fallback.
 
 ### Native Publisher templates
 
@@ -115,6 +155,13 @@ Authored/template includes remain ordinary files.
 `artifactResolution: false` must make this callback path unavailable. External
 builders must not accidentally invoke native fragment generation through a
 missing-file lookup.
+
+After a complete native pass, `collect_stock_revision` consumes captured bytes
+and observations rather than rereading the mutable render tree. Ready fragment
+reads and exact page/data/include inputs become transitive dependencies; failed
+attempts remain typed records but are not falsely reported as successful page
+reads when a staged/template fallback rendered the page. CAS replay is limited
+to the sealed plan and rejects missing, changed, or non-UTF-8 objects.
 
 ## Liquid rule
 
@@ -136,18 +183,23 @@ shapes and lower-level helpers; historical plans do not supersede this list.
 | Seam | Input → output and ownership law |
 | --- | --- |
 | Rust `site_build::SiteBuild::new` | exact project/package/target/plan/artifacts/diagnostics → immutable, content-derived build |
+| `SiteBuild::successor` | explicit predecessor + deterministic resolution batch → immutable successor + newly introduced digest-keyed CAS objects; no ambient “last build” |
 | `SiteBuild::close` / `ClosedSiteBuild` | open build → proof that every render-plan root and transitive artifact read is ready |
-| `site_db_compat::close_projection` | already-derived exact build identity + Cycle row model → one closed compatibility artifact; it cannot invent project/package identity from rows |
+| `cycle_semantic::close_projection` | already-derived exact identity + current prepared model → four typed Cycle data roots, raw asset roots, and a closed v2 build |
+| `site_db_compat::close_projection` | migration-only v1 aggregate; it cannot invent project/package identity from rows |
 | `package_store::normalize_package_material` | mounted label + registry/native entries → identity/path-checked full transport, regenerated derived index, strict dependency metadata, and canonical compiler-visible lock bytes shared by native and WASM |
 | `render_page::ArtifactResolver` | typed native artifact key → generated bytes/read set or typed failure; Liquid/file lookup does not own semantic generation |
-| native `fig prepare` | explicit IG/cache/output/time inputs → `site-build.json` plus `objects/sha256/*`; no network/default cache or generator callback |
-| WASM `Session` | one isolated mutable engine per normal instance; `compileProject` establishes a revision and projection methods consume it without recompiling |
+| `fig::engine::render_site_for_revision` / `collect_site_build_revision` | trusted predecessor/F0-root assertion → opaque full-payload-sealed native outcome → complete stock page/asset successor; plain `render_site` is not promotable |
+| native `fig prepare` | explicit IG/cache/output/time/target → `site-build.json` plus `objects/sha256/*`; v2 preferred, v1 explicit migration option |
+| WASM `Session` | one isolated mutable engine per normal instance; mount invalidates resolution, `compileProject` uses only its exact resolved labels, and projection methods consume that revision without recompiling |
 | worker `EngineOps` | the single typed main-thread/worker RPC table; one worker owns one `Session` and atomically installs a Cycle runtime |
 | `ProjectBuildSnapshot` + `LatestTaskQueue` | immutable host input capture + serialized latest-wins authority to publish React/Service Worker state |
 | `SiteGeneratorAdapter` | temporary host integration for prepare/list/render/assets; not semantic identity and not a replacement for `SiteBuild` |
 | Cycle `ClosedBuildHandle` / `ContentStore` | verify a closed manifest/read graph and reachable ready-artifact bodies over a read-only byte transport |
-| Cycle `SiteBuildView` / `JsonSiteBuildView` | synchronous callback-free semantic queries over the one verified Cycle artifact |
+| Cycle `openCycleSiteBuildPayload` | generic CAS payload → verified closed handle + exact v1/v2 view dispatch |
+| Cycle `SiteBuildView` / `SemanticSiteBuildView` | synchronous callback-free queries over verified typed roots; legacy row values exist only as an in-memory renderer façade |
 | `CycleSiteRenderer` + `CycleContentRenderer` | deterministic page selection/React SSR plus injected shared LiquidJS narrative policy; no filesystem/compiler/global database |
+| Cycle output receipt | complete declared output bytes + producer metadata + input build id → `cob1-sha256` identity; native publication re-verifies before rename |
 | `SqliteSiteBuildView` | explicitly selected native legacy adapter only; the sole path that may inject read-only SQL |
 | preview generation commit | complete generation/manifest pair → atomically acknowledged Service Worker pointer scoped by IG id |
 
@@ -162,7 +214,7 @@ All build/template operations over the mutable worker session are serialized by
 publication lease. Non-cancellable WASM work may finish, but revoked work must
 not publish React state or a Service Worker generation.
 
-The worker installs Cycle manifest, rows, and renderer as one atomic
+The worker installs Cycle manifest, verified semantic view, and renderer as one atomic
 `CycleBuildRuntime`; separate mutable globals for those pieces are forbidden.
 
 The current adapter API retains generator state behind this queue. The target
@@ -186,10 +238,17 @@ runtime assets are generated from pinned, hash-checked upstream inputs.
 Generated table backgrounds and compatibility scripts are explicit producers.
 Do not modify third-party library bytes in place.
 
+Cycle v2 names every authored asset as a raw required SiteBuild artifact. The
+native full-site host additionally declares design-system, project stylesheet,
+and client-bundle outputs in its final output receipt. Those are generator/host
+outputs, not fabricated semantic inputs.
+
 When present, `SiteGeneratorAdapter.assetManifest` is the complete public-path
 projection for one generation and is provisioned once. The stock adapter meets
 this contract. An adapter that omits it explicitly uses the slower live
-`assetBytes`/static relay; Cycle still has that migration debt.
+`assetBytes`/static relay. Cycle's semantic handoff is complete, but its editor
+adapter still needs to provision those known v2 asset roots as one Service
+Worker manifest instead of using the live relay.
 
 ## Preview protocol
 
@@ -248,7 +307,7 @@ local output must not masquerade as a complete expansion.
 A releasable editor commit must pass, as applicable:
 
 - engine compiler/WASM/snapshot tests;
-- `site_build` closure and `site-db-compat` tests;
+- `site_build` closure, successor, typed Cycle projection, and v1 compatibility tests;
 - typed `render_page` artifact tests and `fig` watch tests;
 - native/WASM Cycle compile byte parity;
 - package-list drift and template live/packed parity;
@@ -265,15 +324,18 @@ runtime globals, inactive compatibility behavior, or unexpected exceptions.
 
 ## Current convergence work
 
-- Persist demand-resolved native artifacts and page read sets as new immutable
-  `SiteBuild`/CAS revisions and define the stock render plan.
-- Replace adapter/session singletons with immutable build handles.
-- Add a content-addressed final-output receipt over Cycle's now-enforced logical
-  output manifest, then retire the explicit legacy SQLite/SQL fallback after
-  downstream workflows migrate.
-- Promote stock asset catalogs into first-class build artifacts.
-- Emit/provision a complete Cycle row/design asset manifest instead of relying
-  on the live asset responder.
+- Extract a renderer-neutral `PreparedSite` before row derivation; make typed
+  Cycle artifacts and optional `site.db` compatibility outputs consume it.
+- Rewrite Cycle's renderer-facing query API around semantic resources,
+  navigation, terminology, and assets, then remove the in-memory row façade.
+- Retire the v1 aggregate producer and explicit SQLite/SQL fallback after
+  downstream workflows migrate; retain the v1 reader for a longer window.
+- Replace remaining adapter/session singletons with immutable build handles and
+  expose/persist native stock successor revisions in the browser host.
+- Add finer per-resource artifacts only where measured invalidation or loading
+  costs justify them; v2 intentionally starts with a resource aggregate.
+- Provision Cycle's already-declared v2 asset roots to the preview Service
+  Worker in one generation commit instead of using the live asset responder.
 - Extend precise invalidation across source, package, data/include, fragment,
   page, and asset reads.
 - Represent remaining terminology/dictionary/dependency-table gaps as typed

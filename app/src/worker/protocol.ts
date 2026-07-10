@@ -95,7 +95,7 @@ export interface PagePreviewDescriptor {
   kind: 'narrative' | 'artifacts' | 'profile' | 'valueset' | 'codesystem' | 'example' | 'generic';
 }
 
-/** Result of building the site.db rows + enumerating renderable pages. */
+/** Result of closing the typed Cycle SiteBuild + enumerating renderable pages. */
 export interface SitePreviewResult {
   /** Content-derived identity of the closed SiteBuild consumed by Cycle. */
   buildId: string;
@@ -112,8 +112,8 @@ export interface RenderPageResult {
   renderMs: number;
 }
 
-/** The inputs the worker needs to build the site.db rows (beyond the FSH compile
- *  inputs): the site-content files (pagecontent/images/includes) as base64. */
+/** Site-content inputs (pagecontent/images/includes), transported as base64 to
+ *  the compile/projection boundary. V2 assets become raw CAS artifacts. */
 export interface SiteContentInput {
   /** project-relative path -> base64 bytes (pagecontent/images/includes). */
   siteFiles: Record<string, string>;
@@ -253,7 +253,7 @@ export interface EngineOps {
     result: CompileResult;
   };
   snapshot: { args: [url: string]; result: SnapshotResult };
-  // Closed Cycle external-builder path (verified rows + shared renderer live in the worker).
+  // Closed Cycle external-builder path (verified semantic view + shared renderer live in the worker).
   buildSite: {
     args: [
       config: string,

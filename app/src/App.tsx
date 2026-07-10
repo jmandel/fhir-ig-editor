@@ -367,10 +367,10 @@ export function App() {
       if (lease.isLatest()) setCompiling(true);
       try {
         const cfg = project.config;
-        // task #32: ensure this project's package closure is mounted before compiling.
-        // Runs only when the config (deps/fhirVersion) changed since the last
-        // acquisition — the loop is a no-op once the closure is mounted, so this is
-        // cheap on subsequent keystrokes. Blocked packages surface in the UI.
+        // task #32: acquire visibly when config changes so blocked packages and
+        // progress reach the UI. EngineClient.compile independently enforces the
+        // stronger config + package-generation invariant; a deferred/template
+        // mount cannot bypass re-resolution merely because this UI ref is stable.
         if (cfg !== acquiredConfigRef.current) {
           engine.setProgress((ev) => {
             if (lease.isLatest()) {

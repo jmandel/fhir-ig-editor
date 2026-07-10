@@ -15,7 +15,7 @@ export interface ProjectFile {
 }
 
 /** A binary project file (e.g. an image), content base64. Kept separate from the
- *  text cache so it round-trips through the site.db producer without corruption. */
+ *  text cache so exact authored bytes survive compile and SiteBuild projection. */
 export interface BinaryProjectFile {
   path: string;
   base64: string;
@@ -229,11 +229,9 @@ export class ProjectStore {
     const out: Record<string, unknown> = {};
     for (const [p, t] of this.cache) {
       if (p.startsWith('input/resources/') && p.endsWith('.json')) {
-        try {
-          out[p] = JSON.parse(t);
-        } catch {
-          /* malformed predefined JSON is surfaced by the compiler */
-        }
+        // Fail before compilation rather than silently dropping an authored
+        // resource. Rust independently validates the raw site-file copy too.
+        out[p] = JSON.parse(t);
       }
     }
     return out;

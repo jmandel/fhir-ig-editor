@@ -38,6 +38,7 @@ import { projectCompileRevision } from '../build/projectRevision';
 import { assertCompatibleEngineCommit } from './engineVersion';
 import { parseBakedBundleManifest, readVerifiedBundleBytes } from './bundleIntegrity';
 import type { BakedBundleEntry, BakedBundleManifest } from './bundleIntegrity';
+import { ResolutionCache } from './resolutionCache';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
@@ -54,6 +55,10 @@ export class EngineClient {
    * projection of the same compile rather than a second semantic compile. */
   private compiledProjectRevision: string | null = null;
   private compiledProjectResult: CompileResult | null = null;
+  /** One resolver-loop outcome bound to exact config bytes and the current
+   * package-mount generation. Rust invalidates its fixpoint on a fresh mount;
+   * the host mirrors that law here. */
+  private resolutionCache = new ResolutionCache<ResolveOutcome>();
   private inited = false;
   /** Deferred bundle entries (from the manifest) not mounted at init time. */
   private deferred: BakedBundleEntry[] = [];
@@ -132,6 +137,18 @@ export class EngineClient {
     return spec;
   }
 
+  /** The only incremental mount path on the main thread. Keep resolution,
+   * compile, and snapshot caches synchronized with the worker/Rust session. */
+  private async mountBundles(bundles: BundleSpec[]): Promise<MountResult> {
+    const result = await this.call('mountBundles', bundles);
+    if (this.resolutionCache.noteMount(result.newlyMounted)) {
+      this.compiledProjectRevision = null;
+      this.compiledProjectResult = null;
+      this.snapshotCache.clear();
+    }
+    return result;
+  }
+
   /** Boot: mount the compile-critical (non-deferred) bundles. Deferred bundles
    *  (r5.core) are held back and mounted lazily on first snapshot/site build. */
   async init(onProgress?: ProgressCb): Promise<InitResult> {
@@ -196,7 +213,7 @@ export class EngineClient {
         stage: 'bundle-mount',
         message: `Mounting ${specs.map((s) => s.label).join(', ')}…`,
       });
-      const r: MountResult = await this.call('mountBundles', specs);
+      const r = await this.mountBundles(specs);
       // Mounted now; clear the deferred list so we don't re-fetch.
       this.deferred = [];
       this.progressCb?.({
@@ -227,7 +244,10 @@ export class EngineClient {
    *  over the network. Returns the `id#version` label it registered. */
   async ingestLocalTgz(tgz: ArrayBuffer): Promise<string> {
     const { ingestTgz } = await import('./localPackages');
-    return ingestTgz(tgz);
+    const label = await ingestTgz(tgz);
+    // A prior blocked attempt may now be satisfiable before a new mount occurs.
+    this.resolutionCache.clear();
+    return label;
   }
 
 
@@ -243,8 +263,10 @@ export class EngineClient {
    *  (c) the FHIR registry, (d) an optional proxy — mounting each until the engine
    *  reports `satisfied`. Packages no source can supply come back as a precise
    *  `blocked` list for the UI. Safe to call before every compile of an arbitrary
-   *  IG; it is a no-op once the closure is already mounted. */
+  *  IG; it is a no-op once the closure is already mounted. */
   async acquireForProject(config: string): Promise<ResolveOutcome> {
+    const cached = this.resolutionCache.get(config);
+    if (cached) return cached;
     // Acquisition can change the package material a subsequent compile reads,
     // even when authored bytes are unchanged. Do not reuse a pre-acquisition
     // compile result across that boundary.
@@ -259,11 +281,11 @@ export class EngineClient {
     // as an unresolved_version, the registry can never answer, and it hard-blocks
     // with "no versions found" even though the bytes are already mounted.
     const seedIndex = indexFromLabels(this.bakedByLabel.keys());
-    return acquireForProject(
+    const outcome = await acquireForProject(
       {
         resolveStep: (cfg, idx) => this.resolveStep(cfg, idx),
         mount: async (bundles) => {
-          await this.call('mountBundles', bundles);
+          await this.mountBundles(bundles);
         },
         bakedBundle: (label) => this.bakedByLabel.get(label),
         fetchBaked: (bundle) => this.loadBundle(bundle, 'Loading (dependency)'),
@@ -272,6 +294,13 @@ export class EngineClient {
       (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
       seedIndex,
     );
+    // The loop's final resolve happened after its final mount, so a satisfied
+    // outcome belongs to the current package generation. Do not memoize a
+    // blocked/network outcome forever: an unchanged project must be able to
+    // retry when a registry or proxy recovers.
+    if (outcome.step.satisfied) this.resolutionCache.record(config, outcome);
+    else this.resolutionCache.clear();
+    return outcome;
   }
 
   async compile(
@@ -280,6 +309,10 @@ export class EngineClient {
     predefined: Record<string, unknown>,
     siteFiles: Record<string, string>,
   ): Promise<CompileResult> {
+    // Correctness is bound to both authored bytes and the package generation.
+    // UI-level config memoization may suppress progress chrome, but it may not
+    // bypass re-resolution after a deferred/template/dependency mount.
+    await this.acquireForProject(config);
     const revision = await projectCompileRevision({ config, files, predefined, siteFiles });
     if (revision === this.compiledProjectRevision && this.compiledProjectResult) {
       return this.compiledProjectResult;
@@ -323,7 +356,7 @@ export class EngineClient {
 
   // ---- site-build projections and preview ----
 
-  /** Build the in-browser site.db rows + enumerate renderable pages. */
+  /** Close the typed Cycle SiteBuild + enumerate renderable pages. */
   async buildSite(
     config: string,
     files: Record<string, string>,
@@ -333,6 +366,9 @@ export class EngineClient {
   ): Promise<SitePreviewResult> {
     // The site build snapshots every SD, so it needs the deferred bundle too.
     await this.ensureSnapshotBundles();
+    // A fresh deferred mount invalidates the resolver fixpoint and the host's
+    // compiled-revision cache. Re-establish both before projecting SiteBuild.
+    await this.ensureCompiledProject(config, files, predefined, siteFiles);
     return this.call('buildSite', config, files, predefined, siteFiles, buildEpochSecs);
   }
 
@@ -387,7 +423,7 @@ export class EngineClient {
       // the CHAIN decision lives in the walk, not in resolveStep.
       resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
       mount: async (bundles: BundleSpec[]) => {
-        await this.call('mountBundles', bundles);
+        await this.mountBundles(bundles);
       },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
       fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (template)'),

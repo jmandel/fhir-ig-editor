@@ -14,8 +14,10 @@ declare const __ENGINE_COMMIT__: string;
 import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, SiteTreeFile, StockSiteOptions } from './protocol';
 import { ClosedBuildHandle } from '@cycle/core/closed-build';
 import type { CycleSiteBuildPayload } from '@cycle/core/json-site-build';
-import { JsonSiteBuildView } from '@cycle/core/json-site-build';
+import { openCycleSiteBuildPayload } from '@cycle/core/open-site-build';
+import type { PortableCycleSiteBuildView } from '@cycle/core/open-site-build';
 import type { CyclePreviewRenderer } from '../preview/render';
+import { MountedLabels } from './mountedLabels';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -77,13 +79,13 @@ function unwrap<T>(envelopeJson: string): T {
 
 /** Labels currently mounted in the engine — so `mountBundles` is idempotent and
  *  the UI's lazy loader never re-fetches an already-mounted package. */
-const mountedLabels = new Set<string>();
+const mountedLabels = new MountedLabels();
 
 /** One atomically installed external-builder runtime. Its proof-bearing handle,
  * typed view, and prepared renderer can never refer to different builds. */
 interface CycleBuildRuntime {
   build: ClosedBuildHandle;
-  view: JsonSiteBuildView;
+  view: PortableCycleSiteBuildView;
   renderer: CyclePreviewRenderer;
 }
 
@@ -107,7 +109,7 @@ const handlers: Handlers = {
     const s = await ensureSession();
     const t0 = performance.now();
     const { mounted } = unwrap<{ mounted: number }>(s.init(JSON.stringify(bundles)));
-    for (const b of bundles) mountedLabels.add(b.label);
+    mountedLabels.replace(bundles.map((bundle) => bundle.label));
     const version = JSON.parse(wasmMod!.Session.version());
     return { mounted, version, initMs: performance.now() - t0 };
   },
@@ -117,21 +119,12 @@ const handlers: Handlers = {
   async mountBundles(bundles: BundleSpec[]) {
     const s = await ensureSession();
     const t0 = performance.now();
-    const seen = new Set<string>();
-    const fresh: BundleSpec[] = [];
-    for (const bundle of bundles) {
-      if (mountedLabels.has(bundle.label)) continue;
-      if (seen.has(bundle.label)) {
-        throw new Error(`mountBundles: duplicate new package label in one transaction: ${bundle.label}`);
-      }
-      seen.add(bundle.label);
-      fresh.push(bundle);
-    }
+    const fresh: BundleSpec[] = mountedLabels.fresh(bundles);
     const mounted =
       fresh.length > 0
         ? unwrap<{ mounted: number }>(s.mount(JSON.stringify(fresh))).mounted
         : mountedLabels.size;
-    for (const b of fresh) mountedLabels.add(b.label);
+    mountedLabels.add(fresh);
     return { mounted, newlyMounted: fresh.map((b) => b.label), mountMs: performance.now() - t0 };
   },
 
@@ -201,19 +194,13 @@ const handlers: Handlers = {
       predefined,
       site_files: siteFiles,
       build_epoch_secs: buildEpochSecs,
+      target: 'cycle-site/v2',
     };
     // The matching compileProject call already established the semantic
     // revision. FSH/predefined bodies are equality assertions at the Rust trust
     // boundary, never inputs to a second compile.
     const handoff = unwrap<CycleSiteBuildPayload>(s.buildSiteBuildFromCompile(JSON.stringify(input)));
-    const siteDbBytes = new TextEncoder().encode(handoff.siteDbJson);
-    const build = await ClosedBuildHandle.open(handoff.siteBuild, {
-      // The current WASM transport returns the one CAS object beside its
-      // manifest. ClosedBuildHandle still verifies its length and digest before
-      // exposing it; a future worker CAS can replace this transport unchanged.
-      get: async () => siteDbBytes,
-    });
-    const view = await JsonSiteBuildView.fromClosedBuild(build);
+    const { build, view } = await openCycleSiteBuildPayload(handoff);
     // Enumerate pages (needs the render module; imported lazily so the wasm-only
     // paths don't pull React into their critical path).
     const render = await import('../preview/render');
@@ -307,8 +294,7 @@ const handlers: Handlers = {
   },
 };
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
-  const msg = e.data;
+async function handleRequest(msg: WorkerRequest): Promise<void> {
   const reply = (r: WorkerReply) => (self as unknown as Worker).postMessage(r);
   try {
     const handler = handlers[msg.op] as (...args: unknown[]) => Promise<unknown>;
@@ -318,4 +304,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
     const e2 = err as Error;
     reply({ id: msg.id, ok: false, error: String(e2?.stack ?? e2) });
   }
+}
+
+// The Session and installed Cycle runtime are one mutable authority. Serialize
+// at the worker boundary as well as in the React host so direct/reused protocol
+// clients cannot let an older async CAS verification overwrite a newer build.
+let requestTail: Promise<void> = Promise.resolve();
+self.onmessage = (event: MessageEvent<WorkerRequest>) => {
+  const message = event.data;
+  requestTail = requestTail.then(
+    () => handleRequest(message),
+    () => handleRequest(message),
+  );
 };

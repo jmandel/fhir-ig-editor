@@ -1,0 +1,23 @@
+import { describe, expect, test } from 'bun:test';
+import { ProjectStore } from '../src/vfs/store';
+
+describe('project resource source authority', () => {
+  test('predefined objects and raw site bytes come from the same authored files', async () => {
+    const store = await ProjectStore.create();
+    await store.loadAll([{
+      path: 'input/resources/Patient-p.json',
+      text: '{ "id": "p", "resourceType": "Patient" }',
+    }]);
+
+    expect(store.predefinedResources()).toEqual({
+      'input/resources/Patient-p.json': { id: 'p', resourceType: 'Patient' },
+    });
+    expect(store.siteFiles()['input/resources/Patient-p.json']).toBeTruthy();
+  });
+
+  test('malformed authored JSON fails instead of disappearing from predefined input', async () => {
+    const store = await ProjectStore.create();
+    await store.loadAll([{ path: 'input/resources/bad.json', text: '{' }]);
+    expect(() => store.predefinedResources()).toThrow();
+  });
+});

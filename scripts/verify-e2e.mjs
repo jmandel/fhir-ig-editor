@@ -659,7 +659,7 @@ try {
       const f = document.querySelector('.preview-frame');
       const doc = f && (f.contentDocument || f.contentWindow?.document);
       // The IG title flows to the Layout <title> and the index page heading.
-      return doc && (/E2E Preview Title Changed/.test(doc.title) || /E2E Preview Title Changed/.test(doc.body.textContent));
+      return !!doc && (/E2E Preview Title Changed/.test(doc.title) || /E2E Preview Title Changed/.test(doc.body?.textContent || ''));
     })()`, 30000, 'preview reflects edited title');
     results.previewUpdatedAfterEdit = true;
     results.editToPreviewMs = Date.now() - tEdit;
