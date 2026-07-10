@@ -235,6 +235,10 @@ jobs:
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
           CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          # setup-chrome's archive exposes a SUID helper that is not root-owned
+          # or mode 4755 on hosted runners. This is an isolated fresh-profile
+          # test of our loopback static artifact, so opt out explicitly here.
+          CHROME_NO_SANDBOX: '1'
         run: bash scripts/run-browser-gates.sh app/dist
 
       - name: Assemble Pages artifact

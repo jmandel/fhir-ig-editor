@@ -4,6 +4,7 @@
 #
 #   BASE_PATH=/ bash scripts/run-browser-gates.sh app/dist
 #   BASE_PATH=/fhir-ig-editor/ CHROME_BIN=/path/to/chrome \
+#     CHROME_NO_SANDBOX=1 \
 #     bash scripts/run-browser-gates.sh app/dist
 set -euo pipefail
 
@@ -83,7 +84,12 @@ chrome_args=(
   "--user-data-dir=$WORK/chrome-profile"
   about:blank
 )
-if [ "$(id -u)" -eq 0 ]; then chrome_args+=(--no-sandbox); fi
+# Root cannot use Chrome's normal namespace sandbox. Some CI-provisioned Chrome
+# archives also ship an unusable SUID helper; those callers opt out explicitly
+# rather than weakening ordinary local non-root runs.
+if [ "$(id -u)" -eq 0 ] || [ "${CHROME_NO_SANDBOX:-0}" = 1 ]; then
+  chrome_args+=(--no-sandbox)
+fi
 "$chrome" "${chrome_args[@]}" >"$CHROME_LOG" 2>&1 &
 chrome_pid=$!
 
