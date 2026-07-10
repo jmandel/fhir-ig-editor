@@ -23,6 +23,17 @@ CACHE="${FHIR_CACHE:-$ENGINE/temp/fhir-home/.fhir/packages}"
 # Optional scratch cargo/toolchain env (same knobs as build-wasm.sh).
 if [ -n "${WASM_CARGO_HOME:-}" ]; then export CARGO_HOME="$WASM_CARGO_HOME"; export PATH="$CARGO_HOME/bin:$PATH"; fi
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "FATAL: sha256sum or shasum is required" >&2
+    return 2
+  fi
+}
+
 LABELS=()
 while IFS= read -r line; do
   l="${line%%[[:space:]]*}"
@@ -82,8 +93,10 @@ for l in "${TEMPLATE_LABELS[@]}"; do
   echo "[bundle-packages] template $l repacked -> $(du -h "$OUT/$l.tgz" | cut -f1)"
 done
 
-# Emit manifest.json (labels + tgz paths + sizes + a `defer` flag) — what
-# EngineClient.init fetches. `defer:true` marks a bundle the FIRST COMPILE does
+# Emit manifest.json (labels + tgz paths + compressed SHA-256 + sizes + a
+# `defer` flag) — what EngineClient.init fetches. The browser verifies the
+# compressed bytes before inflation and keys its OPFS cache by this digest.
+# `defer:true` marks a bundle the FIRST COMPILE does
 # not need, so cold start can skip fetching it until the engine first needs it
 # (spec §1 lazy loading). Today that is ONLY the R5 core: cycle is an R4 IG, so
 # the compile fishes R4 bases; r5.core is pulled solely by SNAPSHOT generation
@@ -135,9 +148,10 @@ is_deferrable() {
     l="${LABELS[$i]}"
     comma=","; [ "$i" -eq $((${#LABELS[@]} - 1)) ] && comma=""
     tgz_bytes=$(stat -c%s "$OUT/$l.tgz" 2>/dev/null || echo 0)
+    tgz_sha256=$(sha256_file "$OUT/$l.tgz")
     defer=false; is_deferrable "$l" && defer=true
-    printf '    { "label": "%s", "tgz": "%s.tgz", "bytes": %s, "defer": %s }%s\n' \
-      "$l" "$l" "$tgz_bytes" "$defer" "$comma"
+    printf '    { "label": "%s", "tgz": "%s.tgz", "sha256": "%s", "bytes": %s, "defer": %s }%s\n' \
+      "$l" "$l" "$tgz_sha256" "$tgz_bytes" "$defer" "$comma"
   done
   echo '  ]'
   echo '}'

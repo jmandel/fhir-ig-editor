@@ -12,7 +12,10 @@
 declare const __ENGINE_COMMIT__: string;
 
 import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, SiteTreeFile, StockSiteOptions } from './protocol';
-import type { SiteDbRows } from '../preview/rowStore';
+import { ClosedBuildHandle } from '@cycle/core/closed-build';
+import type { CycleSiteBuildPayload } from '@cycle/core/json-site-build';
+import { JsonSiteBuildView } from '@cycle/core/json-site-build';
+import type { CyclePreviewRenderer } from '../preview/render';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -24,9 +27,12 @@ interface WasmSession {
   mount(bundlesJson: string): string;
   resolveProject(config: string, versionIndexJson: string): string;
   compile(filesJson: string, config: string, predefinedJson: string): string;
+  compileProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string): string;
   setLocalResources(json: string): string;
   snapshot(input: string): string;
   buildSiteDb(inputJson: string): string;
+  buildSiteDbFromCompile(inputJson: string): string;
+  buildSiteBuildFromCompile(inputJson: string): string;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
   mountSite(filesJson: string, optionsJson: string): string;
   mountTemplate(coord: string): string;
@@ -73,17 +79,15 @@ function unwrap<T>(envelopeJson: string): T {
  *  the UI's lazy loader never re-fetches an already-mounted package. */
 const mountedLabels = new Set<string>();
 
-// The last-built site.db rows, so renderPage/assetBytes render on demand without
-// rebuilding (render-on-demand per visible page — M2 scope, honest per spec §7).
-let lastRows: SiteDbRows | null = null;
-
-// ---- gzip + tar inflation (mirrors package_acquisition::read_bundle) --------
-
-async function gunzip(buf: ArrayBuffer): Promise<Uint8Array> {
-  const ds = new DecompressionStream('gzip');
-  const stream = new Response(buf).body!.pipeThrough(ds);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+/** One atomically installed external-builder runtime. Its proof-bearing handle,
+ * typed view, and prepared renderer can never refer to different builds. */
+interface CycleBuildRuntime {
+  build: ClosedBuildHandle;
+  view: JsonSiteBuildView;
+  renderer: CyclePreviewRenderer;
 }
+
+let cycleBuild: CycleBuildRuntime | null = null;
 
 function base64(bytes: Uint8Array): string {
   let bin = '';
@@ -92,35 +96,6 @@ function base64(bytes: Uint8Array): string {
     bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(bin);
-}
-
-function untar(tar: Uint8Array): Record<string, string> {
-  const files: Record<string, string> = {};
-  let off = 0;
-  while (off + 512 <= tar.length) {
-    const header = tar.subarray(off, off + 512);
-    let name = '';
-    for (let i = 0; i < 100 && header[i] !== 0; i++) name += String.fromCharCode(header[i]);
-    if (name === '') break;
-    let sizeStr = '';
-    for (let i = 124; i < 136 && header[i] !== 0 && header[i] !== 0x20; i++)
-      sizeStr += String.fromCharCode(header[i]);
-    const size = parseInt(sizeStr.trim(), 8) || 0;
-    const typeflag = header[156];
-    off += 512;
-    const data = tar.subarray(off, off + size);
-    off += Math.ceil(size / 512) * 512;
-    if (typeflag === 0x30 || typeflag === 0) {
-      const b = name.replace(/^package\//, '').replace(/^\.\//, '');
-      files[b] = base64(data);
-    }
-  }
-  return files;
-}
-
-/** Inflate a `.tgz` bundle fetched as an ArrayBuffer into `{name: base64}`. */
-export async function inflateBundle(tgz: ArrayBuffer): Promise<Record<string, string>> {
-  return untar(await gunzip(tgz));
 }
 
 // ---- op handlers (exactly the protocol's EngineOps table) -------------------
@@ -142,7 +117,16 @@ const handlers: Handlers = {
   async mountBundles(bundles: BundleSpec[]) {
     const s = await ensureSession();
     const t0 = performance.now();
-    const fresh = bundles.filter((b) => !mountedLabels.has(b.label));
+    const seen = new Set<string>();
+    const fresh: BundleSpec[] = [];
+    for (const bundle of bundles) {
+      if (mountedLabels.has(bundle.label)) continue;
+      if (seen.has(bundle.label)) {
+        throw new Error(`mountBundles: duplicate new package label in one transaction: ${bundle.label}`);
+      }
+      seen.add(bundle.label);
+      fresh.push(bundle);
+    }
     const mounted =
       fresh.length > 0
         ? unwrap<{ mounted: number }>(s.mount(JSON.stringify(fresh))).mounted
@@ -184,11 +168,16 @@ const handlers: Handlers = {
     return { ok: false, notEnumerable: raw.notEnumerable, expandMs } as EngineOps['expandValueSet']['result'];
   },
 
-  async compile(config, files, predefined) {
+  async compile(config, files, predefined, siteFiles) {
     const s = await ensureSession();
     const t0 = performance.now();
     const out = unwrap<Record<string, unknown>>(
-      s.compile(JSON.stringify(files), config, JSON.stringify(predefined)),
+      s.compileProject(
+        JSON.stringify(files),
+        config,
+        JSON.stringify(predefined),
+        JSON.stringify(siteFiles),
+      ),
     );
     const buildMs = performance.now() - t0;
     return { ...out, buildMs, fileCount: Object.keys(files).length } as EngineOps['compile']['result'];
@@ -201,7 +190,7 @@ const handlers: Handlers = {
     return { ...out, snapshotMs: performance.now() - t0 } as EngineOps['snapshot']['result'];
   },
 
-  // ---- M2 cycle-generator preview path ----
+  // ---- closed Cycle external-builder path ----
 
   async buildSite(config, files, predefined, siteFiles, buildEpochSecs) {
     const s = await ensureSession();
@@ -213,36 +202,53 @@ const handlers: Handlers = {
       site_files: siteFiles,
       build_epoch_secs: buildEpochSecs,
     };
-    lastRows = unwrap<SiteDbRows>(s.buildSiteDb(JSON.stringify(input)));
+    // The matching compileProject call already established the semantic
+    // revision. FSH/predefined bodies are equality assertions at the Rust trust
+    // boundary, never inputs to a second compile.
+    const handoff = unwrap<CycleSiteBuildPayload>(s.buildSiteBuildFromCompile(JSON.stringify(input)));
+    const siteDbBytes = new TextEncoder().encode(handoff.siteDbJson);
+    const build = await ClosedBuildHandle.open(handoff.siteBuild, {
+      // The current WASM transport returns the one CAS object beside its
+      // manifest. ClosedBuildHandle still verifies its length and digest before
+      // exposing it; a future worker CAS can replace this transport unchanged.
+      get: async () => siteDbBytes,
+    });
+    const view = await JsonSiteBuildView.fromClosedBuild(build);
     // Enumerate pages (needs the render module; imported lazily so the wasm-only
     // paths don't pull React into their critical path).
     const render = await import('../preview/render');
-    // Engine ContentApi hook (TS-liquid sunset): narrative Liquid runs in the
-    // wasm session; the render module supplies cycle's include tree + data.
-    render.setEngineContent({
-      renderLiquid: (source, dataJson) => unwrap<{ html: string }>(s.renderLiquid(source, dataJson)).html,
-      mountSite: (filesJson, optionsJson) => {
-        unwrap(s.mountSite(filesJson, optionsJson));
-      },
-    });
-    render.mountEngineSite(lastRows);
-    const pages = render.listPages(lastRows);
-    const assets = lastRows.assets.map((a) => ({ name: a.Name, mime: a.Mime }));
-    return { pages, assets, buildMs: performance.now() - t0 };
+    // One renderer instance owns this immutable row revision and Cycle's shared
+    // closed content policy; no active store, Rust ContentApi, or compiler
+    // callback participates.
+    const renderer = render.createCycleRenderer(view);
+    const pages = renderer.listPages();
+    // Validate the complete page/auxiliary/row-asset namespace before installing
+    // the runtime. A collision is a build failure, never a request-time surprise.
+    renderer.listOutputs();
+    const assets = view.assets().map((asset) => ({ name: asset.Name, mime: asset.Mime }));
+    const runtime: CycleBuildRuntime = { build, view, renderer };
+    cycleBuild = runtime;
+    return { buildId: runtime.build.manifest.buildId, pages, assets, buildMs: performance.now() - t0 };
   },
 
   async renderPage(file) {
-    if (!lastRows) throw new Error('renderPage before buildSite');
-    const { renderPage } = await import('../preview/render');
+    if (!cycleBuild) throw new Error('renderPage before buildSite');
     const t0 = performance.now();
-    const { html } = renderPage(lastRows, file);
+    const { html } = cycleBuild.renderer.renderPage(file);
     return { file, html, renderMs: performance.now() - t0 };
   },
 
   async assetBytes(name) {
-    if (!lastRows) return null;
-    const a = lastRows.assets.find((x) => x.Name === name);
-    return a ? { name: a.Name, mime: a.Mime, base64: a.Content } : null;
+    if (!cycleBuild) return null;
+    try {
+      const output = cycleBuild.renderer.renderOutput(name);
+      const bytes = typeof output.content === 'string'
+        ? new TextEncoder().encode(output.content)
+        : output.content;
+      return { name: output.file, mime: output.mime, base64: base64(bytes) };
+    } catch {
+      return null;
+    }
   },
 
   // ---- F6 stock-template render surface (engine-side pages/fragments) ----
@@ -288,7 +294,7 @@ const handlers: Handlers = {
     return unwrap(s.renderFragment(ref, kind));
   },
 
-  // ---- ContentApi (TS-liquid sunset): engine renders all content ----
+  // ---- generic native Rust content surface (not Cycle LiquidJS) ----
 
   async renderLiquid(source, data) {
     const s = await ensureSession();

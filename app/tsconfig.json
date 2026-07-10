@@ -7,6 +7,8 @@
     "skipLibCheck": true,
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "moduleDetection": "force",
@@ -19,9 +21,8 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "@cycle/*": ["src/preview/cycle-stub.ts"]
+      "@cycle/*": ["../vendor/cycle/site-gen/*"]
     }
   },
-  "include": ["src"],
-  "exclude": ["../vendor"]
+  "include": ["src"]
 }

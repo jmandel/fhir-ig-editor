@@ -86,7 +86,7 @@ export interface ProgressEvent {
   fromCache?: boolean;
 }
 
-// ---- M2 site preview ------------------------------------------------------
+// ---- closed Cycle site-build preview --------------------------------------
 
 /** One page the preview can render, as returned by `listPages`. */
 export interface PagePreviewDescriptor {
@@ -97,6 +97,8 @@ export interface PagePreviewDescriptor {
 
 /** Result of building the site.db rows + enumerating renderable pages. */
 export interface SitePreviewResult {
+  /** Content-derived identity of the closed SiteBuild consumed by Cycle. */
+  buildId: string;
   pages: PagePreviewDescriptor[];
   /** Asset names -> mime, so the UI can serve them into the iframe on demand. */
   assets: { name: string; mime: string }[];
@@ -231,6 +233,9 @@ export interface StockSiteOptions {
   runUuid?: string;
   /** Merge into the mounted tree instead of replacing (overlay fast-path). */
   merge?: boolean;
+  /** Whether a registered include miss may invoke the native fragment resolver.
+   * External/callback-free builders set false; Publisher templates default true. */
+  artifactResolution?: boolean;
 }
 
 export interface EngineOps {
@@ -239,11 +244,16 @@ export interface EngineOps {
   resolveProject: { args: [config: string, versionIndex?: VersionIndex]; result: ResolutionStep };
   expandValueSet: { args: [valueSetJson: string, resourcesJson: string]; result: ExpandResult };
   compile: {
-    args: [config: string, files: Record<string, string>, predefined: Record<string, unknown>];
+    args: [
+      config: string,
+      files: Record<string, string>,
+      predefined: Record<string, unknown>,
+      siteFiles: Record<string, string>,
+    ];
     result: CompileResult;
   };
   snapshot: { args: [url: string]; result: SnapshotResult };
-  // M2 cycle-generator preview path (rows built in the worker, TS render there).
+  // Closed Cycle external-builder path (verified rows + shared renderer live in the worker).
   buildSite: {
     args: [
       config: string,
@@ -274,7 +284,7 @@ export interface EngineOps {
   listSitePages: { args: []; result: { pages: string[] } };
   renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
   renderFragment: { args: [ref: string, kind: string]; result: { html: string } };
-  // ContentApi (TS-liquid sunset): the engine renders all content.
+  // Generic native content operations. Cycle uses its shared LiquidJS policy.
   renderLiquid: { args: [source: string, data?: Record<string, unknown>]; result: { html: string } };
   renderMarkdown: { args: [md: string, opts?: { rougeWrappers?: boolean }]; result: { html: string } };
 }

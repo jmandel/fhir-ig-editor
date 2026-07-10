@@ -1,7 +1,7 @@
-// The cycle TS site generator as a SiteGeneratorAdapter (the M2 path,
-// refactored onto Adapter API v1). Heavy work stays in the worker: buildSite
-// builds site.db rows + mounts cycle's include design for the engine's
-// ContentApi liquid; renderPage runs cycle's React chrome there.
+// Cycle's shared external site builder behind the editor adapter seam. Heavy
+// work stays in the worker: buildSite derives and verifies a ClosedSiteBuild,
+// then constructs CycleSiteRenderer with Cycle's own shared LiquidJS content
+// policy. This path does not use the native Rust ContentApi/template tree.
 
 import type { AdapterContext, PageInfo, SiteGeneratorAdapter } from './types';
 import type { EngineClient } from '../worker/client';

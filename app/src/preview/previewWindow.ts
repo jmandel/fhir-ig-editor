@@ -72,12 +72,48 @@ export async function ensurePreviewServiceWorker(): Promise<boolean> {
 /** Tell the active SW the current compile generation (drives cache naming + prune). */
 export async function announceGenerationToSW(generation: number): Promise<void> {
   try {
-    const reg = swRegistration ?? (await navigator.serviceWorker?.ready);
-    const sw = reg?.active ?? navigator.serviceWorker?.controller;
+    const sw = await activePreviewWorker();
     sw?.postMessage({ type: 'igpreview:setGeneration', generation });
   } catch {
     /* best-effort */
   }
+}
+
+async function activePreviewWorker(): Promise<ServiceWorker | null> {
+  const registration =
+    swRegistration ?? (await navigator.serviceWorker?.getRegistration(PREVIEW_ROOT));
+  return registration?.active ?? registration?.waiting ?? registration?.installing ?? null;
+}
+
+async function postToPreviewWorker(
+  message: Record<string, unknown>,
+  transfer: Transferable[] = [],
+  mayCommit: () => boolean = () => true,
+): Promise<boolean> {
+  const sw = await activePreviewWorker();
+  // The worker lookup is an await point. A project/generator request can revoke
+  // the build while registration is resolving; do not send that obsolete
+  // generation afterward.
+  if (!mayCommit()) return false;
+  if (!sw) return true;
+  const channel = new MessageChannel();
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error('preview Service Worker commit acknowledgement timed out')),
+      10_000,
+    );
+    channel.port1.onmessage = (event) => {
+      if (event.data?.ok) {
+        window.clearTimeout(timer);
+        resolve();
+      } else {
+        window.clearTimeout(timer);
+        reject(new Error(event.data?.error || 'preview Service Worker rejected generation'));
+      }
+    };
+    sw.postMessage(message, [channel.port2, ...transfer]);
+  });
+  return true;
 }
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
@@ -95,8 +131,7 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 export async function provisionAssetsToSW(src: PreviewSource): Promise<void> {
   try {
     if (!src.adapter.assetManifest) return;
-    const reg = swRegistration ?? (await navigator.serviceWorker?.ready);
-    const sw = reg?.active ?? navigator.serviceWorker?.controller;
+    const sw = await activePreviewWorker();
     if (!sw) return;
     const { pagePrefix, assets } = src.adapter.assetManifest();
     const entries = Object.entries(assets).map(([key, a]) => ({
@@ -122,8 +157,31 @@ function hotReloadSnippet(generatorId: string, pagePath: string, generation: num
   // Kept intentionally small + defensive. `data-igpreview` marks it as injected.
   return `<script data-igpreview="hot-reload">(function(){try{
   var me=${payload};
+  // A prepared page can be composed into another rendered shell. A control
+  // block is authoritative only at its own URL; a stale nested block must not
+  // subscribe or react to another page's reload message.
+  var here;try{here=decodeURIComponent(location.pathname);}catch(e){here=location.pathname;}
+  if(!here.endsWith('/'+me.path))return;
+  var controlKey=me.generator+'\\n'+me.path;
+  if(window.__igpreviewHotReloadKey===controlKey)return;
+  window.__igpreviewHotReloadKey=controlKey;
+  var mine=document.currentScript;
+  var root=document.body||document.documentElement;
+  var prune=function(){root.querySelectorAll('script[data-igpreview="hot-reload"]').forEach(function(s){if(s!==mine)s.remove();});};
+  prune();
+  // Some page runtimes compose prepared HTML after this block has executed.
+  // Keep the one URL-authoritative control block invariant even for those late
+  // body insertions. Do not observe/remove jQuery's temporary HEAD script: its
+  // evaluator owns that node and removes it synchronously after execution.
+  var observer=new MutationObserver(prune);
+  observer.observe(root,{childList:true,subtree:true});
+  window.addEventListener('pagehide',function(){observer.disconnect();},{once:true});
   var ch=new BroadcastChannel(${JSON.stringify(CHANNEL_NAME)});
-  var say=function(){try{ch.postMessage({type:'hello',generator:me.generator,path:me.path,generation:me.generation});}catch(e){}};
+  var clientId;try{
+    clientId=sessionStorage.getItem('igpreview:client-id');
+    if(!clientId){clientId=(globalThis.crypto&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);sessionStorage.setItem('igpreview:client-id',clientId);}
+  }catch(e){clientId=Date.now().toString(36)+Math.random().toString(36).slice(2);}
+  var say=function(){try{ch.postMessage({type:'hello',clientId:clientId,generator:me.generator,path:me.path,generation:me.generation});}catch(e){}};
   ch.onmessage=function(ev){var d=ev.data;if(!d)return;
     if(d.type==='reload'&&d.generator===me.generator&&d.generation>=me.generation&&Array.isArray(d.paths)&&d.paths.indexOf(me.path)>=0){
       // Our page changed in a newer generation -> reload (browser restores scroll).
@@ -154,14 +212,20 @@ export function preparePreviewHtml(
   generation: number,
   opts?: { stale?: boolean },
 ): string {
-  let out = rawHtml;
+  // This boundary is deliberately idempotent. A cached/prepared page can be fed
+  // through the responder again; retaining its old control block would make one
+  // document listen as two different paths and reload on an unrelated edit.
+  let out = rawHtml
+    .replace(/<script\b[^>]*data-igpreview=["']hot-reload["'][^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<div\b[^>]*data-igpreview=["']stale-banner["'][^>]*>[\s\S]*?<\/div>/gi, '')
+    .replace(/<base\b[^>]*data-igpreview=["']base["'][^>]*>/gi, '');
   // <base>: relative asset names (assets/css/x.css, foo.png) resolve to
   // `<base>preview/<gen>/<pageDir>/...` so the SW answers them all (the responder
   // relays design assets it can't render — see answerRender). Point <base> at the
   // page's directory under the preview root.
   const pageDir = pagePath.includes('/') ? pagePath.slice(0, pagePath.lastIndexOf('/') + 1) : '';
   const baseHref = previewUrl(generatorId, pageDir);
-  const baseTag = `<base href="${baseHref}">`;
+  const baseTag = `<base data-igpreview="base" href="${baseHref}">`;
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
   else out = `${baseTag}${out}`;
 
@@ -190,21 +254,65 @@ let source: PreviewSource | null = null;
 
 const CACHE_PREFIX = 'igpreview::';
 
-/** Open preview tabs the editor has heard from: path -> last-seen generation. */
-const openPreviews = new Map<string, number>();
+/** Cache search law for hot-reload comparison: never inspect a generation newer
+ * than the page set that was current before publication. */
+export function previewCacheCandidates(available: string[], generation: number): string[] {
+  const exact = `${CACHE_PREFIX}${generation}`;
+  return [
+    ...(available.includes(exact) ? [exact] : []),
+    ...available
+      .filter((key) => {
+        if (!key.startsWith(CACHE_PREFIX) || key === exact) return false;
+        return (Number(key.slice(CACHE_PREFIX.length)) || 0) <= generation;
+      })
+      .sort((a, b) => (Number(b.slice(CACHE_PREFIX.length)) || 0) - (Number(a.slice(CACHE_PREFIX.length)) || 0)),
+  ];
+}
+
+export interface PreviewClientRegistration {
+  igId: string;
+  path: string;
+  lastSeen: number;
+}
+
+/** One current path per live preview browsing context. A stable client id means
+ * navigating a tab replaces its old path instead of accumulating every page it
+ * has ever visited. The IG key still prevents cross-project publication. */
+const openPreviews = new Map<string, PreviewClientRegistration>();
+const PREVIEW_CLIENT_TTL_MS = 5 * 60_000;
+
+export function registeredPreviewPaths(
+  registry: ReadonlyMap<string, PreviewClientRegistration>,
+  igId: string,
+  now = Date.now(),
+): string[] {
+  return [...new Set(
+    [...registry.values()]
+      .filter((client) => client.igId === igId && now - client.lastSeen <= PREVIEW_CLIENT_TTL_MS)
+      .map((client) => client.path),
+  )];
+}
+
+function registerPreviewPath(clientId: string, igId: string, path: string): void {
+  const now = Date.now();
+  openPreviews.set(clientId, { igId, path, lastSeen: now });
+  for (const [id, client] of openPreviews) {
+    if (now - client.lastSeen > PREVIEW_CLIENT_TTL_MS) openPreviews.delete(id);
+  }
+}
 
 /** The full preview URL pathname for a page under the current source's generator. */
 function pagePathname(generatorId: string, page: string): string {
   return new URL(previewUrl(generatorId, page), self.location.origin).pathname;
 }
 
-/** Read the bytes currently cached for a preview page (what the tab last showed),
- *  searching newest generation first. Null if nothing is cached yet. */
-async function readCachedPage(pathname: string): Promise<string | null> {
+/** Read the page bytes from the generation that was current before publication.
+ * Looking in the newest cache is racy: the embedded iframe can render the new
+ * page before this comparison, making an old external tab appear up to date. */
+async function readCachedPage(pathname: string, generation: number): Promise<string | null> {
   if (typeof caches === 'undefined') return null;
-  const keys = (await caches.keys())
-    .filter((k) => k.startsWith(CACHE_PREFIX))
-    .sort((a, b) => (Number(b.slice(CACHE_PREFIX.length)) || 0) - (Number(a.slice(CACHE_PREFIX.length)) || 0));
+  const available = await caches.keys();
+  const keys = previewCacheCandidates(available, generation);
   for (const k of keys) {
     const c = await caches.open(k);
     const hit = await c.match(pathname);
@@ -233,12 +341,47 @@ let responderWired = false;
 
 /** Point the responder at the currently-selected generator + generation. Call on
  *  every adapter (re)init. Kicks off a smart hot-reload pass for open preview tabs. */
-export function updatePreviewSource(next: PreviewSource): void {
+export async function publishPreviewSource(
+  next: PreviewSource,
+  mayCommit: () => boolean = () => true,
+): Promise<boolean> {
   const prevGen = source?.generation ?? -1;
+  const manifest = next.adapter.assetManifest?.();
+  const entries = manifest
+    ? Object.entries(manifest.assets).map(([key, asset]) => ({
+        key,
+        mime: asset.mime,
+        bytes: base64ToArrayBuffer(asset.b64),
+      }))
+    : [];
+
+  // One acknowledged message atomically advances BOTH the generation pointer and
+  // its complete asset manifest. The UI does not navigate an iframe to the new
+  // build until this resolves, so first-load asset requests cannot race an older
+  // provisioned set.
+  const committed = await postToPreviewWorker(
+    {
+      type: 'igpreview:commitGeneration',
+      generation: next.generation,
+      igId: next.igId,
+      pagePrefix: manifest?.pagePrefix ?? '',
+      hasAssetManifest: !!manifest,
+      assets: entries,
+    },
+    entries.map((entry) => entry.bytes),
+    mayCommit,
+  );
+  if (!committed) return false;
+
   source = next;
-  void announceGenerationToSW(next.generation);
-  void provisionAssetsToSW(next); // hand the SW this generation's whole asset set
-  if (next.generation !== prevGen) void refreshOpenPreviews();
+  if (next.generation !== prevGen) void refreshOpenPreviews(prevGen);
+  return true;
+}
+
+/** Backward-compatible best-effort wrapper for older callers. New build code
+ * should await publishPreviewSource before committing its UI generation. */
+export function updatePreviewSource(next: PreviewSource): void {
+  void publishPreviewSource(next);
 }
 
 /** Wire the SW render responder + the BroadcastChannel hot-reload bus (idempotent). */
@@ -267,8 +410,27 @@ export function wirePreviewResponder(): void {
     channel.onmessage = (ev) => {
       const d = ev.data;
       if (!d) return;
-      if (d.type === 'hello' && typeof d.path === 'string') {
-        openPreviews.set(d.path, typeof d.generation === 'number' ? d.generation : 0);
+      if (d.type === 'hello' && typeof d.generator === 'string' && typeof d.path === 'string') {
+        // Cached pages from the pre-client-id protocol remain functional; their
+        // path-derived id cannot replace navigation history, but expires by TTL.
+        const clientId = typeof d.clientId === 'string' && d.clientId
+          ? d.clientId
+          : `legacy:${d.generator}:${d.path}`;
+        registerPreviewPath(clientId, d.generator, d.path);
+        // A tab can miss the original reload broadcast while its document is
+        // loading. If it later reports an older generation, compare that tab's
+        // cached bytes with the current render. A generation mismatch alone does
+        // NOT imply a content change and must not reload an unrelated page.
+        if (
+          source &&
+          d.generator === source.igId &&
+          typeof d.generation === 'number' &&
+          d.generation < source.generation
+        ) {
+          const src = source;
+          const token = refreshToken;
+          void refreshPreviewPage(src, d.path, d.generation, token);
+        }
       }
     };
     // Ask any already-open preview tabs to announce themselves.
@@ -300,7 +462,6 @@ async function answerRender(
       // asset tier as a real, cacheable, navigable URL. The responder resolves design
       // assets from the adapter's static tree below when assetBytes doesn't know them.
       const prepared = preparePreviewHtml(html, generator, path, src.generation);
-      openPreviews.set(path, src.generation);
       port.postMessage({ ok: true, isBase64: false, mime: 'text/html; charset=utf-8', body: prepared });
     } else {
       const name = path.replace(/^\.?\//, '');
@@ -326,43 +487,75 @@ async function answerRender(
  *  byte-compare against what was last served, and reload only the changed ones.
  *  Debounced to the latest generation: a newer pass supersedes an in-flight one. */
 let refreshToken = 0;
-async function refreshOpenPreviews(): Promise<void> {
+const pageRefreshes = new Map<string, Promise<void>>();
+
+async function refreshOpenPreviews(previousGeneration: number): Promise<void> {
   const src = source;
   if (!src || !channel) return;
   const myToken = ++refreshToken;
-  const gen = src.generation;
-  const paths = [...openPreviews.keys()];
-  const changed: string[] = [];
+  const paths = registeredPreviewPaths(openPreviews, src.igId);
 
   for (const path of paths) {
     if (myToken !== refreshToken) return; // a newer generation superseded us
+    await refreshPreviewPage(src, path, previousGeneration, myToken);
+  }
+}
+
+/** Compare and refresh one page, coalescing the publish pass with a stale hello
+ * for the same IG/generation/path. The broadcast is emitted only after a real
+ * byte change and is scoped by both IG id and page path. */
+async function refreshPreviewPage(
+  src: PreviewSource,
+  path: string,
+  previousGeneration: number,
+  token: number,
+): Promise<void> {
+  if (!channel || source !== src || token !== refreshToken) return;
+  const key = `${src.igId}\u0000${src.generation}\u0000${previousGeneration}\u0000${path}`;
+  const pending = pageRefreshes.get(key);
+  if (pending) return pending;
+
+  const work = (async () => {
     try {
       const pathname = pagePathname(src.igId, path);
-      // The bytes the tab CURRENTLY shows live in the SW cache (what was last served,
-      // whether via live render or a cache hit) — that is the correct baseline. Read
-      // it BEFORE overwriting so an unrelated page (identical bytes) isn't reloaded.
-      const before = await readCachedPage(pathname);
+      // Read the generation reported by the tab before writing the new render.
+      // Looking in a newer cache can confuse an embedded iframe's eager render
+      // with the bytes still displayed by an older external tab.
+      const before = await readCachedPage(pathname, previousGeneration);
       const { html } = await src.adapter.renderPage(path);
-      const prepared = preparePreviewHtml(html, src.igId, path, gen);
-      // Always refresh the current-generation cache so a reload serves the new bytes.
-      await writeCachedPage(pathname, prepared, gen);
-      openPreviews.set(path, gen);
-      // Ignore only the injected generation stamp (always differs) — real content
-      // changes drive the reload.
-      const diff = before == null || stripVolatile(before) !== stripVolatile(prepared);
-      if (diff) changed.push(path);
+      const prepared = preparePreviewHtml(html, src.igId, path, src.generation);
+      if (source !== src || token !== refreshToken) return;
+      // Always refresh the current cache; only changed content drives navigation.
+      await writeCachedPage(pathname, prepared, src.generation);
+      if (source !== src || token !== refreshToken) return;
+      if (previewContentChanged(before, prepared)) {
+        channel?.postMessage({
+          type: 'reload',
+          generator: src.igId,
+          generation: src.generation,
+          paths: [path],
+        });
+      }
     } catch {
       /* a page that no longer renders is skipped, not reloaded */
     }
+  })();
+  pageRefreshes.set(key, work);
+  try {
+    await work;
+  } finally {
+    if (pageRefreshes.get(key) === work) pageRefreshes.delete(key);
   }
-  if (myToken !== refreshToken) return;
-  if (changed.length) channel.postMessage({ type: 'reload', generator: src.igId, generation: gen, paths: changed });
 }
 
 /** Remove the parts of the injected HTML that change every generation (the snippet's
  *  embedded generation number) so byte-compare reflects real content changes only. */
 function stripVolatile(html: string): string {
   return html.replace(/"generation":\d+/g, '"generation":0');
+}
+
+export function previewContentChanged(before: string | null, after: string): boolean {
+  return before == null || stripVolatile(before) !== stripVolatile(after);
 }
 
 /** Fetch a design asset from the adapter's STATIC tree (e.g. cycle's

@@ -23,8 +23,8 @@ async function gunzipStream(body: ReadableStream<Uint8Array>): Promise<Uint8Arra
 
 /** Inflate a `.tgz` straight from a fetch Response (streaming). */
 export async function inflateBundleResponse(resp: Response): Promise<Record<string, string>> {
-  if (!resp.body) return untar(await gunzip(await resp.arrayBuffer()));
-  return untar(await gunzipStream(resp.body));
+  if (!resp.body) return untarPackage(await gunzip(await resp.arrayBuffer()));
+  return untarPackage(await gunzipStream(resp.body));
 }
 
 function base64(bytes: Uint8Array): string {
@@ -36,30 +36,133 @@ function base64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-function untar(tar: Uint8Array): Record<string, string> {
-  const files: Record<string, string> = {};
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+function tarString(bytes: Uint8Array, label: string): string {
+  const nul = bytes.indexOf(0);
+  const body = nul >= 0 ? bytes.subarray(0, nul) : bytes;
+  try {
+    return utf8.decode(body);
+  } catch {
+    throw new Error(`tar ${label} is not UTF-8`);
+  }
+}
+
+function tarOctal(bytes: Uint8Array, label: string): number {
+  // Base-256 numeric fields are legal in some GNU archives but are not emitted
+  // by the FHIR/npm package transport. Failing closed is safer than reading a
+  // different member boundary than Rust's tar implementation.
+  if ((bytes[0] & 0x80) !== 0) throw new Error(`unsupported base-256 tar ${label}`);
+  const value = tarString(bytes, label).trim();
+  if (!/^[0-7]*$/.test(value)) throw new Error(`invalid tar ${label}`);
+  const parsed = parseInt(value, 8) || 0;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`unsafe tar ${label}`);
+  return parsed;
+}
+
+function verifyTarChecksum(header: Uint8Array, member: string): void {
+  const expected = tarOctal(header.subarray(148, 156), `checksum for ${member}`);
+  let actual = 0;
+  for (let i = 0; i < header.length; i++) {
+    actual += i >= 148 && i < 156 ? 0x20 : header[i];
+  }
+  if (actual !== expected) throw new Error(`invalid tar checksum for ${member}`);
+}
+
+function paxPath(data: Uint8Array): string | null {
+  let cursor = 0;
+  let path: string | null = null;
+  while (cursor < data.length) {
+    let space = cursor;
+    while (space < data.length && data[space] !== 0x20) space++;
+    if (space === data.length) throw new Error('malformed PAX record length');
+    const lengthText = new TextDecoder().decode(data.subarray(cursor, space));
+    if (!/^[1-9][0-9]*$/.test(lengthText)) throw new Error('malformed PAX record length');
+    const length = Number(lengthText);
+    const end = cursor + length;
+    if (!Number.isSafeInteger(length) || end > data.length || data[end - 1] !== 0x0a) {
+      throw new Error('truncated PAX record');
+    }
+    const record = data.subarray(space + 1, end - 1);
+    const equals = record.indexOf(0x3d);
+    if (equals <= 0) throw new Error('malformed PAX record');
+    const key = new TextDecoder().decode(record.subarray(0, equals));
+    if (key === 'path') path = tarString(record.subarray(equals + 1), 'PAX path');
+    cursor = end;
+  }
+  return path;
+}
+
+/** Parse the package tar transport into the same package-relative member map consumed
+ * by Rust package normalization. Exported for byte-level parity/security tests. */
+export function untarPackage(tar: Uint8Array): Record<string, string> {
+  // A null-prototype object keeps archive names such as `__proto__` as plain
+  // data. Rust performs the authoritative package identity/material check when
+  // this map is mounted; this parser preserves safe nested template content but
+  // prevents a transport path from escaping the synthetic package root.
+  const files: Record<string, string> = Object.create(null) as Record<string, string>;
   let off = 0;
+  let extendedPath: string | null = null;
   while (off + 512 <= tar.length) {
     const header = tar.subarray(off, off + 512);
-    let name = '';
-    for (let i = 0; i < 100 && header[i] !== 0; i++) name += String.fromCharCode(header[i]);
-    if (name === '') break;
-    let sizeStr = '';
-    for (let i = 124; i < 136 && header[i] !== 0 && header[i] !== 0x20; i++)
-      sizeStr += String.fromCharCode(header[i]);
-    const size = parseInt(sizeStr.trim(), 8) || 0;
+    const headerName = tarString(header.subarray(0, 100), 'member name');
+    if (headerName === '') break;
+    verifyTarChecksum(header, headerName);
+    const magic = tarString(header.subarray(257, 263), 'magic');
+    const prefix = tarString(header.subarray(345, 500), 'member prefix');
+    if (prefix && !magic.startsWith('ustar')) {
+      throw new Error(`tar member uses a prefix without a USTAR header: ${headerName}`);
+    }
+    const ustarName = prefix ? `${prefix}/${headerName}` : headerName;
+    const name = extendedPath || ustarName;
+    const size = tarOctal(header.subarray(124, 136), `member size for ${name}`);
     const typeflag = header[156];
     off += 512;
+    const paddedSize = Math.ceil(size / 512) * 512;
+    if (off + size > tar.length || off + paddedSize > tar.length) {
+      throw new Error(`truncated tar member ${name}`);
+    }
     const data = tar.subarray(off, off + size);
-    off += Math.ceil(size / 512) * 512;
+    off += paddedSize;
+
+    // POSIX PAX and GNU long-name headers replace the path of the next real
+    // member. Applying them before top-level classification prevents a long or
+    // prefixed nested path from being mistaken for a short top-level filename.
+    if (typeflag === 0x78) { // x: per-file PAX header
+      extendedPath = paxPath(data);
+      continue;
+    }
+    if (typeflag === 0x4c) { // L: GNU long name
+      extendedPath = tarString(data, 'GNU long member name').replace(/\n$/, '');
+      continue;
+    }
+    if (typeflag === 0x67 || typeflag === 0x4b) { // g: global PAX, K: GNU long link
+      throw new Error(`unsupported stateful tar header type ${String.fromCharCode(typeflag)}`);
+    }
+    extendedPath = null;
     if (typeflag === 0x30 || typeflag === 0) {
-      const b = name.replace(/^package\//, '').replace(/^\.\//, '');
-      files[b] = base64(data);
+      let relative = name;
+      while (relative.startsWith('./')) relative = relative.slice(2);
+      if (relative.startsWith('package/')) relative = relative.slice('package/'.length);
+      const parts = relative.split('/');
+      if (
+        !relative ||
+        relative.startsWith('/') ||
+        relative.includes('\\') ||
+        relative.includes('\0') ||
+        parts.some((part) => !part || part === '.' || part === '..')
+      ) {
+        throw new Error(`unsafe tar member name ${JSON.stringify(name)}`);
+      }
+      if (Object.hasOwn(files, relative)) {
+        throw new Error(`duplicate tar member ${JSON.stringify(relative)}`);
+      }
+      files[relative] = base64(data);
     }
   }
   return files;
 }
 
 export async function inflateBundle(tgz: ArrayBuffer): Promise<Record<string, string>> {
-  return untar(await gunzip(tgz));
+  return untarPackage(await gunzip(tgz));
 }

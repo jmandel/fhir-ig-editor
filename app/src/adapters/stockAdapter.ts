@@ -14,6 +14,13 @@
 import type { AdapterContext, PageInfo, SiteGeneratorAdapter } from './types';
 import type { EngineClient } from '../worker/client';
 import type { SiteTreeFile } from '../worker/protocol';
+import {
+  fetchTemplateAssetArtifact,
+  injectJqueryPreviewCompatibility,
+  loadPublisherRuntimePack,
+  materializeMissingTableBackgrounds,
+  StockAssetCatalog,
+} from './stockAssets';
 
 /** The default stock template#version (US Core / IPS / cycle render at parity
  *  with it). Matches the curated default family + the committed warm-start
@@ -45,28 +52,6 @@ const FRAGMENT_SUFFIXES = ['intro', 'introduction', 'notes', 'search', 'summary'
 
 function isFragmentInclude(name: string): boolean {
   return FRAGMENT_SUFFIXES.some((s) => name.endsWith(`-${s}`));
-}
-
-function mimeFor(name: string): string {
-  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
-  return (
-    {
-      css: 'text/css',
-      js: 'text/javascript',
-      png: 'image/png',
-      jpg: 'image/jpeg',
-      jpeg: 'image/jpeg',
-      gif: 'image/gif',
-      svg: 'image/svg+xml',
-      ico: 'image/x-icon',
-      woff: 'font/woff',
-      woff2: 'font/woff2',
-      ttf: 'font/ttf',
-      eot: 'application/vnd.ms-fontobject',
-      html: 'text/html',
-      json: 'application/json',
-    }[ext] ?? 'application/octet-stream'
-  );
 }
 
 /** A small, self-contained inline notice shown when a page's content fragments
@@ -132,9 +117,10 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
    *  shells (the producer emits the template's staging prefix). */
   private pagePrefix = '';
   private pages: PageInfo[] = [];
-  /** Assets served to the preview iframe: the warm template artifact's static
-   *  files (css/js/images) + the project's own input/images, keyed by name. */
-  private assets: Record<string, SiteTreeFile> = {};
+  /** Explicit union of Publisher runtime, template, and authored IG assets.
+   *  Entries retain producer/package/license provenance and deterministic
+   *  precedence; the SW receives the catalog's public-path projection. */
+  private assets = new StockAssetCatalog();
 
   /** Select the template#version to render with (App → selector). Changing it
    *  forces a clean rebuild on the next init. No-op if unchanged. */
@@ -152,17 +138,20 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       const warm = await engine.fetchTemplateArtifact(this.templateCoord);
       if (warm) {
         await engine.mountSite(warm, { activeTables: true, runUuid: RUN_UUID, merge: true });
-        // Keep the template's static assets (css/js/images) for the preview.
-        for (const [k, v] of Object.entries(warm)) {
-          const m = k.match(/^template\/(?:content\/|assets\/)?(.+)$/) || k.match(/^_includes\/(.+\.(?:css|js|png|svg|jpg|jpeg|gif|ico|woff2?|ttf))$/i);
-          if (m) this.assets[m[1]] = v;
-        }
+        this.assets.addTemplateTree(this.templateCoord, warm);
       } else {
         // LIVE path: fetch+mount the base chain, then materialize into the tree.
-        await engine.mountTemplateChain(this.templateCoord);
-        // (Live path template assets live only in the engine tree; the preview
-        // renders content correctly but design assets may be unstyled — a
-        // documented cosmetic limitation of the live path, not a content gap.)
+        const live = await engine.mountTemplateChain(this.templateCoord);
+        // The chain loader exports the static subset from the exact package maps
+        // it has just mounted, using the same base→leaf precedence as the engine.
+        // This closes arbitrary live templates without a second registry walk.
+        const added = this.assets.addTemplateTree(this.templateCoord, live.assets);
+        if (added === 0) {
+          // Backstop for an old cached chain result during a rolling deployment.
+          const assetTree = await fetchTemplateAssetArtifact(this.templateCoord);
+          if (assetTree) this.assets.addTemplateTree(this.templateCoord, assetTree);
+          else console.warn(`template ${this.templateCoord} exported no browser static assets`);
+        }
       }
     } catch (e) {
       const msg = String(e);
@@ -187,10 +176,15 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       // shells/_data/template), then re-establish the template layer. The
       // compile already ran (App compiles before adapter.init), so the engine's
       // render set (compiled + predefined resources incl. the IG) is ready.
-      this.assets = {};
+      this.assets = new StockAssetCatalog();
+      this.assets.addRuntimePack(await loadPublisherRuntimePack());
       await engine.mountSite({}, { activeTables: true, runUuid: RUN_UUID, merge: false });
       await this.mountTemplateLayer(engine);
     }
+
+    // Rebuild the authored layer on every generation so deleting an input image
+    // removes it from the handoff instead of leaving stale adapter state behind.
+    this.assets.removeProducer(`ig:${ctx.project.projectId}`);
 
     // SOURCE-DRIVEN IG LAYER: synthesize the per-artifact page shells + the
     // `_data` site-data model from the current compile + mounted template. This
@@ -198,10 +192,12 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     // so edits (new/changed resources) reflect in the shells + _data.
     await engine.produceStockSite();
 
-    // Detect the page prefix (en/ vs flat) from the produced shells: the
-    // producer emits at the template's staging prefix.
-    const shellPages = (await engine.listSitePages()).pages;
-    this.pagePrefix = shellPages.some((p) => p.startsWith('en/')) ? 'en/' : '';
+    // The source-driven producer currently stages stock-template pages under
+    // `en/` (the same explicit prefix passed in Engine::produce_stock_site).
+    // Do not call listSitePages merely to rediscover it: that API materializes
+    // the full native RenderState, and the live overlay below invalidates that
+    // state immediately. The final page-list call remains authoritative.
+    this.pagePrefix = 'en/';
 
     // LIVE staging of the project SOURCE: pagecontent (md → include copies +
     // narrative page shims), IG-authored input/includes/* → _includes/*, and
@@ -212,7 +208,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
       // Collect images for the preview asset server (page-relative names).
       const img = path.match(/^input\/images\/(.+)$/);
       if (img) {
-        this.assets[img[1]] = { b64 };
+        this.assets.addIgAsset(ctx.project.projectId, img[1], b64, path);
         continue;
       }
       // IG-authored site.data files (us_core_reqs.csv, *.json, *.yml, …).
@@ -262,6 +258,14 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   async renderPage(file: string): Promise<{ html: string; renderMs?: number }> {
     if (!this.engine) throw new Error('stock adapter not initialized');
     const out = await this.engine.renderSitePage(file);
+    // HierarchicalTableGenerator discovers background names while rendering.
+    // Preserve fixed core-package PNGs, and explicitly materialize any novel
+    // indent combination inline so the pre-provisioned asset set stays closed.
+    out.html = materializeMissingTableBackgrounds(out.html, this.assets);
+    // Preview-host compatibility is an explicit, byte-pair-gated handoff. It
+    // inserts a separately provisioned shim between the untouched jQuery and
+    // jQuery UI assets only for their known-incompatible historical pairing.
+    out.html = await injectJqueryPreviewCompatibility(out.html, this.assets);
     // Fragment-gap UX: page BODIES are fragments materialized from the CURRENT
     // compile (snapshot/diff/binding tables from compiled SDs). When the compile
     // is incomplete — packages still loading, or blocked on a denied network —
@@ -302,19 +306,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   /** Serve assets the rendered HTML references by name (template css/js/images +
    *  the project's own input/images); the preview rewrites to blob URLs by name. */
   async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string } | null> {
-    // Pages live under the page-dir prefix (e.g. `en/`), so an asset referenced
-    // relative to a page resolves WITH that prefix (`en/assets/css/x.css`), but the
-    // template asset map is keyed at the site root (`assets/css/x.css`). Strip the
-    // prefix so both the prefixed and flat forms resolve.
-    let n = name.replace(/^(?:\.\.\/)+/, '');
-    if (this.pagePrefix && n.startsWith(this.pagePrefix)) n = n.slice(this.pagePrefix.length);
-    const key = n.replace(/^assets\//, '');
-    const entry =
-      this.assets[n] ?? this.assets[key] ?? this.assets[`assets/${key}`] ?? this.assets[key.slice(key.lastIndexOf('/') + 1)];
-    if (entry == null) return null;
-    const base64 =
-      typeof entry === 'string' ? btoa(unescape(encodeURIComponent(entry))) : entry.b64;
-    return { name, mime: mimeFor(name), base64 };
+    return this.assets.resolve(name, this.pagePrefix);
   }
 
   /** The whole asset set (keyed by its STORED name, exactly as `assetBytes`
@@ -322,12 +314,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
    *  and serve every asset without a round-trip back to this tab. `pagePrefix` is
    *  handed along so the SW normalizes request paths the same way `assetBytes` does. */
   assetManifest(): { pagePrefix: string; assets: Record<string, { mime: string; b64: string }> } {
-    const assets: Record<string, { mime: string; b64: string }> = {};
-    for (const [k, v] of Object.entries(this.assets)) {
-      const b64 = typeof v === 'string' ? btoa(unescape(encodeURIComponent(v))) : v.b64;
-      assets[k] = { mime: mimeFor(k), b64 };
-    }
-    return { pagePrefix: this.pagePrefix, assets };
+    return { pagePrefix: this.pagePrefix, assets: this.assets.manifest() };
   }
 }
 

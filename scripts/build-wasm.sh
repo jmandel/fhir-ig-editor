@@ -19,11 +19,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-ENGINE="$REPO/vendor/sushi-rs"
+# CI and release builds use the pinned submodule. Local engine development can
+# point at a sibling checkout without copying an uncommitted patch into the
+# submodule; the default remains the reproducible release input.
+ENGINE="${SUSHI_RS_DIR:-$REPO/vendor/sushi-rs}"
 OUT="$REPO/app/public/pkg"
 
 [ -d "$ENGINE/crates/wasm_api" ] || {
-  echo "FATAL: vendor/sushi-rs not checked out (run: git submodule update --init)"; exit 2; }
+  echo "FATAL: sushi-rs not found at $ENGINE (initialize the submodule or set SUSHI_RS_DIR)"; exit 2; }
 
 # Optional scratch-toolchain env (keeps a system rustup untouched).
 if [ -n "${WASM_RUSTUP_HOME:-}" ]; then export RUSTUP_HOME="$WASM_RUSTUP_HOME"; fi

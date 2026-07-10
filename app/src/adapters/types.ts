@@ -1,36 +1,18 @@
-// SiteGeneratorAdapter — Adapter API v1 (stock-template plan §2.4, decided
-// 2026-07-03). The template selector chooses among registered adapters, all
-// consuming the same engine session state (compiled project + site.db rows +
-// the engine-backed fragment/content surfaces).
-//
-// Uniformly TypeScript: Rust renderers join via a thin shim over the wasm
-// Session (stockAdapter). The plan's `rows` ctx member is realized WORKER-SIDE
-// (site.db rows never cross to the UI — the M2 data flow); adapters reach them
-// through the engine ops.
+// SiteGeneratorAdapter is the editor's host-integration seam. It coordinates a
+// selected generator with preview publication; it is not the semantic handoff.
+// Cycle receives a verified ClosedSiteBuild in the worker, while the stock
+// adapter drives the native Rust render surface over the already compiled
+// project revision.
 
 import type { EngineClient } from '../worker/client';
 import type { PagePreviewDescriptor } from '../worker/protocol';
 
 export type PageInfo = PagePreviewDescriptor;
 
-/** Engine-backed publisher fragments (first-include-miss store) — available to
- *  EVERY adapter, so custom TS chrome can embed publisher-grade fragments. */
-export interface FragmentApi {
-  fragment(ref: string, kind: string): Promise<string>;
-}
-
-/** Engine-backed content processing (TS-liquid sunset): Liquid + kramdown run
- *  in the wasm session; hosts pass data, not engines. */
-export interface ContentApi {
-  renderLiquid(source: string, data?: Record<string, unknown>): Promise<string>;
-  renderMarkdown(md: string, opts?: { rougeWrappers?: boolean }): Promise<string>;
-}
-
-/** The project inputs a site build consumes (the compile is already done by
- *  the time an adapter initializes; these feed site.db row building). */
+/** Exact project inputs a site build consumes. The matching semantic compile
+ * is installed before adapter initialization. */
 export interface AdapterProject {
-  /** The loaded project's id ('cycle', 'uscore') — selects e.g. the packed
-   *  stock site bundle. */
+  /** Stable loaded-project id (`cycle`, `uscore`, ...). */
   projectId: string;
   config: string;
   files: Record<string, string>;
@@ -41,8 +23,6 @@ export interface AdapterProject {
 
 export interface AdapterContext {
   engine: EngineClient;
-  fragments: FragmentApi;
-  content: ContentApi;
   project: AdapterProject;
 }
 
@@ -66,7 +46,7 @@ export interface SiteGeneratorAdapter {
    *  tab's main thread. `pagePrefix` mirrors the key-normalization `assetBytes`
    *  applies. Omit to fall back to per-asset `assetBytes` serving. */
   assetManifest?(): { pagePrefix: string; assets: Record<string, { mime: string; b64: string }> };
-  /** Ledger hook (F6 scope 4): invalidate render caches for dirty nodes. */
+  /** Optional typed/incremental cache invalidation hook. */
   invalidate?(dirty: string[]): void;
 }
 

@@ -5,8 +5,9 @@ declare const __ENGINE_COMMIT__: string | undefined;
 // reusable seam (spec §3: "if we later want full vscode.dev, the worker protocol
 // is it").
 //
-// Cold-start (spec §1): init fetches ONLY the compile-critical bundles, inflates
-// them (streaming), OPFS-caches the inflated maps, and mounts them — first paint
+// Cold-start (spec §1): init fetches ONLY the compile-critical bundles, verifies
+// each compressed blob against the baked manifest, inflates it, OPFS-caches the
+// map under that digest, and mounts it — first paint
 // happens without the ~6.8 MB r5.core tgz. r5.core is `defer:true` in the
 // manifest and is fetched + mounted LAZILY via ensureSnapshotBundles() the first
 // time a snapshot / site build needs it. Warm start (reload) reads inflated
@@ -33,21 +34,13 @@ import type {
 } from './protocol';
 import { readCachedBundle, writeCachedBundle } from './bundleCache';
 import type { ResolveOutcome } from './packageResolver';
+import { projectCompileRevision } from '../build/projectRevision';
+import { assertCompatibleEngineCommit } from './engineVersion';
+import { parseBakedBundleManifest, readVerifiedBundleBytes } from './bundleIntegrity';
+import type { BakedBundleEntry, BakedBundleManifest } from './bundleIntegrity';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
-
-/** One bundle entry in the baked manifest. `defer:true` = not needed by the
- *  first compile (fetched lazily on first snapshot/site build). */
-interface BundleEntry {
-  label: string;
-  tgz: string;
-  bytes?: number;
-  defer?: boolean;
-}
-interface BundleManifest {
-  bundles: BundleEntry[];
-}
 
 export type ProgressCb = (ev: ProgressEvent) => void;
 
@@ -56,12 +49,17 @@ export class EngineClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private snapshotCache = new Map<string, SnapshotResult>();
+  /** Exact compileProject input currently installed in the mutable wasm
+   * session, plus its result. This makes repeated renderer/template selection a
+   * projection of the same compile rather than a second semantic compile. */
+  private compiledProjectRevision: string | null = null;
+  private compiledProjectResult: CompileResult | null = null;
   private inited = false;
   /** Deferred bundle entries (from the manifest) not mounted at init time. */
-  private deferred: BundleEntry[] = [];
+  private deferred: BakedBundleEntry[] = [];
   /** The baked manifest's `label -> entry` map, kept so the runtime resolver can
    *  source a missing package from a same-origin prebuilt bundle (task #32). */
-  private bakedByLabel = new Map<string, BundleEntry>();
+  private bakedByLabel = new Map<string, BakedBundleEntry>();
   /** A single in-flight lazy-mount promise so concurrent snapshot/site builds
    *  share one fetch of the deferred bundles. */
   private deferredMount: Promise<void> | null = null;
@@ -100,8 +98,8 @@ export class EngineClient {
 
   /** Fetch/inflate (or read from OPFS) one bundle into a mountable BundleSpec.
    *  Emits progress and back-fills the OPFS cache on a cold fetch. */
-  private async loadBundle(entry: BundleEntry, stageLabel: string): Promise<BundleSpec> {
-    const cached = await readCachedBundle(entry.label);
+  private async loadBundle(entry: BakedBundleEntry, stageLabel: string): Promise<BundleSpec> {
+    const cached = await readCachedBundle(entry.label, entry.sha256);
     if (cached) {
       this.progressCb?.({
         stage: 'bundle-cache-hit',
@@ -123,12 +121,14 @@ export class EngineClient {
     const url = `${BASE}data/bundles/${encodeURIComponent(entry.tgz)}`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`fetch ${url} -> ${resp.status}`);
-    // Stream straight through DecompressionStream (no big ArrayBuffer round-trip).
-    const { inflateBundleResponse } = await import('./inflate');
-    const files = await inflateBundleResponse(resp);
+    // Baked bundles are deployment inputs: authenticate the compressed bytes
+    // before the inflater or engine can observe any package content.
+    const compressed = await readVerifiedBundleBytes(resp, entry);
+    const { inflateBundle } = await import('./inflate');
+    const files = await inflateBundle(compressed);
     const spec: BundleSpec = { label: entry.label, files };
-    // Persist the inflated map for a warm next start (best-effort).
-    void writeCachedBundle(spec);
+    // A same-coordinate redeploy with different bytes gets a distinct cache key.
+    void writeCachedBundle(spec, entry.sha256);
     return spec;
   }
 
@@ -139,9 +139,11 @@ export class EngineClient {
     this.progressCb = onProgress ?? null;
 
     this.progressCb?.({ stage: 'manifest', message: 'Loading package manifest…' });
-    const manifest: BundleManifest = await (
-      await fetch(`${BASE}data/bundles/manifest.json`)
-    ).json();
+    const manifestResponse = await fetch(`${BASE}data/bundles/manifest.json`);
+    if (!manifestResponse.ok) {
+      throw new Error(`fetch package bundle manifest -> ${manifestResponse.status}`);
+    }
+    const manifest: BakedBundleManifest = parseBakedBundleManifest(await manifestResponse.json());
 
     for (const b of manifest.bundles) this.bakedByLabel.set(b.label, b);
     const eager = manifest.bundles.filter((b) => !b.defer);
@@ -161,16 +163,15 @@ export class EngineClient {
 
     this.progressCb?.({ stage: 'bundle-mount', message: 'Mounting packages in engine…' });
     const res: InitResult = await this.call('init', bundles);
-    this.inited = true;
     this.engineCommit = res.version?.commit || 'unknown';
     // Stale-mix guard: the app bundle was built against a specific engine
     // commit; if the served (HTTP-cached) wasm reports a different one, the
     // user has a stale engine + fresh app (or vice versa) — reload fixes it.
-    if (typeof __ENGINE_COMMIT__ !== 'undefined' && __ENGINE_COMMIT__ !== 'dev' && this.engineCommit !== __ENGINE_COMMIT__) {
-      const msg = `Engine version mismatch: app expects ${__ENGINE_COMMIT__}, loaded ${this.engineCommit}. Hard-reload the page (a redeploy left a stale cached engine).`;
-      console.error(msg);
-      this.progressCb?.({ stage: 'ready', label: 'engine', message: msg });
-    }
+    assertCompatibleEngineCommit(
+      typeof __ENGINE_COMMIT__ === 'undefined' ? undefined : __ENGINE_COMMIT__,
+      this.engineCommit,
+    );
+    this.inited = true;
     this.progressCb?.({
       stage: 'ready',
       message: `Engine ready — mounted ${res.mounted} packages${
@@ -244,6 +245,11 @@ export class EngineClient {
    *  `blocked` list for the UI. Safe to call before every compile of an arbitrary
    *  IG; it is a no-op once the closure is already mounted. */
   async acquireForProject(config: string): Promise<ResolveOutcome> {
+    // Acquisition can change the package material a subsequent compile reads,
+    // even when authored bytes are unchanged. Do not reuse a pre-acquisition
+    // compile result across that boundary.
+    this.compiledProjectRevision = null;
+    this.compiledProjectResult = null;
     const { acquireForProject, indexFromLabels } = await import('./packageResolver');
     // Seed the resolver's version index with the baked manifest's pinned labels so
     // a `latest`/`x` request for a package that exists ONLY as a baked bundle (the
@@ -259,12 +265,8 @@ export class EngineClient {
         mount: async (bundles) => {
           await this.call('mountBundles', bundles);
         },
-        bakedBundle: (label) => {
-          const e = this.bakedByLabel.get(label);
-          return e ? { tgz: e.tgz, bytes: e.bytes } : undefined;
-        },
-        fetchBaked: (label, tgz) =>
-          this.loadBundle({ label, tgz }, 'Loading (dependency)'),
+        bakedBundle: (label) => this.bakedByLabel.get(label),
+        fetchBaked: (bundle) => this.loadBundle(bundle, 'Loading (dependency)'),
       },
       config,
       (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
@@ -276,10 +278,30 @@ export class EngineClient {
     config: string,
     files: Record<string, string>,
     predefined: Record<string, unknown>,
+    siteFiles: Record<string, string>,
   ): Promise<CompileResult> {
+    const revision = await projectCompileRevision({ config, files, predefined, siteFiles });
+    if (revision === this.compiledProjectRevision && this.compiledProjectResult) {
+      return this.compiledProjectResult;
+    }
     // Every compile invalidates memoized snapshots (resources may have changed).
     this.snapshotCache.clear();
-    return this.call('compile', config, files, predefined);
+    const result = await this.call('compile', config, files, predefined, siteFiles);
+    this.compiledProjectRevision = revision;
+    this.compiledProjectResult = result;
+    return result;
+  }
+
+  /** Ensure the mutable engine session contains exactly these authored inputs.
+   * Same-revision calls are free; a site-only request for newer inputs performs
+   * the missing compile before any adapter can observe session state. */
+  async ensureCompiledProject(
+    config: string,
+    files: Record<string, string>,
+    predefined: Record<string, unknown>,
+    siteFiles: Record<string, string>,
+  ): Promise<CompileResult> {
+    return this.compile(config, files, predefined, siteFiles);
   }
 
   async snapshot(url: string): Promise<SnapshotResult> {
@@ -299,7 +321,7 @@ export class EngineClient {
     return this.call('expandValueSet', valueSetJson, resourcesJson);
   }
 
-  // ---- M2 site preview ----
+  // ---- site-build projections and preview ----
 
   /** Build the in-browser site.db rows + enumerate renderable pages. */
   async buildSite(
@@ -353,7 +375,11 @@ export class EngineClient {
    *  `Session.mountTemplate` to materialize the tree into the engine site tree.
    *  Any AntHookError (custom-ant template) propagates as an Error whose message
    *  contains "never execute ant" — the adapter maps that to a friendly refusal. */
-  async mountTemplateChain(coord: string): Promise<{ chain: string[]; files: number }> {
+  async mountTemplateChain(coord: string): Promise<{
+    chain: string[];
+    files: number;
+    assets: Record<string, SiteTreeFile>;
+  }> {
     const { mountTemplateChain } = await import('./templateChain');
     const host = {
       // Template chain packages are not sushi-config deps, so resolveStep/bakedBundle
@@ -363,19 +389,16 @@ export class EngineClient {
       mount: async (bundles: BundleSpec[]) => {
         await this.call('mountBundles', bundles);
       },
-      bakedBundle: (label: string) => {
-        const e = this.bakedByLabel.get(label);
-        return e ? { tgz: e.tgz, bytes: e.bytes } : undefined;
-      },
-      fetchBaked: (label: string, tgz: string) => this.loadBundle({ label, tgz }, 'Loading (template)'),
+      bakedBundle: (label: string) => this.bakedByLabel.get(label),
+      fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (template)'),
     };
-    const { chain } = await mountTemplateChain(host, coord, (ev) =>
+    const { chain, assets } = await mountTemplateChain(host, coord, (ev) =>
       this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
     );
     this.progressCb?.({ stage: 'bundle-mount', label: coord, message: `Materializing template ${coord}…` });
     const { files } = await this.mountTemplate(coord);
     this.progressCb?.({ stage: 'ready', message: `Template ${coord} materialized — ${files} files.` });
-    return { chain, files };
+    return { chain, files, assets };
   }
 
   /** WARM-START template layer (#40): fetch the committed `fig packages bundle
@@ -433,18 +456,18 @@ export class EngineClient {
     return this.call('renderSitePage', name);
   }
 
-  /** Render one publisher fragment (`{Type}-{id}`, kind) — the engine-backed
-   *  FragmentApi every site-generator adapter shares. */
+  /** Render one Publisher fragment (`{Type}-{id}`, kind) through the native
+   * typed artifact cache. Used by the stock-template warm-up path. */
   async renderFragment(ref: string, kind: string): Promise<{ html: string }> {
     return this.call('renderFragment', ref, kind);
   }
 
-  /** ContentApi: engine-side Liquid over the session provider. */
+  /** Generic native Rust Liquid operation over the mounted session provider. */
   async renderLiquid(source: string, data?: Record<string, unknown>): Promise<{ html: string }> {
     return this.call('renderLiquid', source, data);
   }
 
-  /** ContentApi: engine-side kramdown (Jekyll markdownify semantics). */
+  /** Generic native Markdown operation with Jekyll markdownify semantics. */
   async renderMarkdown(md: string, opts?: { rougeWrappers?: boolean }): Promise<{ html: string }> {
     return this.call('renderMarkdown', md, opts);
   }

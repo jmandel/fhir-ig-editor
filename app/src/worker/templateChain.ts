@@ -37,6 +37,7 @@ function readText(files: Record<string, string>, name: string): string | null {
 }
 
 const MAX_CHAIN = 16; // a base chain this deep is pathological (loop guard backstop).
+const STATIC_ASSET_RE = /\.(?:css|js|png|svg|jpe?g|gif|webp|ico|woff2?|ttf|otf|eot)$/i;
 
 /**
  * Walk + mount a template's `base` chain, leaf→root, so a subsequent
@@ -51,8 +52,9 @@ export async function mountTemplateChain(
   host: ResolverHost,
   coord: string,
   onProgress: ChainProgress,
-): Promise<{ chain: string[] }> {
+): Promise<{ chain: string[]; assets: Record<string, { b64: string }> }> {
   const chain: string[] = [];
+  const packageLayers: Record<string, string>[] = [];
   const visitedIds = new Set<string>();
   let current = coord;
 
@@ -70,6 +72,7 @@ export async function mountTemplateChain(
       );
     }
     chain.push(current);
+    packageLayers.push(files);
 
     // The inflate strips the tarball's `package/` prefix, so package.json sits at
     // the map root — the same file `walk_base_chain` reads (`<pkg>/package/package.json`).
@@ -97,5 +100,20 @@ export async function mountTemplateChain(
     current = `${base}#${ver}`;
   }
 
-  return { chain };
+  // The engine materializes base → leaf, with the more-specific package
+  // replacing a base file at the same relative path. Export the static subset
+  // from the very same fetched package maps so a live template has a complete
+  // browser asset handoff without a second registry walk.
+  const assets: Record<string, { b64: string }> = {};
+  for (const files of packageLayers.reverse()) {
+    for (const [path, b64] of Object.entries(files)) {
+      if (
+        STATIC_ASSET_RE.test(path) &&
+        (path.startsWith('content/') || path.startsWith('assets/') || path.startsWith('includes/'))
+      ) {
+        assets[path] = { b64 };
+      }
+    }
+  }
+  return { chain, assets };
 }

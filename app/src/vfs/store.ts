@@ -196,9 +196,8 @@ export class ProjectStore {
     this.notify();
   }
 
-  /** The S6 site-content input for the M2 site.db producer: every pagecontent /
-   *  includes / images file as `path -> base64` (text files UTF-8 base64'd, images
-   *  as their stored base64). This is what `build_site_db`'s `site_files` expects. */
+  /** Exact site-source input for compileProject/SiteBuild: pagecontent,
+   * includes, data, resources, and images as `path -> base64`. */
   siteFiles(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [p, t] of this.cache) {

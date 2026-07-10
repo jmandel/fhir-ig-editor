@@ -1,187 +1,280 @@
-# fhir-ig-editor — Spec for the Demo Repo
+# fhir-ig-editor product and architecture contract
 
-> Status: SPEC (2026-07-02). Target: new GitHub repo `jmandel/fhir-ig-editor`.
-> This is the concrete home of the "WASM demo" roadmap item (task #13 → #16);
-> docs/wasm-editor-plan.md remains the engine-side plan (P0-P2 land in
-> sushi-rs), this repo is the product shell (P3). Sequencing: after the
-> snapshot-rework cutover + main merge + perf/clarity pass, per REWORK-PLAN §7.
+Status: canonical landed cross-repository contract, 2026-07-09. This replaces
+the original M0–M2 demo plan. Historical task/branch notes are not normative;
+the running seams and acceptance laws below are.
 
-## 1. What it is
+## Product boundary
 
-A fully static, GitHub-Pages-hosted web editor for FHIR IGs: list/edit FSH
-and IG files in the browser, compile with rust_sushi + generate snapshots
-with the walk engine (both as WASM in a Web Worker), see diagnostics and
-rendered results live. Loads an existing IG — **default: the cycle IG** —
-and works offline after first load. No server component, ever: hosting is
-`git push` → Actions → Pages.
+The editor is a static web application for authoring and previewing FHIR
+Implementation Guides. The browser must be able to:
 
-## 2. Repo shape
+- load a pinned catalog IG, a GitHub IG, or local project source;
+- edit FSH and supporting IG files;
+- resolve/mount required FHIR packages;
+- compile FSH and display exact diagnostics and resource/snapshot views;
+- preview the current source through either the Cycle external builder or a
+  native Publisher template; and
+- navigate the preview with ordinary URLs in an iframe or independent tab.
 
-```
-fhir-ig-editor/
-  .gitmodules
-  vendor/sushi-rs/        # submodule: jmandel/sushi-rs (engine workspace)
-  vendor/cycle/           # submodule: jmandel/cycle (default IG + site-gen)
-  app/                    # the editor SPA (Vite + React + Monaco)
-    src/
-      editor/             # Monaco setup, FSH grammar, file tree, tabs
-      worker/             # engine worker: wasm loading, build protocol
-      views/              # diagnostics panel, resource JSON, snapshot tree,
-                          #   differential table, build status
-      vfs/                # OPFS-backed project store + loaders (see §5)
-  data/                   # build-time generated static data (NOT committed):
-      packages/           #   package bundles {tgz + prebuilt index}
-      expansions/         #   committed tx cache for the default IG
-  scripts/                # glue: build-wasm.sh, bundle-packages.ts,
-                          #   refresh-expansions.ts (maintainer-run, tx.fhir.org)
-  .github/workflows/pages.yml
-  SPEC.md                 # this document, moved over
-```
+There is no application server. Registry and optional terminology HTTP calls
+are host transports to external services; they are not hidden server-side build
+logic. A built Pages artifact contains the app, WASM, pinned catalog source,
+package/template warm starts, Cycle assets, and Publisher-runtime assets.
 
-**Version pinning = submodule SHAs.** The engine the demo runs is exactly the
-pinned sushi-rs commit; bumping the submodule is the upgrade event (CI runs
-the engine's own test suite at that SHA before deploying). Same for cycle.
+## Non-goals
 
-## 3. Decided technology choices
+- Reimplementing external terminology systems such as SNOMED CT in the browser.
+- Executing template `ant` hooks or arbitrary server-side code.
+- Treating placeholder output as semantic parity.
+- Making `site.db`, React state, a renderer singleton, or an ambient global the
+  universal identity of a project build.
 
-- **Editor: Monaco** (the VS Code editor component), not full VS Code Web.
-  Monaco gives the VS Code editing feel, multi-file model, markers API for
-  diagnostics, and works as a plain static bundle. Full vscode.dev/code-server
-  is rejected for v1: its FS provider + extension host model is heavy and
-  fights static hosting; if we later want it, the worker protocol (§4) is the
-  reusable seam. FSH syntax: reuse the TextMate grammar from SUSHI's vscode
-  extension (license-check in CI).
-- **Engine build: `wasm32-unknown-unknown` + wasm-bindgen** via the sushi-rs
-  `wasm_api` crate (wasm-editor-plan P2). The editor repo does NOT patch the
-  engine; anything the editor needs from the engine is a sushi-rs PR.
-- **Storage: OPFS** for the working project + package cache, IndexedDB
-  fallback. The `PackageSource` browser impl lives in sushi-rs (P1); the
-  editor only mounts it.
-- **UI stack: Vite + React + TypeScript** — matches cycle's site-gen/viewer
-  idioms; no SSR, no framework server.
+## Build identity and data flow
 
-## 4. Dataflow / worker protocol
+One build begins by capturing an immutable `ProjectBuildSnapshot` containing
+the project id, config bytes, all FSH files, predefined resources, all site
+files, and a build epoch. Asynchronous code must not reread a mutating
+`ProjectStore` to complete that build.
 
-```
-UI (Monaco, file tree)
-  │ file edits (debounced ~300ms)
-  ▼
-Engine Worker (one, owns wasm instance + OPFS handles)
-  compile(changedPaths) ──→ { resources[], diagnostics[], buildMs }
-  snapshot(profileUrl) ───→ { snapshot, messages }      (on-demand, memoized)
-  fileOps(list/read/write/rename/delete)
-  ▼
-Views: diagnostics → Monaco markers + problems panel
-       resources  → JSON view, differential table, snapshot tree
-       status     → per-stage timings (parse/compile/snapshot)
+`projectCompileRevision` hashes the exact arguments accepted by
+`Session.compileProject`. `EngineClient.ensureCompiledProject` uses that digest
+to establish that the worker session contains the requested revision before an
+adapter reads session state. Same-revision projections reuse the compile;
+package acquisition or changed bytes invalidate it.
+
+For callback-free external builders, the Rust engine owns the authoritative
+immutable handoff:
+
+```text
+ProjectRevision + exact PackageLock + RenderTarget
+      + ArtifactCatalog + RenderPlan + diagnostics
+                         = SiteBuild
 ```
 
-- Diagnostics carry SUSHI-exact wording + spans (the port guarantees this) —
-  they map 1:1 to Monaco markers.
-- Incrementality v1 = the engine's own speed (full compile per debounce;
-  sub-second for cycle-scale) + per-profile snapshot memoization. The
-  BuildState/ledger machinery from the cycle plan slots in here later
-  unchanged — same engine, same hashes.
+The `SiteBuild` id is recursively canonicalized and content-derived. Artifact
+content is separately addressed by SHA-256 and byte length. A deserialized build
+must verify its id and referential integrity.
 
-## 5. Loading an IG (three modes, all → OPFS project)
+`ClosedSiteBuild` proves every artifact required by the render plan, including
+transitive artifact reads, is ready. A callback-free renderer must accept a
+closed build, not a collection of optimistic optional inputs.
 
-1. **Baked default (demo path):** the cycle IG's `input/**`, `sushi-config.yaml`
-   (+ fsh sources) are exported at CI time from the submodule into static
-   JSON manifests; "Open demo IG" hydrates OPFS from them. One click, works
-   offline thereafter.
-2. **From GitHub:** user pastes `owner/repo[@ref]`; loader pulls the tree via
-   the GitHub API / raw.githubusercontent (CORS-friendly), filtered to IG
-   files. Read-only origin; edits live in OPFS; "download zip" to export
-   (no push integration in v1).
-3. **Local folder:** File System Access API directory handle (Chromium),
-   drag-drop zip fallback elsewhere.
+The native Publisher-template branch currently retains its typed resolver
+results and page read sets in the isolated session generation. `SiteBuild` is
+also the target contract for that branch, but persisting each discovered result
+as a new CAS-backed build revision is not yet landed and is named explicitly
+under convergence work below.
 
-## 6. Terminology: in-editor re-expansion (revised 2026-07-02)
+## Renderer contracts
 
-Editing a ValueSet is a first-class editor action — its expansion must
-recompute cleanly in the browser. Three tiers, decided:
+### Cycle external builder
 
-1. **Enumerable composes expand IN the engine (wasm), no tx.** Includes over
-   IG-local CodeSystems (with local filters/hierarchy) and explicitly
-   enumerated external codes (authored code+display lists) are pure functions
-   of IG content — a small `expand_enumerable()` evaluator in the engine
-   handles them per keystroke. This covers ALL of the cycle IG's ValueSets
-   and most authoring reality. NOT a tx server port: no external-CS
-   subsumption, ever (that boundary stays per cycle-plan §3).
-2. **Filter-based composes over external systems (SNOMED is-a etc.):**
-   cannot be computed without the external CS. The affected views show a
-   precise "needs terminology server" state naming the un-expandable
-   include, and — if the user configures a tx endpoint — the editor calls
-   `$expand` live and caches the result in OPFS (same content-hash cache
-   keys as the committed cache). Reality check: external-system expansion
-   inherently needs GB-scale CS content (SNOMED/LOINC/...), so the realistic
-   endpoint is HOSTED tx.fhir.org, not anything local or in-browser; if it
-   lacks CORS, a minimal pass-through proxy is the workaround. No configured
-   tx = visible, scoped degradation; never a silently partial expansion.
-3. **Committed expansion cache (tx.fhir.org-sourced)** ships for the default
-   IG as warm-start + AUTHORITY. The cache is refreshed DELIBERATELY (a
-   maintainer runs the refresh script against tx.fhir.org and commits the
-   results, like goldens) — CI itself never calls a tx server, so builds are
-   hermetic. A CI gate asserts `expand_enumerable()` matches the cached
-   expansion for every enumerable VS in the default IG — two expanders are
-   tolerable only while provably agreeing on the shared domain; on mismatch
-   the cached tx answer wins and the evaluator is fixed.
+The Cycle target requires exactly the canonical compatibility artifact
+`compat.site_db/rows.json`. `buildSiteBuildFromCompile` derives it from the last
+exact compile, seals the build, and returns the manifest plus addressed bytes.
+The worker constructs Cycle's shared `ClosedBuildHandle`, which independently
+verifies:
 
-Cascade correctness: an expansion is an S4 node in the same dependency
-ledger — VS edit → re-expand → ValueSet_Codes rows dirty → dependent pages
-re-render via read-set replay. The demo should show exactly this: edit a
-compose, watch the VS page's expansion table update.
+- `site-build/v1` schema;
+- `cycle-site` renderer version and `cycle-site/v1` contract parameter;
+- the complete content-derived build id;
+- exactly one required/declared compatibility artifact;
+- ready state; and
+- every reachable ready-artifact body's presence, byte length, and SHA-256.
 
-## 7. What "viewing results" means, by milestone
+Source/package read references are checked against the manifest. A renderer
+does not redownload those potentially large producer inputs merely to consume a
+ready artifact; native Fig nevertheless includes and verifies their bodies when
+it emits the portable filesystem bundle.
 
-- **M1 (the demo bar):** per-resource views — compiled JSON, differential
-  table, **snapshot element tree** (the walk engine's output), diagnostics
-  panel, build timings. This is already more than any in-browser FSH tool
-  shows today.
-- **M2 (in the demo bar — decided 2026-07-02):** site preview — run the
-  cycle site-gen renderer against an in-browser site.db (the Rust site.db
-  producer, task #15, is a PREREQUISITE of this repo; compiled into the wasm
-  build with a wa-sqlite or JS-side row store for `core/db.ts`). The demo
-  shows the actual rendered IG pages updating on edit, not just resource
-  views.
+Only then may `JsonSiteBuildView` read the compatibility rows. `CycleSiteRenderer`
+and its content policy are callback-free over that view. Cycle CLI and browser use
+the same page selection, React SSR, LiquidJS policy, include handling, generated
+fragments, resource fragments, and Markdown implementation.
 
-## 8. CI / deploy (`pages.yml`)
+Native `fig prepare --target cycle-site/v1` emits the same closed manifest and a
+filesystem CAS. Cycle's native CLI consumes it through the same
+`ClosedBuildHandle` and `JsonSiteBuildView`; portable/native and browser mode
+both omit SQL and fail loudly if a page requires it. `SqliteSiteBuildView` and
+read-only Liquid SQL remain only behind an explicitly selected `SITE_DB` legacy
+fallback.
 
-1. Checkout with submodules.
-2. Run the pinned sushi-rs test suite (fast subset: ladder + IPS gate) — the
-   demo never deploys an engine that fails its own gates.
-3. `cargo build --target wasm32-unknown-unknown -p wasm_api` + wasm-bindgen
-   + wasm-opt.
-4. Bundle packages (r4.core + cycle deps) into `data/packages/`.
-5. Copy the committed expansion cache into `data/expansions/` (no tx calls
-   in CI; refresh is a deliberate maintainer action).
-6. Export the default-IG manifest from `vendor/cycle`.
-7. Vite build → deploy to Pages.
+### Native Publisher templates
 
-## 9. Milestones & gates
+The stock path mounts an exact template chain, produces source-derived page
+shells and `_data`, overlays current authored pages/includes/data/assets, and
+evaluates pages with Rust `render_liquid` and the Rust Markdown/page pipeline.
 
-| M | Deliverable | Gate |
-|---|---|---|
-| M0 | Repo scaffold, submodules pinned, CI deploys a hello-world page that instantiates the wasm engine and compiles one FSH string | Pages URL up; engine version + build time shown |
-| M1 | Full demo: open cycle IG, edit FSH, live diagnostics + JSON + snapshot tree; offline after first load | Edit→feedback < 1s for cycle; wasm outputs byte-match native for the whole cycle IG (CI assert); works in Chrome+Firefox |
-| M2 | Site preview (in demo bar) | rendered pages match the real site build; page updates on edit touch only read-set-dirty pages (Ledger 2) |
+A known generated-fragment include may cross `ArtifactResolver` only after the
+legacy filename is translated to a typed fragment key. The resolver validates
+resource/whole-IG scope and Publisher parameters. Per-page attempted and
+successful reads are recorded, and generation caching uses `ArtifactKey`.
+Authored/template includes remain ordinary files.
 
-## 10. Dependencies & sequencing
+`artifactResolution: false` must make this callback path unavailable. External
+builders must not accidentally invoke native fragment generation through a
+missing-file lookup.
 
-- Needs from sushi-rs first (wasm-editor-plan): P1 `PackageSource` trait,
-  P2 `wasm_api` + wasm parity harness. The editor repo consumes releases of
-  these via submodule bump — it never forks engine code.
-- Order per REWORK-PLAN §7 roadmap: cutover → main merge → perf/clarity →
-  wasm P0-P2 (sushi-rs) + **cycle site.db producer (task #15, PREREQUISITE)**
-  → this repo M0-M2 (task #16).
+## Liquid rule
 
-## 11. Risks
+The stack has exactly two intentional Liquid implementations:
 
-- **Monaco + FSH grammar fidelity**: TextMate grammar in Monaco needs
-  monaco-textmate shim; budgeted in M1, fallback = basic tokenizer.
-- **Package bundle size** on Pages (~tens of MB): lazy-load per dependency,
-  cache in OPFS; measure first load in M1 gate.
-- **Safari OPFS/FS-Access gaps**: Chrome+Firefox are the M1 bar; Safari
-  degrade-gracefully (in-memory project, no persistence) — stated, not fixed.
-- **wasm/native drift**: prevented structurally — CI byte-compares wasm
-  output vs native output for the whole default IG on every deploy.
+1. Rust `render_liquid` for Publisher templates, shared by native and WASM.
+2. LiquidJS in Cycle `site-gen/core/liquid.ts`, shared by Cycle CLI and browser
+   through `site-gen/core/content.ts`.
+
+An editor-specific Cycle Liquid implementation is forbidden. The generic WASM
+`renderLiquid` operation is part of the native content surface, not Cycle's
+portable rendering architecture.
+
+## Public seam index
+
+These are the supported boundaries. Their repository READMEs document wire
+shapes and lower-level helpers; historical plans do not supersede this list.
+
+| Seam | Input → output and ownership law |
+| --- | --- |
+| Rust `site_build::SiteBuild::new` | exact project/package/target/plan/artifacts/diagnostics → immutable, content-derived build |
+| `SiteBuild::close` / `ClosedSiteBuild` | open build → proof that every render-plan root and transitive artifact read is ready |
+| `site_db_compat::close_projection` | already-derived exact build identity + Cycle row model → one closed compatibility artifact; it cannot invent project/package identity from rows |
+| `package_store::normalize_package_material` | mounted label + registry/native entries → identity/path-checked full transport, regenerated derived index, strict dependency metadata, and canonical compiler-visible lock bytes shared by native and WASM |
+| `render_page::ArtifactResolver` | typed native artifact key → generated bytes/read set or typed failure; Liquid/file lookup does not own semantic generation |
+| native `fig prepare` | explicit IG/cache/output/time inputs → `site-build.json` plus `objects/sha256/*`; no network/default cache or generator callback |
+| WASM `Session` | one isolated mutable engine per normal instance; `compileProject` establishes a revision and projection methods consume it without recompiling |
+| worker `EngineOps` | the single typed main-thread/worker RPC table; one worker owns one `Session` and atomically installs a Cycle runtime |
+| `ProjectBuildSnapshot` + `LatestTaskQueue` | immutable host input capture + serialized latest-wins authority to publish React/Service Worker state |
+| `SiteGeneratorAdapter` | temporary host integration for prepare/list/render/assets; not semantic identity and not a replacement for `SiteBuild` |
+| Cycle `ClosedBuildHandle` / `ContentStore` | verify a closed manifest/read graph and reachable ready-artifact bodies over a read-only byte transport |
+| Cycle `SiteBuildView` / `JsonSiteBuildView` | synchronous callback-free semantic queries over the one verified Cycle artifact |
+| `CycleSiteRenderer` + `CycleContentRenderer` | deterministic page selection/React SSR plus injected shared LiquidJS narrative policy; no filesystem/compiler/global database |
+| `SqliteSiteBuildView` | explicitly selected native legacy adapter only; the sole path that may inject read-only SQL |
+| preview generation commit | complete generation/manifest pair → atomically acknowledged Service Worker pointer scoped by IG id |
+
+## State and concurrency
+
+One Web Worker owns one isolated `Session`. Normal `Session` construction must
+not share compiler/render state. `Session.global()` is a named legacy escape
+hatch only.
+
+All build/template operations over the mutable worker session are serialized by
+`LatestTaskQueue`. A newer queued request immediately revokes the old task's
+publication lease. Non-cancellable WASM work may finish, but revoked work must
+not publish React state or a Service Worker generation.
+
+The worker installs Cycle manifest, rows, and renderer as one atomic
+`CycleBuildRuntime`; separate mutable globals for those pieces are forbidden.
+
+The current adapter API retains generator state behind this queue. The target
+API is an immutable per-build handle. Until that migration, uncached live stock
+navigation during a new stock build is a documented isolation limitation and
+must not be represented as fully solved by the queue alone.
+
+## Assets
+
+Every preview asset has an owner and provenance:
+
+- Publisher runtime;
+- mounted template;
+- authored IG;
+- generated; or
+- named extension namespace.
+
+The stock catalog applies deterministic runtime < template < authored
+precedence. Template assets come from the exact mounted package chain. Fixed
+runtime assets are generated from pinned, hash-checked upstream inputs.
+Generated table backgrounds and compatibility scripts are explicit producers.
+Do not modify third-party library bytes in place.
+
+When present, `SiteGeneratorAdapter.assetManifest` is the complete public-path
+projection for one generation and is provisioned once. The stock adapter meets
+this contract. An adapter that omits it explicitly uses the slower live
+`assetBytes`/static relay; Cycle still has that migration debt.
+
+## Preview protocol
+
+All previews use:
+
+```text
+<base>/preview/<ig-id>/<path>
+```
+
+`publishPreviewSource` sends one `igpreview:commitGeneration` request containing
+the generation and, when the adapter implements `assetManifest`, its full asset
+set. Otherwise it declares `hasAssetManifest:false` and the Service Worker uses
+the slower live relay. The Service Worker must finish writing the generation
+before advancing its current pointer and acknowledging the commit. React may
+publish the matching page list/generation only after that ACK and while its task
+lease remains current.
+
+Hot reload is scoped by IG id and changed page bytes. A current-generation cache
+hit wins over live rendering. An older cached generation is an explicitly stale
+fallback after the editor is unavailable; it is not evidence that current
+source rendered successfully.
+
+The same behavior applies to embedded and independent preview windows:
+cross-page links, reload, back/forward, editor-close fallback, and source edits.
+
+## Packages and terminology
+
+The Rust resolver decides dependency requirements; the browser supplies
+transport and persistence. Registry bytes are mounted into the worker and exact
+resolved packages are recorded in the build contract. Before mount, the shared
+Rust package-material boundary verifies `package.json` identity against the
+exact label, validates dependency metadata, retains safe nested registry
+transport, regenerates the derived index, and computes the same canonical
+compiler-visible top-level bytes used by native Fig. Nested members are excluded
+from that semantic lock payload but remain mounted because Publisher template packages consume their
+`content/`, `includes/`, `layouts/`, `liquid/`, and asset trees; they are not
+part of the current Cycle semantic package lock and must become explicit target
+artifacts before the native-template branch can be closed. Package
+acquisition invalidates any host-side compile-revision cache.
+
+Same-origin baked bundles have an additional transport lock: `manifest.json`
+requires the SHA-256 and byte length of each compressed `.tgz`; the client checks
+those bytes before inflation and keys the inflated OPFS entry by package label
+plus digest. Label-only cache entries from older formats are never migrated into
+that trusted lane. Registry results may be cached under a digest of their
+inflated map, but that identity is a cache key rather than registry authority.
+
+Enumerable ValueSet composes over available content may expand locally.
+Composes requiring unavailable external code-system semantics return an
+explicit `needs terminology server` state. A configured external `$expand`
+endpoint and committed warm-start cache are optional authorities; incomplete
+local output must not masquerade as a complete expansion.
+
+## Acceptance gates
+
+A releasable editor commit must pass, as applicable:
+
+- engine compiler/WASM/snapshot tests;
+- `site_build` closure and `site-db-compat` tests;
+- typed `render_page` artifact tests and `fig` watch tests;
+- native/WASM Cycle compile byte parity;
+- package-list drift and template live/packed parity;
+- Cycle shared-renderer contract tests;
+- app data/coordination/preview unit tests;
+- TypeScript and Vite production build; and
+- a fresh-profile Chromium run against an immutable copy of the exact Vite
+  artifact under the GitHub Pages subpath.
+
+The browser gate fails on stale engine/app commits, wrong project content,
+broken diagnostics, failed navigation/reload/history, cross-IG hot reload,
+missing assets, HTML fallbacks served as assets, broken images, missing required
+runtime globals, inactive compatibility behavior, or unexpected exceptions.
+
+## Current convergence work
+
+- Persist demand-resolved native artifacts and page read sets as new immutable
+  `SiteBuild`/CAS revisions and define the stock render plan.
+- Replace adapter/session singletons with immutable build handles.
+- Add a content-addressed final-output receipt over Cycle's now-enforced logical
+  output manifest, then retire the explicit legacy SQLite/SQL fallback after
+  downstream workflows migrate.
+- Promote stock asset catalogs into first-class build artifacts.
+- Emit/provision a complete Cycle row/design asset manifest instead of relying
+  on the live asset responder.
+- Extend precise invalidation across source, package, data/include, fragment,
+  page, and asset reads.
+- Represent remaining terminology/dictionary/dependency-table gaps as typed
+  capability states and broaden catalog browser certification.

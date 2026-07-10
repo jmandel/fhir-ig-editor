@@ -24,6 +24,8 @@ import type {
   VersionIndex,
 } from './protocol';
 import { readCachedBundle, writeCachedBundle } from './bundleCache';
+import { BakedBundleIntegrityError } from './bundleIntegrity';
+import type { BakedBundleEntry } from './bundleIntegrity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
 import {
   getRegistries,
@@ -63,10 +65,10 @@ export interface ResolverHost {
   resolveStep(config: string, versionIndex?: VersionIndex): Promise<ResolutionStep>;
   /** Mount a set of fetched bundles into the engine. */
   mount(bundles: BundleSpec[]): Promise<void>;
-  /** The baked same-origin manifest's `label -> tgz filename` map (source a). */
-  bakedBundle(label: string): { tgz: string; bytes?: number } | undefined;
-  /** Fetch + inflate a same-origin baked bundle by its tgz filename (source a). */
-  fetchBaked(label: string, tgz: string): Promise<BundleSpec>;
+  /** The baked same-origin manifest's exact transport entry (source a). */
+  bakedBundle(label: string): BakedBundleEntry | undefined;
+  /** Fetch, verify, and inflate one exact same-origin baked bundle (source a). */
+  fetchBaked(bundle: BakedBundleEntry): Promise<BundleSpec>;
 }
 
 const MAX_ROUNDS = 24; // fixpoint guard: a closure this deep is pathological.
@@ -201,8 +203,11 @@ async function obtainPackage(
   onProgress: ResolveProgress,
   blocked: BlockedPackage[],
 ): Promise<BundleSpec | null> {
-  // (a') OPFS warm cache — a package fetched on a previous session/round.
-  const cached = await readCachedBundle(label);
+  const baked = host.bakedBundle(label);
+  // (a') OPFS warm cache. Baked entries can only hit the cache key carrying
+  // their manifest digest; an older registry/local cache for the same label is
+  // deliberately ineligible.
+  const cached = await readCachedBundle(label, baked?.sha256);
   if (cached) {
     onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (cached)` });
     return cached;
@@ -216,13 +221,13 @@ async function obtainPackage(
   }
 
   // (a) same-origin prebuilt bundle from the baked manifest.
-  const baked = host.bakedBundle(label);
   if (baked) {
     try {
-      const spec = await host.fetchBaked(label, baked.tgz);
-      void writeCachedBundle(spec);
-      return spec;
-    } catch {
+      return await host.fetchBaked(baked);
+    } catch (error) {
+      // A missing same-origin file may fall through to the registry. Bytes that
+      // were fetched but disagreed with the baked digest must fail closed.
+      if (error instanceof BakedBundleIntegrityError) throw error;
       /* fall through to the registry */
     }
   }

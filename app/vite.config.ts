@@ -13,37 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// The cycle site-gen renderer (submodule, READ-ONLY) opens a bun:sqlite file at
-// `core/db.ts` import time. For the M2 preview we redirect that module to our
-// RowStore-backed shim (src/preview/dbShim.ts) so importing Layout/Menu resolves
-// to in-memory rows, not a file DB. Aliasing the exact submodule file path is how
-// we override a read-only submodule without patching it.
-const DB_SHIM = resolve(HERE, 'src/preview/dbShim.ts');
 const CYCLE_SITEGEN = resolve(HERE, '../vendor/cycle/site-gen');
-// Match the submodule's `core/db` module however it's imported (relative
-// `../core/db`, `@cycle/core/db`, or the resolved absolute path). Redirecting it to
-// our RowStore shim is what stops bun:sqlite from being pulled into the bundle.
-const CYCLE_DB_RE = /(^|\/)vendor\/cycle\/site-gen\/core\/db(\.ts)?$/;
-
-// A resolveId plugin that redirects the submodule's `core/db` (bun:sqlite) to our
-// RowStore shim — however it is imported. A plain alias can't reliably catch the
-// relative `../core/db` specifier from inside the submodule, so we intercept at the
-// resolved-id level (after Vite resolves it against the importer).
-function cycleDbRedirect() {
-  return {
-    name: 'cycle-db-redirect',
-    enforce: 'pre' as const,
-    async resolveId(this: any, source: string, importer: string | undefined, options: any) {
-      // Fast path: relative `../core/db` from inside the submodule.
-      if (/(^|\/)core\/db(\.ts)?$/.test(source) && importer && importer.replace(/\\/g, '/').includes('/vendor/cycle/site-gen/')) {
-        return DB_SHIM;
-      }
-      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      if (resolved && CYCLE_DB_RE.test(resolved.id.replace(/\\/g, '/'))) return DB_SHIM;
-      return null;
-    },
-  };
-}
 
 // Static SPA for GitHub Pages. `base` is set from BASE_PATH at build time so the
 // site works both at a user/org root and under /<repo>/ (project Pages). The
@@ -51,11 +21,11 @@ function cycleDbRedirect() {
 // bundles + the baked cycle manifest land in public/data/ via scripts/.
 export default defineConfig({
   base: process.env.BASE_PATH ?? '/',
-  plugins: [cycleDbRedirect(), react()],
+  plugins: [react()],
   resolve: {
     alias: [
       // `@cycle/*` -> the real submodule render pieces (bundled + transpiled by
-      // esbuild; app-side tsc maps them to a stub instead — see tsconfig paths).
+      // esbuild; app-side tsc follows the same shared sources via tsconfig paths).
       { find: /^@cycle\/(.*)$/, replacement: `${CYCLE_SITEGEN}/$1` },
       // The submodule imports these bare packages but its node_modules is not
       // ours; resolve them from THIS app's node_modules (we pin the same versions
@@ -104,9 +74,6 @@ export default defineConfig({
   },
   worker: {
     format: 'es',
-    // The worker imports the render adapter (submodule pieces incl. core/db); it
-    // gets its own rollup pass, so the db redirect must be registered here too.
-    plugins: () => [cycleDbRedirect()],
   },
   build: {
     target: 'es2022',

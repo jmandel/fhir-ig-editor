@@ -64,6 +64,38 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   const msg = event.data;
   if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'igpreview:commitGeneration' && Array.isArray(msg.assets)) {
+    // Atomically install the generation pointer and the asset manifest, then ACK
+    // the editor. Until this task completes fetches continue to see the previous
+    // pair; they can never observe a new generation with old assets.
+    event.waitUntil(
+      (async () => {
+        try {
+          const assets = new Map();
+          for (const asset of msg.assets) {
+            assets.set(asset.key, { mime: asset.mime, bytes: asset.bytes });
+          }
+          provisioned = msg.hasAssetManifest
+            ? {
+                generation: msg.generation,
+                igId: msg.igId,
+                pagePrefix: msg.pagePrefix || '',
+                assets,
+              }
+            : null;
+          // A browser reload can restart the app's UI counter below a generation
+          // retained by the SW, so an acknowledged commit REPLACES rather than only
+          // monotonically increases this pointer.
+          currentGeneration = msg.generation;
+          await pruneCaches();
+          event.ports[0]?.postMessage({ ok: true, generation: currentGeneration });
+        } catch (error) {
+          event.ports[0]?.postMessage({ ok: false, error: String(error) });
+        }
+      })(),
+    );
+    return;
+  }
   if (msg.type === 'igpreview:setGeneration' && typeof msg.generation === 'number') {
     if (msg.generation > currentGeneration) currentGeneration = msg.generation;
     event.waitUntil(pruneCaches());
@@ -159,10 +191,11 @@ async function handlePreview(request, url) {
   }
 
   const gen = currentGeneration;
-  // (a) Cache: try the current generation, then the previous one (freshness policy:
-  // keep last-2 so a lazily-refilling new generation still serves via the old one).
-  const cached = await cacheMatch(url.pathname, gen);
-  if (cached) return cached;
+  // (a) Only a CURRENT-generation cache entry may beat a live render. Falling
+  // back to the previous generation before consulting the open editor is what
+  // allowed a newly navigated iframe to become permanently stale.
+  const current = await cacheMatchCurrent(url.pathname, gen);
+  if (current) return current;
 
   // (b) Live render via an open editor tab.
   if (parsed) {
@@ -174,6 +207,11 @@ async function handlePreview(request, url) {
     }
   }
 
+  // (b2) With no live renderer, an older retained page is still useful for an
+  // editor-closed/offline tab. Mark it explicitly as stale for diagnostics.
+  const stale = await cacheMatchOlder(url.pathname, gen);
+  if (stale) return stale;
+
   // (c) Friendly fallback — never a browser error page.
   return fallbackResponse(parsed, url);
 }
@@ -184,13 +222,24 @@ function cacheName(gen) {
   return CACHE_PREFIX + gen;
 }
 
-async function cacheMatch(pathname, gen) {
-  // Try newest generation first, then fall back to older kept generations.
-  const names = await orderedCacheNames(gen);
+async function cacheMatchCurrent(pathname, gen) {
+  const cache = await caches.open(cacheName(gen));
+  return (await cache.match(pathname)) || null;
+}
+
+async function cacheMatchOlder(pathname, gen) {
+  const names = (await orderedCacheNames(gen)).filter((name) => name !== cacheName(gen));
   for (const name of names) {
     const cache = await caches.open(name);
     const hit = await cache.match(pathname);
-    if (hit) return hit;
+    if (!hit) continue;
+    const headers = new Headers(hit.headers);
+    headers.set('X-IGPreview-Stale', 'true');
+    return new Response(await hit.arrayBuffer(), {
+      status: hit.status,
+      statusText: hit.statusText,
+      headers,
+    });
   }
   return null;
 }

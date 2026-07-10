@@ -60,16 +60,12 @@ for (let i = 0; i < 90; i++) {
 }
 await ev(`(() => { const b=[...document.querySelectorAll('.welcome-card button')].find(x=>!x.disabled); if (b) b.click(); return true; })()`);
 
-// site build done = buildSite resolves; poll via a probe render of index.html
+// Wait until the selected Cycle adapter has published its page list. The
+// renderer now owns one verified closed build; there is no worker-global row
+// cache to probe directly.
 let pages = null;
 for (let i = 0; i < 60; i++) {
   await sleep(2000);
-  pages = await ev(`(async () => {
-    const d = window.__igDebug; if (!d) return null;
-    try { const r = await d.engine.buildSite === undefined ? null : null; } catch {}
-    return null;
-  })()`);
-  // The engine holds lastRows only after the app's own buildSite; ask the app-built list:
   pages = await ev(`(() => {
     const sel = document.querySelector('.preview-page-select select');
     return sel ? [...sel.querySelectorAll('option')].map(o => o.value) : null;
