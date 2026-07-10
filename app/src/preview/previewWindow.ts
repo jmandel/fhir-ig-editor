@@ -21,6 +21,16 @@ const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 export const PREVIEW_ROOT = `${BASE}preview/`;
 const CHANNEL_NAME = 'igpreview';
 
+/** Bump this whenever the editor/SW control-message contract changes
+ * incompatibly. The version is part of the script URL so an already-installed
+ * worker cannot remain active merely because a browser reuses a cached
+ * `preview-sw.js` registration during a rolling deployment. */
+export const PREVIEW_SW_PROTOCOL = 2;
+
+export function previewWorkerScriptPath(base = BASE): string {
+  return `${base.replace(/\/?$/, '/')}preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}`;
+}
+
 /** Build the real preview URL for a page under a generator. */
 export function previewUrl(generatorId: string, pagePath: string): string {
   const gen = encodeURIComponent(generatorId);
@@ -32,41 +42,127 @@ export function previewUrl(generatorId: string, pagePath: string): string {
 // ---- SW registration -----------------------------------------------------------
 
 let swRegistration: ServiceWorkerRegistration | null = null;
-let swCapable: boolean | null = null;
+let compatibleWorker: ServiceWorker | null = null;
+let swReadyPromise: Promise<ServiceWorker | null> | null = null;
+
+export function isCompatiblePreviewWorkerPong(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const pong = value as { type?: unknown; protocol?: unknown };
+  return pong.type === 'igpreview:pong' && pong.protocol === PREVIEW_SW_PROTOCOL;
+}
+
+/** Probe one worker over the same MessageChannel mechanism used by commits.
+ * Legacy workers either ignore this message or reply without `protocol`; both
+ * are deliberately incompatible instead of being allowed to swallow a newer
+ * commit message without acknowledging it. */
+export async function previewWorkerProtocol(
+  worker: Pick<ServiceWorker, 'postMessage'>,
+  timeoutMs = 1_500,
+): Promise<number | null> {
+  const channel = new MessageChannel();
+  return new Promise<number | null>((resolve) => {
+    let settled = false;
+    const finish = (protocol: number | null) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timer);
+      channel.port1.close();
+      resolve(protocol);
+    };
+    const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
+    channel.port1.onmessage = (event) => {
+      finish(isCompatiblePreviewWorkerPong(event.data) ? PREVIEW_SW_PROTOCOL : null);
+    };
+    try {
+      worker.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+export interface PreviewWorkerWaitOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  pingTimeoutMs?: number;
+}
+
+/** Wait for the worker at the desired versioned script URL, not merely any
+ * active worker for this scope. This is exported so the old-active/new-app
+ * rolling-deployment case can be tested without a browser-global singleton. */
+export async function waitForCompatiblePreviewWorker(
+  registration: Pick<ServiceWorkerRegistration, 'active' | 'update'>,
+  desiredScriptUrl: string,
+  options: PreviewWorkerWaitOptions = {},
+): Promise<ServiceWorker> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const pollMs = options.pollMs ?? 100;
+  const pingTimeoutMs = options.pingTimeoutMs ?? 1_500;
+  const deadline = Date.now() + timeoutMs;
+  // `register()` normally starts the update itself. An explicit update closes
+  // the throttled/cached-registration case seen on returning mobile browsers.
+  void registration.update().catch(() => undefined);
+  while (Date.now() < deadline) {
+    const active = registration.active;
+    if (
+      active?.state === 'activated' &&
+      active.scriptURL === desiredScriptUrl &&
+      (await previewWorkerProtocol(active, pingTimeoutMs)) === PREVIEW_SW_PROTOCOL
+    ) {
+      return active;
+    }
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, pollMs));
+  }
+  throw new Error(`preview Service Worker protocol ${PREVIEW_SW_PROTOCOL} did not activate`);
+}
+
+async function registerCompatiblePreviewWorker(): Promise<ServiceWorker> {
+  const scriptPath = previewWorkerScriptPath();
+  const desiredScriptUrl = new URL(scriptPath, window.location.href).href;
+  const options: RegistrationOptions = {
+    scope: PREVIEW_ROOT,
+    updateViaCache: 'none',
+  };
+  swRegistration = await navigator.serviceWorker.register(scriptPath, options);
+  try {
+    return await waitForCompatiblePreviewWorker(swRegistration, desiredScriptUrl);
+  } catch (firstError) {
+    // A stale incompatible registration should normally be replaced by the
+    // versioned register above. Some mobile browsers retain it through the
+    // update window; unregistering the scope is the bounded recovery. Cache API
+    // page bytes are independent of the registration and remain available.
+    console.warn('[igpreview] replacing incompatible preview Service Worker:', firstError);
+    await swRegistration.unregister();
+    swRegistration = await navigator.serviceWorker.register(scriptPath, options);
+    return waitForCompatiblePreviewWorker(swRegistration, desiredScriptUrl, { timeoutMs: 20_000 });
+  }
+}
 
 /** Register the preview SW (idempotent). Returns whether preview windows are
  *  supported in this browser/context (false in private windows without SW, etc.). */
 export async function ensurePreviewServiceWorker(): Promise<boolean> {
-  if (swCapable !== null) return swCapable;
   if (!('serviceWorker' in navigator)) {
-    swCapable = false;
     return false;
   }
+  if (compatibleWorker?.state === 'activated') return true;
+  if (swReadyPromise) return (await swReadyPromise) !== null;
+  const pending = registerCompatiblePreviewWorker().then(
+    (worker) => {
+      compatibleWorker = worker;
+      return worker;
+    },
+    (e) => {
+      console.warn('[igpreview] SW registration failed; preview disabled:', e);
+      compatibleWorker = null;
+      return null;
+    },
+  );
+  swReadyPromise = pending;
   try {
-    // The SW script sits at `<base>preview-sw.js`; its directory (the app base) is
-    // an ancestor of the requested scope `<base>preview/`, so no Service-Worker-Allowed
-    // header is needed — the script may legally claim that narrower scope.
-    swRegistration = await navigator.serviceWorker.register(`${BASE}preview-sw.js`, {
-      scope: PREVIEW_ROOT,
-    });
-    // Wait until the SW is ACTIVATED so it can serve preview/ requests (the embedded
-    // iframe navigates there immediately). NOT `navigator.serviceWorker.ready` — that
-    // resolves only when a SW controls THIS page, but our scope is preview/ (the app
-    // shell at `/` is intentionally never controlled), so `.ready` would hang forever.
-    const sw = swRegistration.active ?? swRegistration.waiting ?? swRegistration.installing;
-    if (sw && sw.state !== 'activated') {
-      await new Promise<void>((res) => {
-        const check = () => { if (sw.state === 'activated') { sw.removeEventListener('statechange', check); res(); } };
-        sw.addEventListener('statechange', check);
-        check();
-      });
-    }
-    swCapable = true;
-  } catch (e) {
-    console.warn('[igpreview] SW registration failed; preview window disabled:', e);
-    swCapable = false;
+    return (await pending) !== null;
+  } finally {
+    if (swReadyPromise === pending) swReadyPromise = null;
   }
-  return swCapable;
 }
 
 /** Tell the active SW the current compile generation (drives cache naming + prune). */
@@ -80,9 +176,8 @@ export async function announceGenerationToSW(generation: number): Promise<void> 
 }
 
 async function activePreviewWorker(): Promise<ServiceWorker | null> {
-  const registration =
-    swRegistration ?? (await navigator.serviceWorker?.getRegistration(PREVIEW_ROOT));
-  return registration?.active ?? registration?.waiting ?? registration?.installing ?? null;
+  if (!(await ensurePreviewServiceWorker())) return null;
+  return compatibleWorker?.state === 'activated' ? compatibleWorker : null;
 }
 
 async function postToPreviewWorker(
@@ -95,23 +190,34 @@ async function postToPreviewWorker(
   // the build while registration is resolving; do not send that obsolete
   // generation afterward.
   if (!mayCommit()) return false;
-  if (!sw) return true;
+  if (!sw) throw new Error('compatible preview Service Worker is unavailable');
   const channel = new MessageChannel();
   await new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(
-      () => reject(new Error('preview Service Worker commit acknowledgement timed out')),
-      10_000,
+    const timer = globalThis.setTimeout(
+      () => {
+        channel.port1.close();
+        reject(new Error('preview Service Worker commit acknowledgement timed out'));
+      },
+      12_000,
     );
     channel.port1.onmessage = (event) => {
       if (event.data?.ok) {
-        window.clearTimeout(timer);
+        globalThis.clearTimeout(timer);
+        channel.port1.close();
         resolve();
       } else {
-        window.clearTimeout(timer);
+        globalThis.clearTimeout(timer);
+        channel.port1.close();
         reject(new Error(event.data?.error || 'preview Service Worker rejected generation'));
       }
     };
-    sw.postMessage(message, [channel.port2, ...transfer]);
+    try {
+      sw.postMessage(message, [channel.port2, ...transfer]);
+    } catch (error) {
+      globalThis.clearTimeout(timer);
+      channel.port1.close();
+      reject(error);
+    }
   });
   return true;
 }
@@ -249,6 +355,62 @@ export interface PreviewSource {
   generation: number;
 }
 
+export interface PreviewAssetTransfer {
+  key: string;
+  mime: string;
+  bytes: ArrayBuffer;
+}
+
+type PreviewWorkerPost = (
+  message: Record<string, unknown>,
+  transfer?: Transferable[],
+  mayCommit?: () => boolean,
+) => Promise<boolean>;
+
+/** Commit the optimized generation+asset pair, but preserve correctness when a
+ * mobile worker cannot accept the large transfer promptly. The fallback is a
+ * small generation-only commit; assets remain available through the existing
+ * live responder and may be provisioned again after UI publication. */
+export async function commitPreviewGenerationWithFallback(
+  next: Pick<PreviewSource, 'generation' | 'igId'>,
+  pagePrefix: string,
+  entries: PreviewAssetTransfer[],
+  hasAssetManifest: boolean,
+  mayCommit: () => boolean,
+  post: PreviewWorkerPost = postToPreviewWorker,
+): Promise<{ committed: boolean; fullAssetsCommitted: boolean; fullAssetError?: unknown }> {
+  try {
+    const committed = await post(
+      {
+        type: 'igpreview:commitGeneration',
+        generation: next.generation,
+        igId: next.igId,
+        pagePrefix,
+        hasAssetManifest,
+        assets: entries,
+      },
+      entries.map((entry) => entry.bytes),
+      mayCommit,
+    );
+    return { committed, fullAssetsCommitted: true };
+  } catch (fullAssetError) {
+    if (!mayCommit()) return { committed: false, fullAssetsCommitted: false, fullAssetError };
+    const committed = await post(
+      {
+        type: 'igpreview:commitGeneration',
+        generation: next.generation,
+        igId: next.igId,
+        pagePrefix,
+        hasAssetManifest: false,
+        assets: [],
+      },
+      [],
+      mayCommit,
+    );
+    return { committed, fullAssetsCommitted: false, fullAssetError };
+  }
+}
+
 /** Live source, updated by the editor as the selected generator / generation changes. */
 let source: PreviewSource | null = null;
 
@@ -359,21 +521,23 @@ export async function publishPreviewSource(
   // its complete asset manifest. The UI does not navigate an iframe to the new
   // build until this resolves, so first-load asset requests cannot race an older
   // provisioned set.
-  const committed = await postToPreviewWorker(
-    {
-      type: 'igpreview:commitGeneration',
-      generation: next.generation,
-      igId: next.igId,
-      pagePrefix: manifest?.pagePrefix ?? '',
-      hasAssetManifest: !!manifest,
-      assets: entries,
-    },
-    entries.map((entry) => entry.bytes),
+  const commit = await commitPreviewGenerationWithFallback(
+    next,
+    manifest?.pagePrefix ?? '',
+    entries,
+    !!manifest,
     mayCommit,
   );
-  if (!committed) return false;
+  if (!commit.committed) return false;
+  if (!commit.fullAssetsCommitted) {
+    // A large stock-template asset transfer can exceed a mobile browser's SW
+    // wake/clone budget even though page rendering already succeeded. The small
+    // commit above keeps the actual site usable through the live asset responder.
+    console.warn('[igpreview] full asset commit failed; using live asset fallback:', commit.fullAssetError);
+  }
 
   source = next;
+  if (!commit.fullAssetsCommitted && manifest) void provisionAssetsToSW(next);
   if (next.generation !== prevGen) void refreshOpenPreviews(prevGen);
   return true;
 }

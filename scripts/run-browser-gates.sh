@@ -44,6 +44,14 @@ mkdir -p "$WORK/artifact"
 cp -a "$DIST/." "$WORK/artifact/"
 DIST="$WORK/artifact"
 
+# Optional rolling-deployment regression: install the prior unversioned worker
+# before loading the current app. Fixtures are copied only into this disposable
+# artifact and are never part of the Pages upload.
+if [ "${PREINSTALL_LEGACY_PREVIEW_SW:-0}" = 1 ]; then
+  cp "$HERE/fixtures/legacy-preview-sw.js" "$DIST/__legacy-preview-sw.js"
+  cp "$HERE/fixtures/legacy-preview-bootstrap.html" "$DIST/__legacy-preview-bootstrap.html"
+fi
+
 if [ "$BASE_PATH" = / ]; then
   SERVER_ROOT="$DIST"
 else

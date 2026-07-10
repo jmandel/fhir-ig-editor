@@ -26,6 +26,9 @@
 // the app base, and the preview root is "<base>preview/".
 const BASE = new URL('./', self.location).pathname; // e.g. /fhir-ig-editor/
 const PREVIEW_ROOT = BASE + 'preview/'; // e.g. /fhir-ig-editor/preview/
+// Must match PREVIEW_SW_PROTOCOL in previewWindow.ts. The editor registers this
+// script with `?protocol=2` and refuses an older active worker before publishing.
+const PREVIEW_SW_PROTOCOL = 2;
 
 // Cache naming: one cache per compile generation. Keep the last two generations so a
 // just-bumped generation (still lazily refilling) can fall back to the previous
@@ -52,12 +55,10 @@ self.addEventListener('install', () => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    (async () => {
-      await self.clients.claim();
-      await pruneCaches();
-    })(),
-  );
+  // Activation gates the editor's protocol handshake, so keep it independent
+  // of potentially slow Cache Storage enumeration on returning mobile devices.
+  // The first generation commit performs the same best-effort pruning.
+  event.waitUntil(self.clients.claim());
 });
 
 // Control channel from the editor tab: generation bumps + cache pruning.
@@ -68,32 +69,35 @@ self.addEventListener('message', (event) => {
     // Atomically install the generation pointer and the asset manifest, then ACK
     // the editor. Until this task completes fetches continue to see the previous
     // pair; they can never observe a new generation with old assets.
-    event.waitUntil(
-      (async () => {
-        try {
-          const assets = new Map();
-          for (const asset of msg.assets) {
-            assets.set(asset.key, { mime: asset.mime, bytes: asset.bytes });
+    try {
+      const assets = new Map();
+      for (const asset of msg.assets) {
+        assets.set(asset.key, { mime: asset.mime, bytes: asset.bytes });
+      }
+      provisioned = msg.hasAssetManifest
+        ? {
+            generation: msg.generation,
+            igId: msg.igId,
+            pagePrefix: msg.pagePrefix || '',
+            assets,
           }
-          provisioned = msg.hasAssetManifest
-            ? {
-                generation: msg.generation,
-                igId: msg.igId,
-                pagePrefix: msg.pagePrefix || '',
-                assets,
-              }
-            : null;
-          // A browser reload can restart the app's UI counter below a generation
-          // retained by the SW, so an acknowledged commit REPLACES rather than only
-          // monotonically increases this pointer.
-          currentGeneration = msg.generation;
-          await pruneCaches();
-          event.ports[0]?.postMessage({ ok: true, generation: currentGeneration });
-        } catch (error) {
-          event.ports[0]?.postMessage({ ok: false, error: String(error) });
-        }
-      })(),
-    );
+        : null;
+      // A browser reload can restart the app's UI counter below a generation
+      // retained by the SW, so an acknowledged commit REPLACES rather than only
+      // monotonically increases this pointer.
+      currentGeneration = msg.generation;
+      // The generation/asset pair is installed synchronously. ACK it before
+      // Cache Storage pruning: mobile browsers can take seconds to enumerate or
+      // delete old caches, but that maintenance is not part of commit atomicity.
+      event.ports[0]?.postMessage({
+        ok: true,
+        generation: currentGeneration,
+        protocol: PREVIEW_SW_PROTOCOL,
+      });
+      event.waitUntil(pruneCaches().catch(() => undefined));
+    } catch (error) {
+      event.ports[0]?.postMessage({ ok: false, error: String(error), protocol: PREVIEW_SW_PROTOCOL });
+    }
     return;
   }
   if (msg.type === 'igpreview:setGeneration' && typeof msg.generation === 'number') {
@@ -102,9 +106,20 @@ self.addEventListener('message', (event) => {
   }
   if (msg.type === 'igpreview:ping') {
     // Reply so the editor can confirm the SW is active + which generation it holds.
-    event.ports[0]?.postMessage({ type: 'igpreview:pong', generation: currentGeneration });
+    event.ports[0]?.postMessage({
+      type: 'igpreview:pong',
+      protocol: PREVIEW_SW_PROTOCOL,
+      generation: currentGeneration,
+    });
   }
   if (msg.type === 'igpreview:provisionAssets' && Array.isArray(msg.assets)) {
+    // A re-provision is fire-and-forget. Do not let an older request that was
+    // delayed in the client overwrite the manifest installed by a newer atomic
+    // generation commit. Zero means this worker was restarted and lost its
+    // in-memory generation pointer, in which case the current editor restores it.
+    if (typeof msg.generation !== 'number') return;
+    if (currentGeneration !== 0 && msg.generation !== currentGeneration) return;
+    if (currentGeneration === 0) currentGeneration = msg.generation;
     // Wholesale-replace the asset set for this generation (deterministic, not lazy).
     const assets = new Map();
     for (const a of msg.assets) assets.set(a.key, { mime: a.mime, bytes: a.bytes });

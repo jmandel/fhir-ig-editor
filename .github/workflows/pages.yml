@@ -250,6 +250,9 @@ jobs:
           # or mode 4755 on hosted runners. This is an isolated fresh-profile
           # test of our loopback static artifact, so opt out explicitly here.
           CHROME_NO_SANDBOX: '1'
+          # Reproduce a returning browser whose active worker predates the
+          # acknowledged commit protocol, then require an in-place upgrade.
+          PREINSTALL_LEGACY_PREVIEW_SW: '1'
         run: bash scripts/run-browser-gates.sh app/dist
 
       - name: Assemble Pages artifact

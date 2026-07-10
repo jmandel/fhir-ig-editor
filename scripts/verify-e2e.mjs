@@ -18,7 +18,11 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
-const STOCK_WARM_EDIT_BUDGET_MS = 1500;
+const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
+const timeoutScale = Math.max(1, requestedCpuThrottle);
+// Preserve the release budget on normal CI. An explicitly throttled functional
+// run scales the wall-clock allowance with the emulated CPU slowdown.
+const STOCK_WARM_EDIT_BUDGET_MS = 1500 * timeoutScale;
 
 async function cdp(ws, method, params = {}, id = { n: 1 }) {
   return new Promise((resolve, reject) => {
@@ -43,7 +47,7 @@ async function evalJs(ws, expression) {
   return r.result.value;
 }
 async function waitFor(ws, expr, timeoutMs = 60000, label = expr) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + timeoutMs * timeoutScale;
   while (Date.now() < deadline) {
     const v = await evalJs(ws, expr);
     if (v) return v;
@@ -56,7 +60,7 @@ async function waitFor(ws, expr, timeoutMs = 60000, label = expr) {
 // a condition to remain true across several polls prevents an old iframe's late
 // onLoad from making a one-poll check pass and then reverting the selection.
 async function waitForStable(ws, expr, timeoutMs = 60000, label = expr, samples = 4) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + timeoutMs * timeoutScale;
   let consecutive = 0;
   while (Date.now() < deadline) {
     const value = await evalJs(ws, expr).catch(() => false);
@@ -107,7 +111,7 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     return r.result.value;
   };
   const tabWaitFor = async (tws, expr, ms = 30000, label = expr) => {
-    const dl = Date.now() + ms;
+    const dl = Date.now() + ms * timeoutScale;
     while (Date.now() < dl) { const v = await tabEval(tws, expr).catch(() => false); if (v) return v; await sleep(250); }
     throw new Error('TIMEOUT (preview) ' + label);
   };
@@ -321,6 +325,18 @@ ws.addEventListener('message', (ev) => {
 await cdp(ws, 'Page.enable', {}, id);
 await cdp(ws, 'Runtime.enable', {}, id);
 await cdp(ws, 'Network.enable', {}, id);
+const cpuThrottle = requestedCpuThrottle;
+if (cpuThrottle > 1) {
+  await cdp(ws, 'Emulation.setCPUThrottlingRate', { rate: cpuThrottle }, id);
+}
+if (process.env.E2E_MOBILE === '1') {
+  await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
+    width: 412,
+    height: 915,
+    deviceScaleFactor: 3,
+    mobile: true,
+  }, id);
+}
 
 const results = {};
 function fail(msg) {
@@ -330,6 +346,19 @@ function fail(msg) {
 }
 
 try {
+  if (process.env.PREINSTALL_LEGACY_PREVIEW_SW === '1') {
+    const legacyUrl = new URL('__legacy-preview-bootstrap.html', base).href;
+    await cdp(ws, 'Page.navigate', { url: legacyUrl }, id);
+    results.legacyPreviewWorker = await waitFor(
+      ws,
+      `window.__legacyPreviewWorker || false`,
+      20000,
+      'legacy preview Service Worker fixture',
+    );
+    if (!/__legacy-preview-sw\.js(?:$|[?#])/.test(results.legacyPreviewWorker.scriptURL || '')) {
+      throw new Error('legacy preview Service Worker fixture did not become active');
+    }
+  }
   const t0 = Date.now();
   await cdp(ws, 'Page.navigate', { url: base }, id);
 
@@ -338,7 +367,7 @@ try {
   //    ready. (On a very fast warm start this may be brief; we poll tightly.)
   results.progressSeen = false;
   {
-    const deadline = Date.now() + 90000;
+    const deadline = Date.now() + 90000 * timeoutScale;
     while (Date.now() < deadline) {
       const seen = await evalJs(
         ws,
@@ -367,6 +396,28 @@ try {
     'engine ready',
   );
   results.engineReadyMs = Date.now() - t0;
+  // A returning browser may have an older worker active for the same scope.
+  // The app must wait for the versioned control protocol instead of sending a
+  // commit that the old worker silently ignores (mobile timeout regression).
+  results.previewWorker = await evalJs(ws, `(async () => {
+    const scope = new URL('preview/', location.href).href;
+    const registration = await navigator.serviceWorker.getRegistration(scope);
+    const worker = registration && registration.active;
+    if (!worker) return { error: 'no-active-worker' };
+    const protocol = await new Promise(resolve => {
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => resolve(null), 3000);
+      channel.port1.onmessage = event => {
+        clearTimeout(timer);
+        resolve(event.data && event.data.protocol);
+      };
+      worker.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
+    });
+    return { scriptURL: worker.scriptURL, protocol };
+  })()`);
+  if (results.previewWorker.protocol !== 2 || !/[?&]protocol=2(?:&|$)/.test(results.previewWorker.scriptURL || '')) {
+    throw new Error('preview Service Worker protocol upgrade failed: ' + JSON.stringify(results.previewWorker));
+  }
   // Bundles fetched BEFORE the engine became ready = the eager (compile-critical)
   // set. r5.core (deferred) must NOT be among them (lazy-loading gate).
   results.eagerBundles = bundleFetches.map((b) => b.file);
@@ -674,6 +725,35 @@ try {
     return sel.value;
   })()`);
 
+  const requestedTemplate = process.env.E2E_TEMPLATE_COORD || '';
+  if (requestedTemplate) {
+    const split = requestedTemplate.lastIndexOf('#');
+    const requestedFamily = requestedTemplate.slice(0, split);
+    const requestedVersion = requestedTemplate.slice(split + 1);
+    if (split <= 0 || !requestedVersion) throw new Error(`invalid E2E_TEMPLATE_COORD ${requestedTemplate}`);
+    await waitFor(ws, `!!document.querySelector('.preview-template-select select')`, 30000, 'template family selector');
+    await evalJs(ws, `(() => {
+      const select = document.querySelector('.preview-template-select select');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, ${JSON.stringify(requestedFamily)});
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(ws, `(() => {
+      const family = document.querySelector('.preview-template-select select');
+      const version = document.querySelector('.preview-template-version select');
+      return family?.value === ${JSON.stringify(requestedFamily)}
+        && !!version
+        && [...version.options].some(option => option.value === ${JSON.stringify(requestedVersion)});
+    })()`, 60000, 'requested template family and version');
+    await evalJs(ws, `(() => {
+      const select = document.querySelector('.preview-template-version select');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, ${JSON.stringify(requestedVersion)});
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    results.requestedTemplate = requestedTemplate;
+  }
+
   // ---- template selector: curated version catalog (#40 default UX) ----------
   // The selector must present a curated template FAMILY + a live VERSION list
   // (registry-fetched, OPFS-cached, pinned-fallback) — the user never has to type.
@@ -821,6 +901,20 @@ try {
     await waitFor(ws, stockMarkerCurrent, 30000, 'stock preview reflects warm edit');
     results.stockWarmEditMs = Date.now() - t0;
     await waitForStable(ws, stockMarkerCurrent, 5000, 'stock warm edit remains current');
+  }
+
+  if (process.env.E2E_PREVIEW_SMOKE_ONLY === '1') {
+    console.log(JSON.stringify(results, null, 2));
+    const smokeOk = results.previewWorker?.protocol === 2
+      && results.previewHasIgContent
+      && results.stockIndexLen > 500
+      && results.stockProfilePage?.hasHierarchy
+      && results.stockEditResult === 'ok'
+      && results.stockWarmEditMs < STOCK_WARM_EDIT_BUDGET_MS;
+    if (!smokeOk) throw new Error('mobile preview smoke assertions failed');
+    console.log('\nMOBILE PREVIEW GATE: PASS');
+    ws.close();
+    process.exit(0);
   }
 
   // ---- LIVE template path (#40): mount hl7.fhir.template#1.0.0 via the LIVE

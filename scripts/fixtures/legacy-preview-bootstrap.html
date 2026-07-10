@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Legacy preview worker bootstrap</title>
+<script>
+  window.__legacyPreviewWorker = (async () => {
+    const registration = await navigator.serviceWorker.register('./__legacy-preview-sw.js', {
+      scope: './preview/',
+      updateViaCache: 'none',
+    });
+    const worker = registration.installing || registration.waiting || registration.active;
+    if (!worker) throw new Error('legacy fixture did not create a worker');
+    if (worker.state !== 'activated') {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('legacy fixture activation timed out')), 10000);
+        const changed = () => {
+          if (worker.state === 'activated') {
+            clearTimeout(timer);
+            worker.removeEventListener('statechange', changed);
+            resolve();
+          }
+        };
+        worker.addEventListener('statechange', changed);
+        changed();
+      });
+    }
+    return { scriptURL: registration.active?.scriptURL || worker.scriptURL };
+  })();
+</script>
