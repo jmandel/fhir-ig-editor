@@ -358,13 +358,19 @@ describe('live template asset export', () => {
     const host = {
       resolveStep: async () => ({}) as never,
       bakedBundle: (label: string) => packages[label]
-        ? { label, tgz: label, sha256: '0'.repeat(64) }
+        ? { label, tgz: label, sha256: '0'.repeat(64), loadPhase: 'on-demand' as const }
         : undefined,
       fetchBaked: async (bundle: { label: string }) => {
         fetched.push(bundle.label);
-        return { label: bundle.label, files: packages[bundle.label] };
+        return {
+          kind: 'raw' as const,
+          spec: { label: bundle.label, files: packages[bundle.label] },
+          transportIdentity: 'test',
+        };
       },
-      mount: async (bundles: { label: string }[]) => { mounted.push(...bundles.map((bundle) => bundle.label)); },
+      mount: async (bundles: Array<{ spec: { label: string } }>) => {
+        mounted.push(...bundles.map((bundle) => bundle.spec.label));
+      },
     };
     const result = await mountTemplateChain(host as never, 'leaf.template#1.0.0', () => {});
     expect(result.chain).toEqual(['leaf.template#1.0.0', 'base.template#1.0.0']);

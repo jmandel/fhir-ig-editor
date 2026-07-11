@@ -5,7 +5,9 @@ export interface BakedBundleEntry {
   tgz: string;
   sha256: string;
   bytes?: number;
-  defer?: boolean;
+  /** Intended acquisition phase. Compile packages are still resolver-selected;
+   * this is purpose metadata, not an instruction to mount them globally. */
+  loadPhase: 'compile' | 'snapshot' | 'on-demand';
 }
 
 export interface BakedBundleManifest {
@@ -37,7 +39,7 @@ export function parseBakedBundleManifest(value: unknown): BakedBundleManifest {
   const seen = new Set<string>();
   const bundles = value.bundles.map((candidate, index): BakedBundleEntry => {
     if (!isRecord(candidate)) throw new Error(`package bundle manifest entry ${index} must be an object`);
-    const { label, tgz, sha256, bytes, defer } = candidate;
+    const { label, tgz, sha256, bytes, loadPhase } = candidate;
     if (typeof label !== 'string' || !label) {
       throw new Error(`package bundle manifest entry ${index} has no label`);
     }
@@ -52,15 +54,15 @@ export function parseBakedBundleManifest(value: unknown): BakedBundleManifest {
     if (bytes !== undefined && (!Number.isSafeInteger(bytes) || (bytes as number) < 0)) {
       throw new Error(`package bundle manifest entry ${label} has an invalid byte length`);
     }
-    if (defer !== undefined && typeof defer !== 'boolean') {
-      throw new Error(`package bundle manifest entry ${label} has an invalid defer flag`);
+    if (loadPhase !== 'compile' && loadPhase !== 'snapshot' && loadPhase !== 'on-demand') {
+      throw new Error(`package bundle manifest entry ${label} has an invalid loadPhase`);
     }
     return {
       label,
       tgz,
       sha256,
       ...(bytes === undefined ? {} : { bytes: bytes as number }),
-      ...(defer === undefined ? {} : { defer }),
+      loadPhase,
     };
   });
   return { bundles };

@@ -7,3 +7,6 @@ declare module '*?worker' {
   };
   export default workerConstructor;
 }
+
+declare const __CYCLE_RENDER_RECIPE__: string;
+declare const __ENGINE_RECIPE__: string;

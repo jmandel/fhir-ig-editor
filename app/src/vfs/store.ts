@@ -31,6 +31,26 @@ function utf8ToBase64(text: string): string {
 
 const OPFS_DIR = 'fhir-ig-editor-project';
 const KEY_SEP = '␟'; // '␟' unit separator — not valid in paths
+const STATE_PATH = '.fhir-ig-editor-state.json';
+const BINARY_PREFIX = '.fhir-ig-editor-binary/';
+
+interface PersistedProjectState {
+  schema: 2;
+  /** Immutable identity of the catalog/source artifact that populated the
+   * store. Null means the user has edited the working copy. */
+  sourceIdentity: string | null;
+  textPaths: string[];
+  binaryPaths: string[];
+}
+
+export interface ProjectLoadResult {
+  reused: boolean;
+  durationMs: number;
+  textFiles: number;
+  binaryFiles: number;
+  /** UTF-8 bytes written for text plus persisted base64 binary bodies. */
+  storedBytes: number;
+}
 
 function encodeKey(path: string): string {
   return path.replaceAll('/', KEY_SEP);
@@ -127,21 +147,53 @@ export class ProjectStore {
   private constructor(
     private backend: Backend,
     private cache: Map<string, string>,
+    private binary: Map<string, string>,
+    private sourceIdentity: string | null,
   ) {}
 
   readonly listeners = new Set<() => void>();
 
-  /** Binary project files (images), path -> base64. Not persisted (read-only demo
-   *  assets); rehydrated by `loadAll` each session. */
-  private binary = new Map<string, string>();
-
   static async create(): Promise<ProjectStore> {
     const backend = (await OpfsBackend.create()) ?? new MemoryBackend();
-    const cache = new Map<string, string>();
-    for (const p of await backend.list()) {
-      cache.set(p, (await backend.read(p)) ?? '');
+    const paths = await backend.list();
+    let state: PersistedProjectState = {
+      schema: 2,
+      sourceIdentity: null,
+      textPaths: [],
+      binaryPaths: [],
+    };
+    if (paths.includes(STATE_PATH)) {
+      try {
+        const parsed = JSON.parse((await backend.read(STATE_PATH)) ?? '') as Partial<PersistedProjectState>;
+        if (
+          parsed.schema === 2
+          && (typeof parsed.sourceIdentity === 'string' || parsed.sourceIdentity === null)
+          && Array.isArray(parsed.textPaths)
+          && parsed.textPaths.every((path) => typeof path === 'string')
+          && Array.isArray(parsed.binaryPaths)
+          && parsed.binaryPaths.every((path) => typeof path === 'string')
+        ) {
+          state = parsed as PersistedProjectState;
+        }
+      } catch {
+        // A torn/old state marker cannot authorize source reuse. Ordinary text
+        // files remain recoverable as an editable working copy.
+      }
     }
-    return new ProjectStore(backend, cache);
+    const cache = new Map<string, string>();
+    const textPaths = paths.filter((path) => path !== STATE_PATH && !path.startsWith(BINARY_PREFIX));
+    await Promise.all(textPaths.map(async (path) => cache.set(path, (await backend.read(path)) ?? '')));
+    const binary = new Map<string, string>();
+    await Promise.all(state.binaryPaths.map(async (path) => {
+      const body = await backend.read(`${BINARY_PREFIX}${path}`);
+      if (body != null) binary.set(path, body);
+    }));
+    // The state marker is a commit record. Missing binary members invalidate
+    // source reuse but do not discard the recoverable working copy.
+    const complete = binary.size === state.binaryPaths.length
+      && cache.size === state.textPaths.length
+      && state.textPaths.every((path) => cache.has(path));
+    return new ProjectStore(backend, cache, binary, complete ? state.sourceIdentity : null);
   }
 
   get persistent() {
@@ -167,12 +219,14 @@ export class ProjectStore {
   async write(path: string, text: string): Promise<void> {
     this.cache.set(path, text);
     await this.backend.write(path, text);
+    await this.invalidateSourceIdentity();
     this.notify();
   }
 
   async delete(path: string): Promise<void> {
     this.cache.delete(path);
     await this.backend.delete(path);
+    await this.invalidateSourceIdentity();
     this.notify();
   }
 
@@ -183,17 +237,84 @@ export class ProjectStore {
     await this.delete(from);
   }
 
-  /** Replace the whole project (used by "Open demo IG"). */
-  async loadAll(files: ProjectFile[], binary: BinaryProjectFile[] = []): Promise<void> {
+  private async writeState(): Promise<void> {
+    const state: PersistedProjectState = {
+      schema: 2,
+      sourceIdentity: this.sourceIdentity,
+      textPaths: [...this.cache.keys()].sort(),
+      binaryPaths: [...this.binary.keys()].sort(),
+    };
+    await this.backend.write(STATE_PATH, JSON.stringify(state));
+  }
+
+  private async invalidateSourceIdentity(): Promise<void> {
+    if (this.sourceIdentity === null) return;
+    this.sourceIdentity = null;
+    await this.writeState();
+  }
+
+  hasSource(identity: string): boolean {
+    return this.sourceIdentity === identity;
+  }
+
+  /** Replace the whole project. When `identity` matches the last completely
+   * committed immutable source, this is a true no-op: no archive unpack result
+   * is rewritten and persisted binary assets remain available. */
+  async loadAll(
+    files: ProjectFile[],
+    binary: BinaryProjectFile[] = [],
+    identity?: string,
+  ): Promise<ProjectLoadResult> {
+    const started = performance.now();
+    if (identity && this.sourceIdentity === identity) {
+      return {
+        reused: true,
+        durationMs: performance.now() - started,
+        textFiles: this.cache.size,
+        binaryFiles: this.binary.size,
+        storedBytes: 0,
+      };
+    }
     await this.backend.clear();
+    // Clearing the committed backend revokes the old source proof immediately.
+    // If any subsequent member write fails, this in-memory instance must not
+    // continue claiming that the now-deleted prior project is reusable.
+    this.sourceIdentity = null;
     this.cache.clear();
     this.binary.clear();
-    for (const f of files) {
-      this.cache.set(f.path, f.text);
-      await this.backend.write(f.path, f.text);
-    }
-    for (const b of binary) this.binary.set(b.path, b.base64);
+    for (const file of files) this.cache.set(file.path, file.text);
+    for (const file of binary) this.binary.set(file.path, file.base64);
+    const encoder = new TextEncoder();
+    const storedBytes = files.reduce((sum, file) => sum + encoder.encode(file.text).byteLength, 0)
+      + binary.reduce((sum, file) => sum + file.base64.length, 0);
+    // OPFS file creation has non-trivial latency. A bounded pool retains
+    // deterministic all-or-nothing state publication without serializing
+    // hundreds of independent writes.
+    const writes: Array<() => Promise<void>> = [
+      ...files.map((file) => () => this.backend.write(file.path, file.text)),
+      ...binary.map((file) => () => this.backend.write(`${BINARY_PREFIX}${file.path}`, file.base64)),
+    ];
+    let next = 0;
+    const runners = Array.from({ length: Math.min(16, writes.length) }, async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= writes.length) return;
+        await writes[index]();
+      }
+    });
+    await Promise.all(runners);
+    // Publish the source identity last. A failure above therefore leaves no
+    // marker that could make a future load accept partial content.
+    this.sourceIdentity = identity ?? null;
+    await this.writeState();
     this.notify();
+    return {
+      reused: false,
+      durationMs: performance.now() - started,
+      textFiles: files.length,
+      binaryFiles: binary.length,
+      storedBytes,
+    };
   }
 
   /** Exact site-source input for compileProject/SiteBuild: pagecontent,

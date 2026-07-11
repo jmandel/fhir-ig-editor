@@ -34,6 +34,16 @@ export interface CompileResult {
   /** Wall-clock ms measured across the wasm call boundary in the worker. */
   buildMs: number;
   fileCount: number;
+  packageStorage?: PackageStorageMetrics;
+}
+
+export interface PackageStorageMetrics {
+  compressedRetainedBytes: number;
+  declaredRawBytes: number;
+  chunksInflated: number;
+  rawInflatedBytes: number;
+  cacheHits: number;
+  cachedRawBytes: number;
 }
 
 export interface SnapshotResult {
@@ -47,6 +57,9 @@ export interface InitResult {
   mounted: number;
   version: EngineVersion;
   initMs: number;
+  serializeMs: number;
+  wasmMs: number;
+  inputBytes: number;
 }
 
 /** Result of an incremental `mountBundles` call (lazy per-bundle mount). */
@@ -56,6 +69,53 @@ export interface MountResult {
   /** Labels newly mounted by THIS call (already-mounted labels are skipped). */
   newlyMounted: string[];
   mountMs: number;
+  serializeMs: number;
+  wasmMs: number;
+  inputBytes: number;
+  /** Raw packages whose binary PreparedPackage was durably published to OPFS. */
+  preparedStored?: string[];
+  /** Rust-side phases and allocation/index facts for the prepared mount path. */
+  preparedMetrics?: PreparedMountMetrics;
+  /** Exact normalized package artifacts installed by this transaction. */
+  packageIdentities?: Array<{ label: string; cacheKey: string }>;
+}
+
+export interface PreparedMountMetrics {
+  mode: 'cold-prepare' | 'warm-binary';
+  added: number;
+  artifactBytes: number;
+  engineMountMs: number;
+  /** Cold: base64 decode + normalize + index + encode. */
+  decodeValidatePrepareMs?: number;
+  preparedMembers?: number;
+  mountMemberBodyCopies?: number;
+  inputJsonBytes?: number;
+  base64Bytes?: number;
+  decodedSourceBytes?: number;
+  normalizedBytes?: number;
+  jsonParseMs?: number;
+  base64DecodeMs?: number;
+  normalizationMs?: number;
+  indexingMs?: number;
+  artifactEncodeMs?: number;
+  /** Warm: validate indexed binary package ranges. */
+  decodeValidateMs?: number;
+  packages?: number;
+  retainedBlobBytes?: number;
+  /** Largest whole artifact held by JS while staging. The compact warm path
+   * never constructs a closure-sized concatenation. */
+  maxStagedArtifactBytes?: number;
+  jsBatchBytes?: number;
+  compressedRetainedBytes?: number;
+  declaredRawBytes?: number;
+  chunksInflated?: number;
+  rawInflatedBytes?: number;
+  chunkCacheHits?: number;
+  cachedRawBytes?: number;
+  indexedMembers?: number;
+  memberBodyCopies?: number;
+  manifestJsonBytes?: number;
+  manifestParseMs?: number;
 }
 
 // ---- cold-start progress (spec §1 / §11: measure first load) --------------
@@ -68,6 +128,13 @@ export interface ProgressEvent {
   stage:
     | 'wasm'
     | 'manifest'
+    | 'project-cache-hit'
+    | 'project-unpack'
+    | 'project-store'
+    | 'compile'
+    | 'snapshot'
+    | 'site-build'
+    | 'preview-publish'
     | 'resolve'
     | 'bundle-fetch'
     | 'bundle-cache-hit'
@@ -81,9 +148,17 @@ export interface ProgressEvent {
   bytes?: number;
   /** Human message for the status line (kept for back-compat with setStatus). */
   message: string;
-  /** 0..1 overall progress across the eager bundle set, when computable. */
+  /** 0..1 overall progress across a bounded operation, when computable. */
   fraction?: number;
   fromCache?: boolean;
+  /** Stage wall time. Optional because progress-start events have not completed. */
+  durationMs?: number;
+  /** Bytes consumed/produced by this stage, distinct from the transport size. */
+  inputBytes?: number;
+  outputBytes?: number;
+  fileCount?: number;
+  /** Machine-readable substage measurements for benchmark collection. */
+  metrics?: Record<string, number>;
 }
 
 // ---- closed Cycle site-build preview --------------------------------------
@@ -103,6 +178,8 @@ export interface SitePreviewResult {
   /** Asset names -> mime, so the UI can serve them into the iframe on demand. */
   assets: { name: string; mime: string }[];
   buildMs: number;
+  /** True when the verified ClosedSiteBuild came from persistent ContentStore. */
+  fromCache?: boolean;
 }
 
 /** A rendered page's HTML + the assets it may reference (served via blob URLs). */
@@ -110,6 +187,7 @@ export interface RenderPageResult {
   file: string;
   html: string;
   renderMs: number;
+  fromCache?: boolean;
 }
 
 /** Site-content inputs (pagecontent/images/includes), transported as base64 to
@@ -195,14 +273,29 @@ export interface MissingPackage {
   set: 'compile' | 'context';
 }
 
+/** A version-selection input whose answer can change without config changes.
+ * Persistent resolution locks must refresh its candidate universe and ask Rust
+ * to verify the resulting exact closure before compilation. */
+export interface MutableVersionRequest {
+  package_id: string;
+  requested: string;
+  resolved_version: string | null;
+  set: 'compile' | 'context';
+}
+
 /** The engine's `resolve_project` answer (mirrors package_store::ResolutionStep).
  *  The host loop drives resolve → fetch each `missing` → mount → resolve until
  *  `satisfied`. */
 export interface ResolutionStep {
+  resolver_schema: number;
   compile_set: PackageRequestCoord[];
   context_closure: PackageRequestCoord[];
+  /** Package manifests read to prove the closure, including compatibility-
+   * filtered dependencies which are not themselves compile/render inputs. */
+  resolution_support: PackageRequestCoord[];
   missing: MissingPackage[];
   satisfied: boolean;
+  mutable_requests: MutableVersionRequest[];
 }
 
 /** Host-supplied version index for `latest`/`current`/`M.N.x` resolution
@@ -224,6 +317,19 @@ export interface BundleSpec {
   files: Record<string, string>;
 }
 
+export interface PreparedPackagePointer {
+  schema: 2;
+  label: string;
+  transportIdentity: string;
+  cacheKey: string;
+  artifactSha256: string;
+  bytes: number;
+}
+
+export type PackageMountInput =
+  | { kind: 'raw'; spec: BundleSpec; transportIdentity: string }
+  | { kind: 'prepared'; pointer: PreparedPackagePointer };
+
 /** Site-tree file value for `mountSite`: UTF-8 text or base64 bytes. */
 export type SiteTreeFile = string | { b64: string };
 
@@ -238,9 +344,45 @@ export interface StockSiteOptions {
   artifactResolution?: boolean;
 }
 
+/** Opaque, content-derived handle for one frozen stock-template generation.
+ * `siteBuild` is the renderer-neutral predecessor manifest; page renders return
+ * successor manifests and CAS batches without consulting an ambient last site. */
+export interface StockBuildOpenResult {
+  handle: string;
+  buildId: string;
+  siteBuild: unknown;
+  pages: string[];
+  packageStorage?: PackageStorageMetrics;
+}
+
+export interface StockArtifactTransition {
+  /** Typed Need<ArtifactKey> values discovered while Liquid evaluated. */
+  requested: unknown[];
+  /** Requested generated artifacts whose bytes the page actually consumed. */
+  read: unknown[];
+  /** Exact ArtifactRecords installed by the resolution batch. */
+  resolved: unknown[];
+}
+
+export interface StockPageRenderResult {
+  html: string;
+  /** Affine handle for the immutable successor; the predecessor is retired
+   * after a successful transition, so use this for the next lazy page. */
+  handle: string;
+  predecessorBuildId: string;
+  buildId: string;
+  siteBuild: unknown;
+  /** SHA-256 -> base64 bytes newly introduced by this transition. */
+  objects: Record<string, string>;
+  transition: StockArtifactTransition;
+  nonReadyFragments: number;
+  renderMs: number;
+}
+
 export interface EngineOps {
   init: { args: [bundles: BundleSpec[]]; result: InitResult };
   mountBundles: { args: [bundles: BundleSpec[]]; result: MountResult };
+  mountPackages: { args: [packages: PackageMountInput[]]; result: MountResult };
   resolveProject: { args: [config: string, versionIndex?: VersionIndex]; result: ResolutionStep };
   expandValueSet: { args: [valueSetJson: string, resourcesJson: string]; result: ExpandResult };
   compile: {
@@ -261,11 +403,20 @@ export interface EngineOps {
       predefined: Record<string, unknown>,
       siteFiles: Record<string, string>,
       buildEpochSecs: number,
+      /** Exact ProjectRevision + PackageLock digest computed by EngineClient. */
+      projectRevision: string,
+      snapshotSourcesIdentity: string,
     ];
     result: SitePreviewResult;
   };
+  /** Install a previously verified closed Cycle build without snapshot/site
+   * production. A miss is null and has no engine-side mutation. */
+  restoreCycleSite: {
+    args: [projectRevision: string, buildEpochSecs: number, snapshotSourcesIdentity: string];
+    result: SitePreviewResult | null;
+  };
   renderPage: { args: [file: string]; result: RenderPageResult };
-  assetBytes: { args: [name: string]; result: { name: string; mime: string; base64: string } | null };
+  assetBytes: { args: [name: string]; result: { name: string; mime: string; base64: string; fromCache?: boolean } | null };
   // F6 stock-template render surface (engine-side pages/fragments).
   mountSite: { args: [files: Record<string, SiteTreeFile>, options?: StockSiteOptions]; result: { mounted: number } };
   // Live template loader (#40): materialize a template `id#ver` chain from the
@@ -281,6 +432,10 @@ export interface EngineOps {
   // replaces the pre-baked `{id}-stock.json` warm-start bundle: mount resources →
   // mountTemplate → produceStockSite → stage pagecontent → render.
   produceStockSite: { args: []; result: { pages: number; data: number } };
+  // Freeze the final mounted generation as an explicit SiteBuild predecessor,
+  // then render only through immutable successor handles.
+  openStockBuild: { args: [templateCoord: string]; result: StockBuildOpenResult };
+  renderStockPage: { args: [handle: string, name: string]; result: StockPageRenderResult };
   listSitePages: { args: []; result: { pages: string[] } };
   renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
   renderFragment: { args: [ref: string, kind: string]; result: { html: string } };

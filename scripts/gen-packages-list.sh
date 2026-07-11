@@ -60,7 +60,7 @@ HEADER="$(cat <<'EOF'
 #                             the TRANSITIVE context_closure over a CONFIGURED
 #                             tools.r4 dep demands these EXACT pins. Registry-denied
 #                             live envs block without them (baked-seed E2E gate).
-#                             `defer:true` — no cold-start compile needs them; only a
+#                             `loadPhase:on-demand` — no project compile needs them; only a
 #                             user IG that configures tools.r4 as a dep does. Derived,
 #                             not hand-listed: appended from the closure's own
 #                             package.json declared exact-version deps.

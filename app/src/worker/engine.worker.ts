@@ -10,14 +10,17 @@
 // The wasm module is emitted by scripts/build-wasm.sh into app/public/pkg/ and
 // served as a static asset; we import it at runtime via the app base URL.
 declare const __ENGINE_COMMIT__: string;
+declare const __ENGINE_RECIPE__: string;
+declare const __CYCLE_RENDER_RECIPE__: string;
 
-import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, SiteTreeFile, StockSiteOptions } from './protocol';
+import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, PackageMountInput, PreparedMountMetrics, SiteTreeFile, StockSiteOptions } from './protocol';
 import { ClosedBuildHandle } from '@cycle/core/closed-build';
 import type { CycleSiteBuildPayload } from '@cycle/core/json-site-build';
 import { openCycleSiteBuildPayload } from '@cycle/core/open-site-build';
 import type { PortableCycleSiteBuildView } from '@cycle/core/open-site-build';
 import type { CyclePreviewRenderer } from '../preview/render';
 import { MountedLabels } from './mountedLabels';
+import { cycleBuildRecipe, cycleOutputRecipe } from './cycleCacheIdentity';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -27,6 +30,14 @@ const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 interface WasmSession {
   init(bundlesJson: string): string;
   mount(bundlesJson: string): string;
+  mountPreparedBatch(bytes: Uint8Array, manifestJson: string): string;
+  beginPreparedMount(expectedPackages: number): string;
+  stagePreparedMount(bytes: Uint8Array, expectedKey: string): string;
+  commitPreparedMount(): string;
+  abortPreparedMount(): string;
+  packageStorageMetrics(): string;
+  prepareAndMount(bundlesJson: string): string;
+  takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
   compile(filesJson: string, config: string, predefinedJson: string): string;
   compileProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string): string;
@@ -39,6 +50,8 @@ interface WasmSession {
   mountSite(filesJson: string, optionsJson: string): string;
   mountTemplate(coord: string): string;
   produceStockSite(): string;
+  openStockBuild(templateCoord: string): string;
+  renderStockPage(handle: string, name: string): string;
   renderLiquid(source: string, dataJson: string): string;
   renderMarkdown(md: string, optsJson: string): string;
   listPages(): string;
@@ -56,7 +69,10 @@ let wasmMod: WasmModule | null = null;
 
 async function ensureSession(): Promise<WasmSession> {
   if (session) return session;
-  const v = encodeURIComponent(__ENGINE_COMMIT__);
+  // Runtime bytes are keyed by their exact emitted digest. The source commit is
+  // retained for release diagnostics, but cannot distinguish dirty/same-commit
+  // rebuilds and therefore must not authorize HTTP-cache reuse.
+  const v = encodeURIComponent(__ENGINE_RECIPE__);
   const mod = (await import(/* @vite-ignore */ `${BASE}pkg/wasm_api.js?v=${v}`)) as WasmModule;
   await mod.default(`${BASE}pkg/wasm_api_bg.wasm?v=${v}`);
   wasmMod = mod;
@@ -87,9 +103,30 @@ interface CycleBuildRuntime {
   build: ClosedBuildHandle;
   view: PortableCycleSiteBuildView;
   renderer: CyclePreviewRenderer;
+  buildId: string;
 }
 
 let cycleBuild: CycleBuildRuntime | null = null;
+
+const CYCLE_BUILD_CACHE = 'cycle-closed-build';
+const CYCLE_OUTPUT_CACHE = 'cycle-site-output';
+const JSON_MEDIA = 'application/vnd.fhir.site-build+json';
+
+async function installCycleBuild(
+  handoff: CycleSiteBuildPayload,
+  started: number,
+  fromCache: boolean,
+): Promise<EngineOps['buildSite']['result']> {
+  const { build, view } = await openCycleSiteBuildPayload(handoff);
+  const render = await import('../preview/render');
+  const renderer = render.createCycleRenderer(view);
+  const pages = renderer.listPages();
+  renderer.listOutputs();
+  const assets = view.assets().map((asset) => ({ name: asset.Name, mime: asset.Mime }));
+  const buildId = build.manifest.buildId;
+  cycleBuild = { build, view, renderer, buildId };
+  return { buildId, pages, assets, buildMs: performance.now() - started, fromCache };
+}
 
 function base64(bytes: Uint8Array): string {
   let bin = '';
@@ -108,10 +145,16 @@ const handlers: Handlers = {
   async init(bundles: BundleSpec[]) {
     const s = await ensureSession();
     const t0 = performance.now();
-    const { mounted } = unwrap<{ mounted: number }>(s.init(JSON.stringify(bundles)));
+    const serializeStarted = performance.now();
+    const input = JSON.stringify(bundles);
+    const inputBytes = new TextEncoder().encode(input).byteLength;
+    const serializeMs = performance.now() - serializeStarted;
+    const wasmStarted = performance.now();
+    const { mounted } = unwrap<{ mounted: number }>(s.init(input));
+    const wasmMs = performance.now() - wasmStarted;
     mountedLabels.replace(bundles.map((bundle) => bundle.label));
     const version = JSON.parse(wasmMod!.Session.version());
-    return { mounted, version, initMs: performance.now() - t0 };
+    return { mounted, version, initMs: performance.now() - t0, serializeMs, wasmMs, inputBytes };
   },
 
   /** Incrementally mount additional bundles (lazy per-bundle loading, spec §1).
@@ -120,12 +163,202 @@ const handlers: Handlers = {
     const s = await ensureSession();
     const t0 = performance.now();
     const fresh: BundleSpec[] = mountedLabels.fresh(bundles);
-    const mounted =
-      fresh.length > 0
-        ? unwrap<{ mounted: number }>(s.mount(JSON.stringify(fresh))).mounted
-        : mountedLabels.size;
+    const serializeStarted = performance.now();
+    const input = fresh.length > 0 ? JSON.stringify(fresh) : '[]';
+    const inputBytes = new TextEncoder().encode(input).byteLength;
+    const serializeMs = performance.now() - serializeStarted;
+    const wasmStarted = performance.now();
+    const mounted = fresh.length > 0
+      ? unwrap<{ mounted: number }>(s.mount(input)).mounted
+      : mountedLabels.size;
+    const wasmMs = performance.now() - wasmStarted;
     mountedLabels.add(fresh);
-    return { mounted, newlyMounted: fresh.map((b) => b.label), mountMs: performance.now() - t0 };
+    return {
+      mounted,
+      newlyMounted: fresh.map((b) => b.label),
+      mountMs: performance.now() - t0,
+      serializeMs,
+      wasmMs,
+      inputBytes,
+    };
+  },
+
+  /** Preferred package seam. Warm compact `.fpp` artifacts are authenticated in
+   * OPFS, staged into WASM one at a time, and committed together. A cold raw batch
+   * is normalized/mounted once and publishes the resulting artifacts. */
+  async mountPackages(packages: PackageMountInput[]) {
+    const s = await ensureSession();
+    const t0 = performance.now();
+    const fresh = mountedLabels.fresh(packages.map((item) => ({
+      label: item.kind === 'raw' ? item.spec.label : item.pointer.label,
+      item,
+    })));
+    if (fresh.length === 0) {
+      return { mounted: mountedLabels.size, newlyMounted: [], mountMs: 0, serializeMs: 0, wasmMs: 0, inputBytes: 0 };
+    }
+    const inputs = fresh.map(({ item }) => item);
+    const raw = inputs.filter((item): item is Extract<PackageMountInput, { kind: 'raw' }> => item.kind === 'raw');
+    const prepared = inputs.filter((item): item is Extract<PackageMountInput, { kind: 'prepared' }> => item.kind === 'prepared');
+    if (raw.length > 0 && prepared.length > 0) {
+      throw new Error('mountPackages requires an all-raw or all-prepared transaction');
+    }
+
+    let serializeMs = 0;
+    let wasmMs = 0;
+    let inputBytes = 0;
+    let mounted = mountedLabels.size;
+    let preparedMetrics: PreparedMountMetrics | undefined;
+    let packageIdentities: Array<{ label: string; cacheKey: string }> = [];
+    const preparedStored: string[] = [];
+    if (prepared.length > 0) {
+      const cache = await import('./preparedPackageCache');
+      const wasmStarted = performance.now();
+      let committed = false;
+      let maxStagedArtifactBytes = 0;
+      unwrap(s.beginPreparedMount(prepared.length));
+      let result: {
+        mounted: number;
+        added: number;
+        packages: number;
+        manifestJsonBytes: number;
+        artifactBytes: number;
+        retainedBlobBytes: number;
+        indexedMembers: number;
+        memberBodyCopies: number;
+        manifestParseMs: number;
+        decodeValidateMs: number;
+        mountMs: number;
+        compressedRetainedBytes: number;
+        declaredRawBytes: number;
+        chunksInflated: number;
+        rawInflatedBytes: number;
+        cacheHits: number;
+        cachedRawBytes: number;
+      };
+      try {
+        // Read, authenticate, transfer, and release one compact artifact at a
+        // time. Rust retains staged packages but mutates no mounted state until
+        // the final commit succeeds.
+        for (const { pointer } of prepared) {
+          const artifact = await cache.readPreparedPackage(pointer);
+          if (!artifact) throw new Error(`prepared-package cache miss: ${pointer.label}`);
+          inputBytes += artifact.byteLength;
+          maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, artifact.byteLength);
+          unwrap(s.stagePreparedMount(new Uint8Array(artifact), pointer.cacheKey));
+        }
+        result = unwrap(s.commitPreparedMount());
+        committed = true;
+      } finally {
+        if (!committed) {
+          try { unwrap(s.abortPreparedMount()); } catch { /* preserve the original cache/decode error */ }
+        }
+      }
+      inputBytes = result.artifactBytes + result.manifestJsonBytes;
+      wasmMs = performance.now() - wasmStarted;
+      mounted = result.mounted;
+      preparedMetrics = {
+        mode: 'warm-binary',
+        added: result.added,
+        packages: result.packages,
+        manifestJsonBytes: result.manifestJsonBytes,
+        artifactBytes: result.artifactBytes,
+        retainedBlobBytes: result.retainedBlobBytes,
+        maxStagedArtifactBytes,
+        jsBatchBytes: 0,
+        compressedRetainedBytes: result.compressedRetainedBytes,
+        declaredRawBytes: result.declaredRawBytes,
+        chunksInflated: result.chunksInflated,
+        rawInflatedBytes: result.rawInflatedBytes,
+        chunkCacheHits: result.cacheHits,
+        cachedRawBytes: result.cachedRawBytes,
+        indexedMembers: result.indexedMembers,
+        memberBodyCopies: result.memberBodyCopies,
+        manifestParseMs: result.manifestParseMs,
+        decodeValidateMs: result.decodeValidateMs,
+        engineMountMs: result.mountMs,
+      };
+      packageIdentities = prepared.map(({ pointer }) => ({
+        label: pointer.label,
+        cacheKey: pointer.cacheKey,
+      }));
+    } else {
+      const serializeStarted = performance.now();
+      const input = JSON.stringify(raw.map(({ spec }) => spec));
+      serializeMs = performance.now() - serializeStarted;
+      const wasmStarted = performance.now();
+      const result = unwrap<{
+        mounted: number;
+        added: number;
+        artifacts: Array<{ label: string; cacheKey: string; artifactSha256: string; bytes: number }>;
+        artifactBytes: number;
+        preparedMembers: number;
+        inputJsonBytes: number;
+        base64Bytes: number;
+        decodedSourceBytes: number;
+        normalizedBytes: number;
+        mountMemberBodyCopies: number;
+        decodeValidatePrepareMs: number;
+        jsonParseMs: number;
+        base64DecodeMs: number;
+        normalizationMs: number;
+        indexingMs: number;
+        artifactEncodeMs: number;
+        mountMs: number;
+      }>(s.prepareAndMount(input));
+      inputBytes = result.inputJsonBytes;
+      wasmMs = performance.now() - wasmStarted;
+      mounted = result.mounted;
+      preparedMetrics = {
+        mode: 'cold-prepare',
+        added: result.added,
+        artifactBytes: result.artifactBytes,
+        preparedMembers: result.preparedMembers,
+        inputJsonBytes: result.inputJsonBytes,
+        base64Bytes: result.base64Bytes,
+        decodedSourceBytes: result.decodedSourceBytes,
+        normalizedBytes: result.normalizedBytes,
+        mountMemberBodyCopies: result.mountMemberBodyCopies,
+        decodeValidatePrepareMs: result.decodeValidatePrepareMs,
+        jsonParseMs: result.jsonParseMs,
+        base64DecodeMs: result.base64DecodeMs,
+        normalizationMs: result.normalizationMs,
+        indexingMs: result.indexingMs,
+        artifactEncodeMs: result.artifactEncodeMs,
+        engineMountMs: result.mountMs,
+      };
+      packageIdentities = result.artifacts.map(({ label, cacheKey }) => ({ label, cacheKey }));
+      const cache = await import('./preparedPackageCache');
+      const transportByLabel = new Map(raw.map(({ spec, transportIdentity }) => [spec.label, transportIdentity]));
+      for (const artifact of result.artifacts) {
+        // Always drain the Rust export, even if OPFS is unavailable; exports are
+        // deliberately one-shot and should not retain duplicate package bytes.
+        const bytes = s.takePrepared(artifact.label);
+        const transportIdentity = transportByLabel.get(artifact.label);
+        if (!transportIdentity) throw new Error(`missing transport identity for ${artifact.label}`);
+        const stored = await cache.writePreparedPackage({
+          schema: 2,
+          label: artifact.label,
+          transportIdentity,
+          cacheKey: artifact.cacheKey,
+          artifactSha256: artifact.artifactSha256,
+          bytes: artifact.bytes,
+        }, bytes).catch(() => false);
+        if (stored) preparedStored.push(artifact.label);
+      }
+    }
+    const committed = fresh.map(({ label }) => ({ label }));
+    mountedLabels.add(committed);
+    return {
+      mounted,
+      newlyMounted: committed.map(({ label }) => label),
+      mountMs: performance.now() - t0,
+      serializeMs,
+      wasmMs,
+      inputBytes,
+      preparedStored,
+      preparedMetrics,
+      packageIdentities,
+    };
   },
 
   /** Resolve a project's package sets against the CURRENTLY MOUNTED bundles
@@ -173,7 +406,8 @@ const handlers: Handlers = {
       ),
     );
     const buildMs = performance.now() - t0;
-    return { ...out, buildMs, fileCount: Object.keys(files).length } as EngineOps['compile']['result'];
+    const packageStorage = unwrap(s.packageStorageMetrics());
+    return { ...out, buildMs, fileCount: Object.keys(files).length, packageStorage } as EngineOps['compile']['result'];
   },
 
   async snapshot(url) {
@@ -185,7 +419,7 @@ const handlers: Handlers = {
 
   // ---- closed Cycle external-builder path ----
 
-  async buildSite(config, files, predefined, siteFiles, buildEpochSecs) {
+  async buildSite(config, files, predefined, siteFiles, buildEpochSecs, projectRevision, snapshotSourcesIdentity) {
     const s = await ensureSession();
     const t0 = performance.now();
     const input = {
@@ -200,39 +434,79 @@ const handlers: Handlers = {
     // revision. FSH/predefined bodies are equality assertions at the Rust trust
     // boundary, never inputs to a second compile.
     const handoff = unwrap<CycleSiteBuildPayload>(s.buildSiteBuildFromCompile(JSON.stringify(input)));
-    const { build, view } = await openCycleSiteBuildPayload(handoff);
-    // Enumerate pages (needs the render module; imported lazily so the wasm-only
-    // paths don't pull React into their critical path).
-    const render = await import('../preview/render');
-    // One renderer instance owns this immutable row revision and Cycle's shared
-    // closed content policy; no active store, Rust ContentApi, or compiler
-    // callback participates.
-    const renderer = render.createCycleRenderer(view);
-    const pages = renderer.listPages();
-    // Validate the complete page/auxiliary/row-asset namespace before installing
-    // the runtime. A collision is a build failure, never a request-time surprise.
-    renderer.listOutputs();
-    const assets = view.assets().map((asset) => ({ name: asset.Name, mime: asset.Mime }));
-    const runtime: CycleBuildRuntime = { build, view, renderer };
-    cycleBuild = runtime;
-    return { buildId: runtime.build.manifest.buildId, pages, assets, buildMs: performance.now() - t0 };
+    // Install/verify before publishing the pointer. A semantically invalid
+    // payload can therefore never become a persistent fast-path hit.
+    const result = await installCycleBuild(handoff, t0, false);
+    const cache = await import('../storage/derivedArtifactCache');
+    const bytes = new TextEncoder().encode(JSON.stringify(handoff));
+    await cache.writeDerivedArtifact(
+      CYCLE_BUILD_CACHE,
+      cycleBuildRecipe(projectRevision, buildEpochSecs, __ENGINE_COMMIT__, __ENGINE_RECIPE__, snapshotSourcesIdentity),
+      bytes,
+      JSON_MEDIA,
+    ).catch(() => null);
+    return result;
+  },
+
+  async restoreCycleSite(projectRevision, buildEpochSecs, snapshotSourcesIdentity) {
+    const t0 = performance.now();
+    const cache = await import('../storage/derivedArtifactCache');
+    const cached = await cache.readDerivedArtifact(
+      CYCLE_BUILD_CACHE,
+      cycleBuildRecipe(projectRevision, buildEpochSecs, __ENGINE_COMMIT__, __ENGINE_RECIPE__, snapshotSourcesIdentity),
+      JSON_MEDIA,
+    );
+    if (!cached) return null;
+    try {
+      const handoff = JSON.parse(new TextDecoder().decode(cached.bytes)) as CycleSiteBuildPayload;
+      return await installCycleBuild(handoff, t0, true);
+    } catch {
+      // The ContentStore object is authentic but no longer semantically usable.
+      // Recipe versioning normally prevents this; treat it as a miss, never as
+      // authority or a reason to skip normal site production.
+      return null;
+    }
   },
 
   async renderPage(file) {
     if (!cycleBuild) throw new Error('renderPage before buildSite');
     const t0 = performance.now();
+    const cache = await import('../storage/derivedArtifactCache');
+    const recipe = cycleOutputRecipe(cycleBuild.buildId, 'page', file, __CYCLE_RENDER_RECIPE__);
+    const cached = await cache.readDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe, 'text/html');
+    if (cached) {
+      return { file, html: new TextDecoder().decode(cached.bytes), renderMs: performance.now() - t0, fromCache: true };
+    }
     const { html } = cycleBuild.renderer.renderPage(file);
-    return { file, html, renderMs: performance.now() - t0 };
+    await cache.writeDerivedArtifact(
+      CYCLE_OUTPUT_CACHE,
+      recipe,
+      new TextEncoder().encode(html),
+      'text/html',
+    ).catch(() => null);
+    return { file, html, renderMs: performance.now() - t0, fromCache: false };
   },
 
   async assetBytes(name) {
     if (!cycleBuild) return null;
     try {
+      const cache = await import('../storage/derivedArtifactCache');
+      const recipe = cycleOutputRecipe(cycleBuild.buildId, 'asset', name, __CYCLE_RENDER_RECIPE__);
+      const cached = await cache.readDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe);
+      if (cached?.content.mediaType) {
+        return {
+          name,
+          mime: cached.content.mediaType,
+          base64: base64(new Uint8Array(cached.bytes)),
+          fromCache: true,
+        };
+      }
       const output = cycleBuild.renderer.renderOutput(name);
       const bytes = typeof output.content === 'string'
         ? new TextEncoder().encode(output.content)
         : output.content;
-      return { name: output.file, mime: output.mime, base64: base64(bytes) };
+      await cache.writeDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe, bytes, output.mime).catch(() => null);
+      return { name: output.file, mime: output.mime, base64: base64(bytes), fromCache: false };
     } catch {
       return null;
     }
@@ -262,6 +536,21 @@ const handlers: Handlers = {
   async produceStockSite() {
     const s = await ensureSession();
     return unwrap<{ pages: number; data: number }>(s.produceStockSite());
+  },
+
+  async openStockBuild(templateCoord) {
+    const s = await ensureSession();
+    const result = unwrap<EngineOps['openStockBuild']['result']>(s.openStockBuild(templateCoord));
+    return { ...result, packageStorage: unwrap(s.packageStorageMetrics()) };
+  },
+
+  async renderStockPage(handle, name) {
+    const s = await ensureSession();
+    const t0 = performance.now();
+    const result = unwrap<Omit<EngineOps['renderStockPage']['result'], 'renderMs'>>(
+      s.renderStockPage(handle, name),
+    );
+    return { ...result, renderMs: performance.now() - t0 };
   },
 
   async listSitePages() {

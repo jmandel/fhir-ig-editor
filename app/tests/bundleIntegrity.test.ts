@@ -22,18 +22,22 @@ describe('baked package transport integrity', () => {
         tgz: 'example.pkg#1.0.0.tgz',
         sha256: ABC_SHA256,
         bytes: 3,
-        defer: true,
+        loadPhase: 'snapshot',
       }],
     });
     expect(parsed.bundles[0].sha256).toBe(ABC_SHA256);
+    expect(parsed.bundles[0].loadPhase).toBe('snapshot');
 
     expect(() => parseBakedBundleManifest({
       bundles: [{ label: 'example.pkg#1.0.0', tgz: 'x.tgz' }],
     })).toThrow('valid lowercase SHA-256');
     expect(() => parseBakedBundleManifest({
+      bundles: [{ label: 'example.pkg#1.0.0', tgz: 'x.tgz', sha256: ABC_SHA256, loadPhase: 'later' }],
+    })).toThrow('invalid loadPhase');
+    expect(() => parseBakedBundleManifest({
       bundles: [
-        { label: 'example.pkg#1.0.0', tgz: 'a.tgz', sha256: ABC_SHA256 },
-        { label: 'example.pkg#1.0.0', tgz: 'b.tgz', sha256: ABC_SHA256 },
+        { label: 'example.pkg#1.0.0', tgz: 'a.tgz', sha256: ABC_SHA256, loadPhase: 'compile' },
+        { label: 'example.pkg#1.0.0', tgz: 'b.tgz', sha256: ABC_SHA256, loadPhase: 'compile' },
       ],
     })).toThrow('duplicate label');
   });
@@ -59,6 +63,7 @@ describe('baked package transport integrity', () => {
       label: 'example.pkg#1.0.0',
       tgz: 'example.pkg#1.0.0.tgz',
       sha256: ABC_SHA256,
+      loadPhase: 'compile' as const,
     };
     await expect(obtainAndMountPackage({
       resolveStep: async () => { throw new Error('unused'); },

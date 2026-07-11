@@ -1,8 +1,8 @@
 // SiteGeneratorAdapter is the editor's host-integration seam. It coordinates a
 // selected generator with preview publication; it is not the semantic handoff.
-// Cycle receives a verified ClosedSiteBuild in the worker, while the stock
-// adapter drives the native Rust render surface over the already compiled
-// project revision.
+// Cycle receives a verified ClosedSiteBuild in the worker. The stock adapter
+// freezes the native Rust surface behind an explicit SiteBuild predecessor and
+// advances through closed successor handles as Liquid discovers fragments.
 
 import type { EngineClient } from '../worker/client';
 import type { PagePreviewDescriptor } from '../worker/protocol';

@@ -1,4 +1,6 @@
-// OPFS-backed cache of INFLATED package bundles (spec §1: warm start).
+// Legacy OPFS cache of INFLATED package bundles. New writes use the binary
+// PreparedPackage ContentStore; this reader exists only to migrate existing v3
+// profiles once, after which `deleteCachedBundle` removes the base64 envelope.
 //
 // Every v3 data entry is keyed by label + content identity. For baked bundles
 // that identity is the SHA-256 of the compressed `.tgz` declared by the app's
@@ -22,6 +24,19 @@ interface CachedBundleEnvelope {
   cacheVersion: typeof CACHE_VERSION;
   identity: string;
   spec: BundleSpec;
+}
+
+export interface BundleCacheReadMetrics {
+  storedBytes: number;
+  opfsReadMs: number;
+  jsonParseMs: number;
+  validationMs: number;
+  totalMs: number;
+}
+
+export interface MeasuredBundleCacheRead {
+  spec: BundleSpec;
+  metrics: BundleCacheReadMetrics;
 }
 
 function safeLabel(label: string): string {
@@ -93,6 +108,16 @@ export async function readCachedBundle(
   label: string,
   compressedSha256?: string,
 ): Promise<BundleSpec | null> {
+  return (await readCachedBundleMeasured(label, compressedSha256))?.spec ?? null;
+}
+
+/** Warm-cache read with timings kept separate so benchmarks can distinguish
+ * OPFS I/O from UTF-16 JSON materialization and full-map validation. */
+export async function readCachedBundleMeasured(
+  label: string,
+  compressedSha256?: string,
+): Promise<MeasuredBundleCacheRead | null> {
+  const started = performance.now();
   const directory = await dir();
   if (!directory) return null;
   const identity = compressedSha256
@@ -101,7 +126,13 @@ export async function readCachedBundle(
   if (!identity) return null;
   try {
     const handle = await directory.getFileHandle(bundleCacheKey(label, identity));
-    const envelope = JSON.parse(await (await handle.getFile()).text()) as Partial<CachedBundleEnvelope>;
+    const readStarted = performance.now();
+    const text = await (await handle.getFile()).text();
+    const opfsReadMs = performance.now() - readStarted;
+    const parseStarted = performance.now();
+    const envelope = JSON.parse(text) as Partial<CachedBundleEnvelope>;
+    const jsonParseMs = performance.now() - parseStarted;
+    const validationStarted = performance.now();
     if (
       envelope.cacheVersion !== CACHE_VERSION
       || envelope.identity !== identity
@@ -109,35 +140,19 @@ export async function readCachedBundle(
     ) {
       return null;
     }
-    return envelope.spec;
+    const validationMs = performance.now() - validationStarted;
+    return {
+      spec: envelope.spec,
+      metrics: {
+        storedBytes: text.length,
+        opfsReadMs,
+        jsonParseMs,
+        validationMs,
+        totalMs: performance.now() - started,
+      },
+    };
   } catch {
     return null;
-  }
-}
-
-/** Persist an inflated map. A baked digest writes a pinned entry with no
- * unpinned pointer; registry results receive an inflated-content identity. */
-export async function writeCachedBundle(spec: BundleSpec, compressedSha256?: string): Promise<void> {
-  const directory = await dir();
-  if (!directory) return;
-  try {
-    const identity = compressedSha256
-      ? pinnedBundleCacheIdentity(compressedSha256)
-      : await contentBundleCacheIdentity(spec);
-    const envelope: CachedBundleEnvelope = { cacheVersion: CACHE_VERSION, identity, spec };
-    const handle = await directory.getFileHandle(bundleCacheKey(spec.label, identity), { create: true });
-    let writable = await handle.createWritable();
-    await writable.write(JSON.stringify(envelope));
-    await writable.close();
-
-    if (!compressedSha256) {
-      const pointer = await directory.getFileHandle(pointerKey(spec.label), { create: true });
-      writable = await pointer.createWritable();
-      await writable.write(JSON.stringify({ cacheVersion: CACHE_VERSION, identity }));
-      await writable.close();
-    }
-  } catch {
-    /* best-effort cache; a write failure just means the next start is cold */
   }
 }
 
@@ -155,4 +170,17 @@ export async function hasCachedBundle(label: string, compressedSha256?: string):
   } catch {
     return false;
   }
+}
+
+/** Remove a legacy inflated/base64 entry after the Worker has durably published
+ * the equivalent PreparedPackage. PreparedPackage becomes the sole warm form. */
+export async function deleteCachedBundle(label: string, compressedSha256?: string): Promise<void> {
+  const directory = await dir();
+  if (!directory) return;
+  const identity = compressedSha256
+    ? pinnedBundleCacheIdentity(compressedSha256)
+    : await readPointer(directory, label);
+  if (!identity) return;
+  await directory.removeEntry(bundleCacheKey(label, identity)).catch(() => {});
+  if (!compressedSha256) await directory.removeEntry(pointerKey(label)).catch(() => {});
 }

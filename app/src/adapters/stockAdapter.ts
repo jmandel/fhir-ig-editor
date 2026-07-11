@@ -79,23 +79,6 @@ function classify(name: string): PageInfo['kind'] {
   return 'narrative';
 }
 
-/** The fragment kind whose materialization proves a page's body content is
- *  present — probed for the fragment-gap notice when the rendered HTML carries
- *  no hierarchy table (the source-driven adapter has no page source to scan, so
- *  it probes the page's primary content fragment by kind). */
-function probeKindFor(kind: PageInfo['kind']): string | null {
-  switch (kind) {
-    case 'profile':
-      return 'snapshot';
-    case 'valueset':
-      return 'expansion';
-    case 'codesystem':
-      return 'content';
-    default:
-      return null; // narrative/example/artifacts carry no own-resource content fragment
-  }
-}
-
 class StockTemplateAdapter implements SiteGeneratorAdapter {
   // The registry key / selector value the App + E2E gate reference. ONE adapter
   // instance drives every template#version (the coord is state, not the id).
@@ -117,6 +100,13 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
    *  shells (the producer emits the template's staging prefix). */
   private pagePrefix = '';
   private pages: PageInfo[] = [];
+  /** Content-derived handle for the frozen stock generation. Page rendering
+   * advances through immutable SiteBuild successors; it never addresses the
+   * mutable Session site tree after init completes. */
+  private stockBuildHandle: string | null = null;
+  /** Successor handles are affine. Serialize iframe/new-window requests so
+   * concurrent preview fetches cannot both try to advance the same handle. */
+  private renderTail: Promise<void> = Promise.resolve();
   /** Explicit union of Publisher runtime, template, and authored IG assets.
    *  Entries retain producer/package/license provenance and deterministic
    *  precedence; the SW receives the catalog's public-path projection. */
@@ -128,6 +118,7 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     if (coord === this.templateCoord) return;
     this.templateCoord = coord;
     this.mountedFor = null; // force a full rebuild under the new template
+    this.stockBuildHandle = null;
   }
 
   /** Mount the template#version's tree (config.json + layouts + _includes +
@@ -241,7 +232,12 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     }
     this.mountedFor = key;
 
-    const { pages } = await engine.listSitePages();
+    // Freeze the completed generation only after every template, producer, and
+    // authored overlay is present. Later session mutation cannot alter pages
+    // rendered through this handle.
+    await this.renderTail;
+    const { handle, pages } = await engine.openStockBuild(this.templateCoord);
+    this.stockBuildHandle = handle;
     const prefix = this.pagePrefix;
     this.pages = pages
       .filter((p) => (prefix ? p.startsWith(prefix) : !p.includes('/')))
@@ -256,8 +252,16 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
   }
 
   async renderPage(file: string): Promise<{ html: string; renderMs?: number }> {
+    const task = this.renderTail.then(() => this.renderPageSerial(file));
+    this.renderTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private async renderPageSerial(file: string): Promise<{ html: string; renderMs?: number }> {
     if (!this.engine) throw new Error('stock adapter not initialized');
-    const out = await this.engine.renderSitePage(file);
+    if (!this.stockBuildHandle) throw new Error('stock SiteBuild is not open');
+    const out = await this.engine.renderStockPage(this.stockBuildHandle, file);
+    this.stockBuildHandle = out.handle;
     // HierarchicalTableGenerator discovers background names while rendering.
     // Preserve fixed core-package PNGs, and explicitly materialize any novel
     // indent combination inline so the pre-provisioned asset set stays closed.
@@ -266,41 +270,16 @@ class StockTemplateAdapter implements SiteGeneratorAdapter {
     // inserts a separately provisioned shim between the untouched jQuery and
     // jQuery UI assets only for their known-incompatible historical pairing.
     out.html = await injectJqueryPreviewCompatibility(out.html, this.assets);
-    // Fragment-gap UX: page BODIES are fragments materialized from the CURRENT
-    // compile (snapshot/diff/binding tables from compiled SDs). When the compile
-    // is incomplete — packages still loading, or blocked on a denied network —
-    // those fragments can't materialize; the publisher's include mechanism emits
-    // NOTHING for a miss, so the page renders title-only with a SILENTLY empty
-    // body. Surface it: probe this page's own-resource content fragment and, if
-    // the engine can't produce it, prepend a small visible inline notice.
-    try {
-      const gaps = await this.countFragmentGaps(file, out.html);
-      if (gaps > 0) return { html: gapNoticeHtml(gaps) + out.html, renderMs: out.renderMs };
-    } catch {
-      /* gap-probe is best-effort UX; never fail a render over it */
+    // Failed/deferred fragment needs are reported by the same typed discovery
+    // batch that produced this page. There is no second ambient fragment probe.
+    // A rendered hierarchy proves the profile body materialized; Publisher
+    // layouts also try optional fragments (history, mappings, etc.) whose typed
+    // non-ready records must not turn an otherwise complete page into a warning.
+    const bodyGaps = /class="?hierarchy"?/.test(out.html) ? 0 : out.nonReadyFragments;
+    if (bodyGaps > 0) {
+      return { html: gapNoticeHtml(bodyGaps) + out.html, renderMs: out.renderMs };
     }
     return out;
-  }
-
-  /** Whether this page's primary content fragment fails to materialize now.
-   *  Fast path: a materialized snapshot/diff table (HierarchicalTableGenerator)
-   *  means the compile fed this page — no gap. Otherwise probe the page's
-   *  own-resource content fragment (derived from the page filename + kind, since
-   *  the source-driven adapter has no page source to scan); a GAP throws. */
-  private async countFragmentGaps(file: string, renderedHtml: string): Promise<number> {
-    const engine = this.engine;
-    if (!engine) return 0;
-    if (/class="?hierarchy"?/.test(renderedHtml)) return 0;
-    const name = file.slice(file.lastIndexOf('/') + 1);
-    const kind = probeKindFor(classify(name));
-    if (!kind) return 0;
-    const ref = name.replace(/\.html$/, ''); // "StructureDefinition-us-core-patient"
-    try {
-      await engine.renderFragment(ref, kind);
-      return 0;
-    } catch {
-      return 1; // FragError::Gap / NoSuchResource — the fragment can't render now
-    }
   }
 
   /** Serve assets the rendered HTML references by name (template css/js/images +

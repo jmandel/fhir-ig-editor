@@ -61,6 +61,14 @@ function captureProject(st: ProjectStore, projectId: string): ProjectBuildSnapsh
   };
 }
 
+/** Machine-readable trace consumed by the persistent-profile benchmark. */
+function recordRuntimeMetric(event: ProgressEvent): void {
+  const debug = (window as unknown as {
+    __igDebug?: { metrics?: Array<{ at: number; event: ProgressEvent }> };
+  }).__igDebug;
+  debug?.metrics?.push({ at: performance.now(), event });
+}
+
 export function App() {
   const engineRef = useRef<EngineClient | null>(null);
   // The wasm renderer still exposes a mutable site tree. Serialize every compile
@@ -153,7 +161,7 @@ export function App() {
       engineRef.current = engine;
       // Debug/verification hook: the e2e + fidelity harnesses drive the engine
       // directly (render every page, hash outputs) without UI scraping.
-      (window as unknown as { __igDebug?: unknown }).__igDebug = { engine };
+      (window as unknown as { __igDebug?: unknown }).__igDebug = { engine, metrics: [] };
       // Preview-window (task #37): register the SW + render responder early so an
       // "Open site in new window" tab can be answered as soon as it exists.
       wirePreviewResponder();
@@ -168,6 +176,7 @@ export function App() {
       setPaths(st.list());
 
       const res = await engine.init((ev) => {
+        recordRuntimeMetric(ev);
         setProgress(ev);
         setStatus(ev.message);
       });
@@ -175,7 +184,9 @@ export function App() {
       setVersion(res.version);
       setInitMs(res.initMs);
       setEngineReady(true);
-      setProgress({ stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` });
+      const readyEvent: ProgressEvent = { stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` };
+      recordRuntimeMetric(readyEvent);
+      setProgress(readyEvent);
       setStatus(`Engine ready — mounted ${res.mounted} packages.`);
 
       // If OPFS already has a project (reload), compile it immediately.
@@ -232,6 +243,12 @@ export function App() {
     selectedTemplate: string,
     lease: TaskLease,
   ) => {
+    const report = (ev: ProgressEvent) => {
+      if (!lease.isLatest()) return;
+      recordRuntimeMetric(ev);
+      setProgress(ev);
+      setStatus(ev.message);
+    };
     if (lease.isLatest()) {
       setSiteBuilding(true);
       setSiteError(null);
@@ -249,17 +266,14 @@ export function App() {
       if (!lease.isLatest()) return;
       const adapter = getSiteGenerator(genId);
       if (!adapter) throw new Error(`no site generator '${genId}'`);
+      report({ stage: 'site-build', message: `Building ${genId} site…` });
+      const siteStarted = performance.now();
       // Live template loader (#40): tell the stock adapter which template#version
       // to materialize BEFORE init. Surface the template fetch/materialize stages
       // (chain fetch, mountTemplate) through the shared progress → status line.
       if (genId === 'hl7.fhir.template') {
         stockAdapter.setTemplate(selectedTemplate);
-        engine.setProgress((ev) => {
-          if (lease.isLatest()) {
-            setProgress(ev);
-            setStatus(ev.message);
-          }
-        });
+        engine.setProgress(report);
       }
       await adapter.init({
         engine,
@@ -273,6 +287,12 @@ export function App() {
         },
       });
       const pages = await adapter.listPages();
+      report({
+        stage: 'site-build',
+        message: `Built ${pages.length} site pages.`,
+        durationMs: performance.now() - siteStarted,
+        fileCount: pages.length,
+      });
       if (!lease.isLatest()) return;
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
@@ -281,6 +301,8 @@ export function App() {
         setTemplateError(null);
       }
       const nextGeneration = siteGenerationRef.current + 1;
+      report({ stage: 'preview-publish', message: 'Publishing preview generation…' });
+      const publishStarted = performance.now();
       const published = await publishPreviewSource(
         {
           igId: project.projectId,
@@ -291,6 +313,12 @@ export function App() {
         () => lease.isLatest(),
       );
       if (!published || !lease.isLatest()) return;
+      report({
+        stage: 'preview-publish',
+        message: `Published preview generation ${nextGeneration}.`,
+        durationMs: performance.now() - publishStarted,
+        fileCount: pages.length,
+      });
       // Publish React state only after the SW has acknowledged the matching asset
       // manifest + generation pointer.
       siteGenerationRef.current = nextGeneration;
@@ -374,6 +402,7 @@ export function App() {
         if (cfg !== acquiredConfigRef.current) {
           engine.setProgress((ev) => {
             if (lease.isLatest()) {
+              recordRuntimeMetric(ev);
               setProgress(ev);
               setStatus(ev.message);
             }
@@ -469,6 +498,7 @@ export function App() {
     setOpeningSince(Date.now());
     setOpenError(null); // clear any prior failure the moment a new open starts
     const emit = (ev: ProgressEvent) => {
+      recordRuntimeMetric(ev);
       setProgress(ev);
       setStatus(ev.message);
     };
@@ -798,7 +828,7 @@ export function App() {
   );
 }
 
-/** Cold-start progress: the current stage + a bar across the eager bundle set,
+/** Cold-start progress: the current stage + a bar across a bounded operation,
  *  with the per-bundle byte size when fetching (spec §1). */
 function StartupProgress({ progress }: { progress: ProgressEvent }) {
   const pct = progress.fraction != null ? Math.round(progress.fraction * 100) : null;
@@ -821,6 +851,13 @@ function StartupProgress({ progress }: { progress: ProgressEvent }) {
 const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   wasm: 'Starting engine',
   manifest: 'Loading project',
+  'project-cache-hit': 'Reusing project',
+  'project-unpack': 'Unpacking project',
+  'project-store': 'Storing project',
+  compile: 'Compiling project',
+  snapshot: 'Preparing snapshots',
+  'site-build': 'Building site',
+  'preview-publish': 'Publishing preview',
   resolve: 'Resolving packages',
   'bundle-fetch': 'Fetching packages',
   'bundle-cache-hit': 'Loading packages',

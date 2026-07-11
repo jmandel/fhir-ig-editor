@@ -430,9 +430,9 @@ try {
   if (results.previewWorker.protocol !== PREVIEW_SW_PROTOCOL || !protocolPattern.test(results.previewWorker.scriptURL || '')) {
     throw new Error('preview Service Worker protocol upgrade failed: ' + JSON.stringify(results.previewWorker));
   }
-  // Bundles fetched BEFORE the engine became ready = the eager (compile-critical)
-  // set. r5.core (deferred) must NOT be among them (lazy-loading gate).
-  results.eagerBundles = bundleFetches.map((b) => b.file);
+  // Engine boot loads only the package catalog. No package body should be
+  // fetched until a concrete project reaches the Rust resolver.
+  results.initBundles = bundleFetches.map((b) => b.file);
   results.r5FetchedAtInit = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
   // Capture the engine version shown.
@@ -455,7 +455,7 @@ try {
   await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'snapshot tree');
   results.snapshotRows = await evalJs(ws, `document.querySelectorAll('.snapshot .sd-table tbody tr').length`);
   results.snapshotMeta = await evalJs(ws, `document.querySelector('.snapshot-meta')?.textContent || ''`);
-  // The deferred r5.core bundle should have been fetched LAZILY by now (the
+  // The snapshot-phase r5.core bundle should have been fetched LAZILY by now (the
   // snapshot needs it), i.e. it appeared only after init — the lazy-loading gate.
   results.r5FetchedLazily = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
@@ -1504,23 +1504,17 @@ try {
   }
 
   // ---- cold-start progress + lazy-loading gates (spec §1) ----------------
-  if (!results.progressSeen) { console.error('assert: cold-start progress bar never appeared'); ok = false; }
-  // r5.core (deferred) must NEVER be fetched at init, on cold OR warm start.
-  if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init (should be lazy/deferred)'); ok = false; }
-  // On a COLD start the eager set is fetched over the network and excludes
-  // r5.core; on a WARM start (OPFS cache populated) NOTHING is fetched — both are
-  // correct. So: if any eager bundle was fetched, it must exclude r5.core (checked
-  // via r5FetchedAtInit above); r5.core is fetched lazily only once a snapshot
-  // needs it. A warm start (0 eager fetches) is explicitly allowed.
-  results.warmStart = (results.eagerBundles || []).length === 0;
-  if (!results.warmStart && results.eagerBundles.some((b) => /r5\.core/.test(b))) {
-    console.error('assert: r5.core appeared in the eager set'); ok = false;
+  // Catalog-only boot is normally sub-second, so React may replace the transient
+  // progress bar before the polling harness samples it. Require visible progress
+  // only when boot is long enough for the absence to look hung.
+  results.bootProgressElided = !results.progressSeen && results.engineReadyMs < 2000;
+  if (!results.progressSeen && !results.bootProgressElided) {
+    console.error('assert: slow engine boot showed no progress'); ok = false;
   }
-  // r5FetchedLazily is a cold-start signal (warm start serves it from cache with
-  // no network); only assert it when we actually saw a cold fetch of eager bundles.
-  if (!results.warmStart && !results.r5FetchedLazily) {
-    console.error('assert: r5.core was never fetched on a cold start (snapshot needs it — lazy mount failed?)'); ok = false;
+  if ((results.initBundles || []).length !== 0) {
+    console.error('assert: package bodies were fetched before project resolution:', results.initBundles); ok = false;
   }
+  if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init (should be snapshot-phase)'); ok = false; }
 
   // ---- project-open progress gate (open-progress) ------------------------
   // Opening US Core must surface staged progress, not a bare "Loading…" line.

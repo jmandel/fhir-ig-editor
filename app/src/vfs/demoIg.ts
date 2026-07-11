@@ -8,6 +8,7 @@ import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
 import type { ProgressEvent } from '../worker/protocol';
 import { loadGithubIg, type GithubIgSpec } from './githubIg';
 import igCatalog from '../igCatalog.json';
+import { sha256Hex } from '../worker/bundleIntegrity';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -59,6 +60,34 @@ function untar(buf: Uint8Array): Array<{ path: string; data: Uint8Array }> {
   return out;
 }
 
+interface CatalogSourceDescriptor {
+  schema: 1;
+  id: string;
+  ref: string;
+  sha256: string;
+  bytes: number;
+  files: number;
+}
+
+function parseSourceDescriptor(value: unknown, ig: CatalogIg): CatalogSourceDescriptor {
+  const candidate = value as Partial<CatalogSourceDescriptor> | null;
+  if (
+    !candidate
+    || candidate.schema !== 1
+    || candidate.id !== ig.id
+    || candidate.ref !== ig.ref
+    || typeof candidate.sha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(candidate.sha256)
+    || !Number.isSafeInteger(candidate.bytes)
+    || (candidate.bytes ?? -1) < 0
+    || !Number.isSafeInteger(candidate.files)
+    || (candidate.files ?? -1) < 0
+  ) {
+    throw new Error(`invalid ${ig.id} source descriptor`);
+  }
+  return candidate as CatalogSourceDescriptor;
+}
+
 /** Load a CI-baked IG from its same-origin gzipped source archive
  *  (`data/<id>/source.tgz`): fetch → gunzip → untar → hydrate the store. */
 async function loadTgzProject(
@@ -66,21 +95,81 @@ async function loadTgzProject(
   ig: CatalogIg,
   onProgress?: (ev: ProgressEvent) => void,
 ): Promise<DemoIgMeta> {
+  const descriptorStarted = performance.now();
+  const descriptorResponse = await fetch(`${BASE}data/${ig.id}/source.json`);
+  if (!descriptorResponse.ok) throw new Error(`fetch ${ig.id} source descriptor -> ${descriptorResponse.status}`);
+  const descriptor = parseSourceDescriptor(await descriptorResponse.json(), ig);
+  const identity = `catalog-source-sha256:${descriptor.sha256}`;
+  if (store.hasSource(identity)) {
+    onProgress?.({
+      stage: 'project-cache-hit',
+      label: ig.id,
+      message: `Reusing unchanged ${ig.name} project files.`,
+      fromCache: true,
+      durationMs: performance.now() - descriptorStarted,
+      inputBytes: descriptor.bytes,
+      fileCount: descriptor.files,
+    });
+    return { name: ig.name, fileCount: descriptor.files };
+  }
+
   onProgress?.({ stage: 'manifest', label: ig.id, message: `Loading ${ig.name}…` });
+  const fetchStarted = performance.now();
   const resp = await fetch(`${BASE}data/${ig.id}/source.tgz`);
-  if (!resp.ok || !resp.body) throw new Error(`fetch ${ig.id} source.tgz -> ${resp.status}`);
-  const stream = resp.body.pipeThrough(new DecompressionStream('gzip'));
+  if (!resp.ok) throw new Error(`fetch ${ig.id} source.tgz -> ${resp.status}`);
+  const compressed = await resp.arrayBuffer();
+  if (compressed.byteLength !== descriptor.bytes) {
+    throw new Error(`${ig.id} source.tgz byte length mismatch: expected ${descriptor.bytes}, got ${compressed.byteLength}`);
+  }
+  const actualSha256 = await sha256Hex(compressed);
+  if (actualSha256 !== descriptor.sha256) {
+    throw new Error(`${ig.id} source.tgz SHA-256 mismatch: expected ${descriptor.sha256}, got ${actualSha256}`);
+  }
+  onProgress?.({
+    stage: 'manifest',
+    label: ig.id,
+    message: `Loaded ${ig.name} source archive.`,
+    durationMs: performance.now() - fetchStarted,
+    inputBytes: compressed.byteLength,
+  });
+
+  const unpackStarted = performance.now();
+  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
   const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
-  onProgress?.({ stage: 'manifest', label: ig.id, message: `Unpacking ${ig.name}…` });
+  onProgress?.({ stage: 'project-unpack', label: ig.id, message: `Unpacking ${ig.name}…` });
 
   const files: ProjectFile[] = [];
   const binary: BinaryProjectFile[] = [];
   const dec = new TextDecoder();
-  for (const { path, data } of untar(bytes)) {
+  const entries = untar(bytes);
+  for (const { path, data } of entries) {
     if (IMAGE_EXTS.has(extOf(path))) binary.push({ path, base64: await toBase64(data) });
     else files.push({ path, text: dec.decode(data) });
   }
-  await store.loadAll(files, binary);
+  if (entries.length !== descriptor.files) {
+    throw new Error(`${ig.id} source file-count mismatch: expected ${descriptor.files}, got ${entries.length}`);
+  }
+  onProgress?.({
+    stage: 'project-unpack',
+    label: ig.id,
+    message: `Unpacked ${ig.name}.`,
+    durationMs: performance.now() - unpackStarted,
+    inputBytes: compressed.byteLength,
+    outputBytes: bytes.byteLength,
+    fileCount: entries.length,
+  });
+
+  onProgress?.({ stage: 'project-store', label: ig.id, message: `Storing ${ig.name} project files…` });
+  const stored = await store.loadAll(files, binary, identity);
+  onProgress?.({
+    stage: 'project-store',
+    label: ig.id,
+    message: `Stored ${ig.name} project files.`,
+    durationMs: stored.durationMs,
+    inputBytes: stored.storedBytes,
+    outputBytes: stored.storedBytes,
+    fileCount: stored.textFiles + stored.binaryFiles,
+  });
   return { name: ig.name, fileCount: files.length + binary.length };
 }
 

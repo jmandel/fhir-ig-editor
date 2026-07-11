@@ -35,14 +35,14 @@ function canonical(v: unknown): string {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(',')}}`;
 }
 
-/** The cache key for a materialized template: coord + engine commit + format +
+/** The cache key for a materialized template: coord + exact engine recipe + format +
  *  a content hash of the mapped tree (so a template content change — same coord,
  *  different bytes — is a distinct key; content-addressed, like the derived-index
- *  ledger). `engineCommit` folds the loader/engine version in, so a wasm bump
- *  invalidates every entry. */
-async function keyFor(coord: string, engineCommit: string, treeHash: string): Promise<string> {
+ * ledger). `engineRecipe` is the exact emitted JS+WASM digest, so any engine
+ * byte change invalidates every entry. */
+async function keyFor(coord: string, engineRecipe: string, treeHash: string): Promise<string> {
   const safe = coord.replaceAll('/', '∕').replaceAll('#', '＃');
-  return `${FORMAT_VERSION}__${engineCommit}__${safe}__${treeHash}.json`;
+  return `${FORMAT_VERSION}__${engineRecipe}__${safe}__${treeHash}.json`;
 }
 
 async function dir(): Promise<FileSystemDirectoryHandle | null> {
@@ -57,21 +57,21 @@ async function dir(): Promise<FileSystemDirectoryHandle | null> {
 /** Read a materialized tree for `coord` (any content hash) built by the CURRENT
  *  engine. We can't know the content hash without the source, so we index by a
  *  small manifest file per (coord, engine) that records the newest tree hash. */
-async function manifestKey(coord: string, engineCommit: string): Promise<string> {
+async function manifestKey(coord: string, engineRecipe: string): Promise<string> {
   const safe = coord.replaceAll('/', '∕').replaceAll('#', '＃');
-  return `${FORMAT_VERSION}__${engineCommit}__${safe}__manifest.json`;
+  return `${FORMAT_VERSION}__${engineRecipe}__${safe}__manifest.json`;
 }
 
 export async function readCachedTemplateTree(
   coord: string,
-  engineCommit: string,
+  engineRecipe: string,
 ): Promise<Record<string, SiteTreeFile> | null> {
   const d = await dir();
   if (!d) return null;
   try {
-    const mf = await d.getFileHandle(await manifestKey(coord, engineCommit));
+    const mf = await d.getFileHandle(await manifestKey(coord, engineRecipe));
     const { treeHash } = JSON.parse(await (await mf.getFile()).text()) as { treeHash: string };
-    const fh = await d.getFileHandle(await keyFor(coord, engineCommit, treeHash));
+    const fh = await d.getFileHandle(await keyFor(coord, engineRecipe, treeHash));
     const tree = JSON.parse(await (await fh.getFile()).text()) as Record<string, SiteTreeFile>;
     return tree && typeof tree === 'object' ? tree : null;
   } catch {
@@ -83,20 +83,20 @@ export async function readCachedTemplateTree(
  *  the entry, and points the (coord, engine) manifest at it. Best-effort. */
 export async function writeCachedTemplateTree(
   coord: string,
-  engineCommit: string,
+  engineRecipe: string,
   tree: Record<string, SiteTreeFile>,
 ): Promise<void> {
   const d = await dir();
   if (!d) return;
   try {
     const treeHash = (await sha256Hex(canonical(tree))).slice(0, 32);
-    const fh = await d.getFileHandle(await keyFor(coord, engineCommit, treeHash), { create: true });
+    const fh = await d.getFileHandle(await keyFor(coord, engineRecipe, treeHash), { create: true });
     let w = await fh.createWritable();
     await w.write(JSON.stringify(tree));
     await w.close();
-    const mf = await d.getFileHandle(await manifestKey(coord, engineCommit), { create: true });
+    const mf = await d.getFileHandle(await manifestKey(coord, engineRecipe), { create: true });
     w = await mf.createWritable();
-    await w.write(JSON.stringify({ treeHash, coord, engineCommit }));
+    await w.write(JSON.stringify({ treeHash, coord, engineRecipe }));
     await w.close();
   } catch {
     /* best-effort; a miss just re-materializes next time */

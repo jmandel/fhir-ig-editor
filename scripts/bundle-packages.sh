@@ -93,18 +93,14 @@ for l in "${TEMPLATE_LABELS[@]}"; do
   echo "[bundle-packages] template $l repacked -> $(du -h "$OUT/$l.tgz" | cut -f1)"
 done
 
-# Emit manifest.json (labels + tgz paths + compressed SHA-256 + sizes + a
-# `defer` flag) — what EngineClient.init fetches. The browser verifies the
+# Emit manifest.json (labels + tgz paths + compressed SHA-256 + sizes + an
+# explicit `loadPhase`) — what EngineClient.init fetches. The browser verifies the
 # compressed bytes before inflation and keys its OPFS cache by this digest.
-# `defer:true` marks a bundle the FIRST COMPILE does
-# not need, so cold start can skip fetching it until the engine first needs it
-# (spec §1 lazy loading). Today that is ONLY the R5 core: cycle is an R4 IG, so
-# the compile fishes R4 bases; r5.core is pulled solely by SNAPSHOT generation
-# (the walk engine is R5-internal — see scripts/packages.list). Deferring its
-# ~6.8 MB tgz off the cold-start critical path is the bulk of the speedup, and it
-# is fetched + mounted lazily on the first snapshot / site-preview build.
+# `compile` packages are candidates selected by the project's Rust resolver;
+# they are not globally eager. `snapshot` is the R5 walk-engine special.
+# `on-demand` covers template-chain and supersession-shadowed packages.
 #
-# The rule is derived, not hand-listed. A bundle is deferrable iff EITHER:
+# The rule is derived, not hand-listed. A non-template bundle is on-demand iff:
 #  (1) it is an R5 core AND the IG is not itself R5 (removing it cannot change
 #      compile output — r5.core is pulled only by SNAPSHOT generation); OR
 #  (2) it is a SUPERSESSION-SHADOWED lower version: a package id for which a
@@ -129,16 +125,25 @@ for l in "${LABELS[@]}"; do
   if [ -z "$cur" ] || ver_gt "$v" "$cur"; then MAX_VER["$id"]="$v"; fi
 done
 
-is_deferrable() {
+is_on_demand() {
   local label="$1"
   local id="${label%%#*}" v="${label##*#}"
   case "$label" in
     hl7.fhir.r5.core#*) case "$IG_FHIR_VERSION" in 5.*) return 1 ;; *) return 0 ;; esac ;;
   esac
-  # Supersession-shadowed lower version → deferrable.
+  # Supersession-shadowed lower version → on-demand.
   local top="${MAX_VER[$id]:-$v}"
   if [ "$top" != "$v" ] && ver_gt "$top" "$v"; then return 0; fi
   return 1
+}
+
+load_phase() {
+  local label="$1"
+  case "$label" in
+    hl7.fhir.r5.core#*) printf 'snapshot'; return ;;
+    *.template#*) printf 'on-demand'; return ;;
+  esac
+  if is_on_demand "$label"; then printf 'on-demand'; else printf 'compile'; fi
 }
 
 {
@@ -149,9 +154,9 @@ is_deferrable() {
     comma=","; [ "$i" -eq $((${#LABELS[@]} - 1)) ] && comma=""
     tgz_bytes=$(stat -c%s "$OUT/$l.tgz" 2>/dev/null || echo 0)
     tgz_sha256=$(sha256_file "$OUT/$l.tgz")
-    defer=false; is_deferrable "$l" && defer=true
-    printf '    { "label": "%s", "tgz": "%s.tgz", "sha256": "%s", "bytes": %s, "defer": %s }%s\n' \
-      "$l" "$l" "$tgz_sha256" "$tgz_bytes" "$defer" "$comma"
+    phase="$(load_phase "$l")"
+    printf '    { "label": "%s", "tgz": "%s.tgz", "sha256": "%s", "bytes": %s, "loadPhase": "%s" }%s\n' \
+      "$l" "$l" "$tgz_sha256" "$tgz_bytes" "$phase" "$comma"
   done
   echo '  ]'
   echo '}'

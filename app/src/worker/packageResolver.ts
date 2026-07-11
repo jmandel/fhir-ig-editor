@@ -20,10 +20,12 @@
 import type {
   BundleSpec,
   MissingPackage,
+  MutableVersionRequest,
+  PackageMountInput,
   ResolutionStep,
   VersionIndex,
 } from './protocol';
-import { readCachedBundle, writeCachedBundle } from './bundleCache';
+import { readCachedBundle } from './bundleCache';
 import { BakedBundleIntegrityError } from './bundleIntegrity';
 import type { BakedBundleEntry } from './bundleIntegrity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
@@ -50,6 +52,8 @@ export interface ResolveOutcome {
   blocked: BlockedPackage[];
   /** Labels newly fetched + mounted across the whole loop. */
   mounted: string[];
+  /** Exact candidate universe used for the final authoritative Rust step. */
+  versionIndex: VersionIndex;
 }
 
 /** How the loop reports progress (reuses the worker ProgressEvent stages). */
@@ -64,11 +68,11 @@ export interface ResolverHost {
   /** Ask the engine to resolve against the currently mounted set. */
   resolveStep(config: string, versionIndex?: VersionIndex): Promise<ResolutionStep>;
   /** Mount a set of fetched bundles into the engine. */
-  mount(bundles: BundleSpec[]): Promise<void>;
+  mount(packages: PackageMountInput[]): Promise<void>;
   /** The baked same-origin manifest's exact transport entry (source a). */
   bakedBundle(label: string): BakedBundleEntry | undefined;
   /** Fetch, verify, and inflate one exact same-origin baked bundle (source a). */
-  fetchBaked(bundle: BakedBundleEntry): Promise<BundleSpec>;
+  fetchBaked(bundle: BakedBundleEntry): Promise<PackageMountInput>;
 }
 
 const MAX_ROUNDS = 24; // fixpoint guard: a closure this deep is pathological.
@@ -150,17 +154,29 @@ export async function acquireForProject(
     }
 
     // Fetch + mount each not-mounted package.
-    const specs: BundleSpec[] = [];
-    for (const m of toFetch) {
-      const label = `${m.package_id}#${m.version}`;
-      const spec = await obtainPackage(host, label, m, onProgress, blocked);
-      if (spec) specs.push(spec);
-    }
-    if (specs.length) {
-      await host.mount(specs);
-      for (const s of specs) {
-        mountedAll.push(s.label);
-        mergeLabelsIntoIndex(index, [s.label]);
+    // Packages in one authoritative ResolutionStep are independent transport
+    // requests and form one atomic engine mount batch. Read/fetch them with
+    // bounded concurrency instead of serializing large OPFS operations.
+    const specs: Array<PackageMountInput | undefined> = [];
+    let nextFetch = 0;
+    const fetchers = Array.from({ length: Math.min(4, toFetch.length) }, async () => {
+      for (;;) {
+        const index = nextFetch++;
+        if (index >= toFetch.length) return;
+        const m = toFetch[index];
+        const label = `${m.package_id}#${m.version}`;
+        const spec = await obtainPackage(host, label, m, onProgress, blocked);
+        if (spec) specs[index] = spec;
+      }
+    });
+    await Promise.all(fetchers);
+    const obtained = specs.filter((spec): spec is PackageMountInput => spec !== undefined);
+    if (obtained.length) {
+      await host.mount(obtained);
+      for (const packageInput of obtained) {
+        const label = packageInput.kind === 'raw' ? packageInput.spec.label : packageInput.pointer.label;
+        mountedAll.push(label);
+        mergeLabelsIntoIndex(index, [label]);
       }
     } else if (!learnedNewVersion) {
       // A full round with nothing obtained and nothing learned: give up (the
@@ -191,7 +207,78 @@ export async function acquireForProject(
     }
   }
 
-  return { step, blocked, mounted: mountedAll };
+  return { step, blocked, mounted: mountedAll, versionIndex: index };
+}
+
+/** Refresh the candidate universe needed to validate a persistent exact lock.
+ * Baked/local candidates are deployment/session authority and arrive in `seed`;
+ * every other mutable request is queried from the configured registry now. A
+ * registry miss/unreachable result rejects the fast path rather than pinning the
+ * stale concrete version recorded by the lock. */
+export async function refreshMutableVersionIndex(
+  requests: readonly MutableVersionRequest[],
+  seed: VersionIndex,
+  onProgress: ResolveProgress,
+): Promise<VersionIndex | null> {
+  const index: VersionIndex = { versions: {} };
+  for (const [id, versions] of Object.entries(seed.versions)) {
+    index.versions[id] = [...versions];
+  }
+  mergeLabelsIntoIndex(index, localLabels());
+  const ids = [...new Set(requests.map((request) => request.package_id))]
+    .filter((id) => !index.versions[id]?.length);
+  const refreshed = await Promise.all(ids.map(async (id) => ({
+    id,
+    result: await fetchRegistryVersions(id, onProgress),
+  })));
+  for (const { id, result } of refreshed) {
+    if (result.unreachable || result.versions.length === 0) return null;
+    index.versions[id] = result.versions;
+  }
+  return index;
+}
+
+/** Acquire an exact cached closure as one transport batch. This function makes
+ * no resolution decision and performs no mount; callers atomically mount only
+ * when every package was obtained, then ask Rust to verify the closure. */
+export async function obtainLockedPackages(
+  host: ResolverHost,
+  labels: readonly string[],
+  onProgress: ResolveProgress,
+): Promise<{ packages: PackageMountInput[]; blocked: BlockedPackage[] }> {
+  const blocked: BlockedPackage[] = [];
+  const packages: Array<PackageMountInput | undefined> = new Array(labels.length);
+  let next = 0;
+  const readers = Array.from({ length: Math.min(4, labels.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= labels.length) return;
+      const label = labels[index];
+      const hash = label.lastIndexOf('#');
+      if (hash <= 0) {
+        blocked.push({
+          packageId: label,
+          version: '',
+          why: 'persistent resolution lock contains an invalid coordinate',
+          remedies: [],
+        });
+        continue;
+      }
+      const missing: MissingPackage = {
+        package_id: label.slice(0, hash),
+        version: label.slice(hash + 1),
+        reason: { kind: 'not_mounted' },
+        set: 'context',
+      };
+      const obtained = await obtainPackage(host, label, missing, onProgress, blocked);
+      if (obtained) packages[index] = obtained;
+    }
+  });
+  await Promise.all(readers);
+  return {
+    packages: packages.filter((item): item is PackageMountInput => item !== undefined),
+    blocked,
+  };
 }
 
 /** Obtain ONE package's bytes from the priority-ordered sources, mounting-ready.
@@ -202,41 +289,46 @@ async function obtainPackage(
   missing: MissingPackage,
   onProgress: ResolveProgress,
   blocked: BlockedPackage[],
-): Promise<BundleSpec | null> {
+): Promise<PackageMountInput | null> {
   const baked = host.bakedBundle(label);
+  // A baked package's exact transport digest also keys the prepared cache. Let
+  // the host select prepared-binary vs legacy raw before consulting unpinned
+  // caches that are ineligible for this authoritative deployment input.
+  if (baked) {
+    try {
+      return await host.fetchBaked(baked);
+    } catch (error) {
+      if (error instanceof BakedBundleIntegrityError) throw error;
+      /* fall through to local/registry transport */
+    }
+  }
+  if (!label.includes('.template#')) {
+    const { findPreparedPackage, UNPINNED_TRANSPORT_IDENTITY } = await import('./preparedPackageCache');
+    const pointer = await findPreparedPackage(label, UNPINNED_TRANSPORT_IDENTITY);
+    if (pointer) {
+      onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (prepared binary)` });
+      return { kind: 'prepared', pointer };
+    }
+  }
   // (a') OPFS warm cache. Baked entries can only hit the cache key carrying
   // their manifest digest; an older registry/local cache for the same label is
   // deliberately ineligible.
   const cached = await readCachedBundle(label, baked?.sha256);
   if (cached) {
     onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (cached)` });
-    return cached;
+    return { kind: 'raw', spec: cached, transportIdentity: baked ? `tgz-${baked.sha256}` : 'unpinned' };
   }
 
   // (b) local .tgz drag-drop — before any network.
   if (hasLocalPackage(label)) {
     const spec = getLocalPackage(label)!;
-    void writeCachedBundle(spec);
-    return spec;
-  }
-
-  // (a) same-origin prebuilt bundle from the baked manifest.
-  if (baked) {
-    try {
-      return await host.fetchBaked(baked);
-    } catch (error) {
-      // A missing same-origin file may fall through to the registry. Bytes that
-      // were fetched but disagreed with the baked digest must fail closed.
-      if (error instanceof BakedBundleIntegrityError) throw error;
-      /* fall through to the registry */
-    }
+    return { kind: 'raw', spec, transportIdentity: 'unpinned' };
   }
 
   // (c)/(d) direct FHIR registry (optionally via the configured proxy).
   const spec = await fetchFromRegistry(label, missing, onProgress);
   if (spec) {
-    void writeCachedBundle(spec);
-    return spec;
+    return { kind: 'raw', spec, transportIdentity: 'unpinned' };
   }
 
   // Blocked: no source could supply it. Precise UI state.
@@ -245,6 +337,25 @@ async function obtainPackage(
   );
   onProgress({ stage: 'package-blocked', label, message: `Cannot obtain ${label}` });
   return null;
+}
+
+/** Recovery ladder used when an unpinned prepared artifact fails validation.
+ * Ordinarily the legacy raw cache is present from the cold acquisition; if it
+ * is not, refetch the exact id#version from the configured registries. */
+export async function obtainRawPackageByLabel(label: string): Promise<PackageMountInput | null> {
+  const cached = await readCachedBundle(label);
+  if (cached) return { kind: 'raw', spec: cached, transportIdentity: 'unpinned' };
+  const hash = label.lastIndexOf('#');
+  if (hash <= 0) return null;
+  const missing: MissingPackage = {
+    package_id: label.slice(0, hash),
+    version: label.slice(hash + 1),
+    reason: { kind: 'not_mounted' },
+    set: 'context',
+  };
+  const spec = await fetchFromRegistry(label, missing, () => {});
+  if (!spec) return null;
+  return { kind: 'raw', spec, transportIdentity: 'unpinned' };
 }
 
 /** Obtain + mount ONE package by label, reusing the exact source ladder (#40
@@ -269,10 +380,13 @@ export async function obtainAndMountPackage(
     set: 'context',
   };
   const blocked: BlockedPackage[] = [];
-  const spec = await obtainPackage(host, label, missing, onProgress, blocked);
-  if (!spec) return null;
-  await host.mount([spec]);
-  return spec.files;
+  const packageInput = await obtainPackage(host, label, missing, onProgress, blocked);
+  if (!packageInput) return null;
+  if (packageInput.kind !== 'raw') {
+    throw new Error(`template package ${label} unexpectedly selected prepared-only transport`);
+  }
+  await host.mount([packageInput]);
+  return packageInput.spec.files;
 }
 
 /** Fetch a package tarball from the configured registries (packages.fhir.org →
@@ -310,7 +424,7 @@ async function fetchFromRegistry(
  *  versions plus `unreachable: true` when EVERY registry threw (network/CORS/
  *  offline) rather than answering — so a subsequent block can say "registry
  *  unreachable" instead of falsely implying the package doesn't exist. */
-async function fetchRegistryVersions(
+export async function fetchRegistryVersions(
   id: string,
   onProgress: ResolveProgress,
 ): Promise<{ versions: string[]; unreachable: boolean }> {
@@ -319,7 +433,10 @@ async function fetchRegistryVersions(
     const url = viaProxy(metadataUrl(registry, id));
     onProgress({ stage: 'registry-fetch', label: id, message: `Looking up ${id} versions…` });
     try {
-      const resp = await fetch(url, { redirect: 'follow' });
+      // Mutable coordinates require an origin revalidation. `no-cache` may use
+      // a 304 response but may not silently accept a fresh-looking disk-cache
+      // entry whose registry candidate universe has changed.
+      const resp = await fetch(url, { redirect: 'follow', cache: 'no-cache' });
       anyReplied = true;
       if (!resp.ok) continue;
       const meta = await resp.json();

@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -74,15 +75,43 @@ for (const ig of igs) {
     for (const f of TOP_FILES) if (fs.existsSync(path.join(base, f))) rels.push(f);
     for (const { dir, exts } of SELECT) walk(path.join(base, dir), exts, base, rels);
 
+    // Archive bytes are the browser's immutable project-source identity. Sort
+    // paths and erase host/user/time metadata so rebuilding the same ref yields
+    // the same digest on every CI runner rather than needlessly invalidating
+    // an otherwise reusable OPFS working copy.
+    rels.sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
     const outDir = path.join(REPO, 'app/public/data', id);
     fs.mkdirSync(outDir, { recursive: true });
     const outTgz = path.join(outDir, 'source.tgz');
     const listFile = path.join(work, 'files.txt');
     fs.writeFileSync(listFile, rels.join('\n'));
     // tar from the project root so entries are project-relative (input/…, sushi-config.yaml).
-    execFileSync('tar', ['czf', outTgz, '-C', base, '-T', listFile]);
+    execFileSync('tar', [
+      '--sort=name',
+      '--mtime=@0',
+      '--owner=0',
+      '--group=0',
+      '--numeric-owner',
+      '--format=ustar',
+      '-czf', outTgz,
+      '-C', base,
+      '-T', listFile,
+    ]);
 
     const bytes = fs.statSync(outTgz).size;
+    const sha256 = createHash('sha256').update(fs.readFileSync(outTgz)).digest('hex');
+    // This small authenticated descriptor lets the browser prove that an OPFS
+    // working copy already contains this exact immutable archive without first
+    // downloading and unpacking the archive again. It is written beside the
+    // archive and changes whenever the bytes do.
+    fs.writeFileSync(path.join(outDir, 'source.json'), JSON.stringify({
+      schema: 1,
+      id,
+      ref,
+      sha256,
+      bytes,
+      files: rels.length,
+    }));
     const mb = bytes / 1048576;
     const ok = mb <= MAX_MB;
     if (!ok) failed++;

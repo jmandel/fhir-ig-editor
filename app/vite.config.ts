@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite';
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 
 const ENGINE_COMMIT = (() => {
   try {
@@ -14,6 +16,49 @@ import { dirname, resolve } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CYCLE_SITEGEN = resolve(HERE, '../vendor/cycle/site-gen');
+
+const ENGINE_RECIPE = (() => {
+  try {
+    const hash = createHash('sha256');
+    for (const name of ['wasm_api.js', 'wasm_api_bg.wasm']) {
+      hash.update(name);
+      hash.update('\0');
+      hash.update(readFileSync(resolve(HERE, `public/pkg/${name}`)));
+      hash.update('\0');
+    }
+    return hash.digest('hex');
+  } catch {
+    // No emitted engine means there can be no safe persistent semantic reuse.
+    // A per-process identity deliberately turns every such dev start into a miss.
+    return `unbuilt-${ENGINE_COMMIT}-${Date.now()}`;
+  }
+})();
+
+/** Content identity of the Cycle renderer implementation and its pinned JS
+ * dependency graph. This is stricter than a version string and remains correct
+ * for dirty local builds as well as clean CI commits. */
+const CYCLE_RENDER_RECIPE = (() => {
+  const hash = createHash('sha256');
+  const addFile = (file: string, relative: string) => {
+    hash.update(relative);
+    hash.update('\0');
+    hash.update(readFileSync(file));
+    hash.update('\0');
+  };
+  const walk = (dir: string, relative: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const file = resolve(dir, name);
+      const rel = `${relative}/${name}`;
+      if (statSync(file).isDirectory()) walk(file, rel);
+      else if (/\.(?:ts|tsx|js|jsx|json)$/.test(name)) addFile(file, rel);
+    }
+  };
+  walk(CYCLE_SITEGEN, 'vendor/cycle/site-gen');
+  addFile(resolve(HERE, 'src/preview/render.tsx'), 'app/src/preview/render.tsx');
+  addFile(resolve(HERE, 'package.json'), 'app/package.json');
+  addFile(resolve(HERE, 'bun.lock'), 'app/bun.lock');
+  return hash.digest('hex');
+})();
 
 // Static SPA for GitHub Pages. `base` is set from BASE_PATH at build time so the
 // site works both at a user/org root and under /<repo>/ (project Pages). The
@@ -55,6 +100,8 @@ export default defineConfig({
     // cache can pair an OLD engine with NEW app bundles after a redeploy —
     // which breaks in maximally confusing ways (raw liquid served as pages).
     __ENGINE_COMMIT__: JSON.stringify(ENGINE_COMMIT),
+    __ENGINE_RECIPE__: JSON.stringify(ENGINE_RECIPE),
+    __CYCLE_RENDER_RECIPE__: JSON.stringify(CYCLE_RENDER_RECIPE),
     'process.env.SITE_PROJECT': 'undefined',
     'process.env.OUT_DIR': 'undefined',
     'process.env.SITE_DESIGN_DIR': 'undefined',

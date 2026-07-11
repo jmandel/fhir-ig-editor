@@ -1,17 +1,15 @@
 declare const __ENGINE_COMMIT__: string | undefined;
+declare const __ENGINE_RECIPE__: string | undefined;
 // UI-side handle to the engine worker. Wraps postMessage in promises, owns the
-// package-bundle fetch+inflate + OPFS cache, and memoizes per-profile snapshots.
+// authenticated cold package fetch/preparation and compact PreparedPackage OPFS
+// warm path, and memoizes per-profile snapshots.
 // The rest of the app talks only to this class — the worker protocol is the
 // reusable seam (spec §3: "if we later want full vscode.dev, the worker protocol
 // is it").
 //
-// Cold-start (spec §1): init fetches ONLY the compile-critical bundles, verifies
-// each compressed blob against the baked manifest, inflates it, OPFS-caches the
-// map under that digest, and mounts it — first paint
-// happens without the ~6.8 MB r5.core tgz. r5.core is `defer:true` in the
-// manifest and is fetched + mounted LAZILY via ensureSnapshotBundles() the first
-// time a snapshot / site build needs it. Warm start (reload) reads inflated
-// bundles straight from OPFS — no network, no gunzip/untar.
+// Startup loads only the authenticated package CATALOG. The Rust resolver then
+// selects the active project's exact compile closure; snapshot-only and template
+// packages remain lazy. OPFS is a transport/preparation cache, never authority.
 
 import EngineWorker from './engine.worker?worker';
 import type {
@@ -22,23 +20,28 @@ import type {
   InitResult,
   MountResult,
   Op,
+  PackageMountInput,
   ProgressEvent,
   RenderPageResult,
   ResolutionStep,
   SitePreviewResult,
   SiteTreeFile,
   SnapshotResult,
+  StockBuildOpenResult,
+  StockPageRenderResult,
   StockSiteOptions,
   VersionIndex,
   WorkerReply,
 } from './protocol';
-import { readCachedBundle, writeCachedBundle } from './bundleCache';
+import { deleteCachedBundle, readCachedBundleMeasured } from './bundleCache';
 import type { ResolveOutcome } from './packageResolver';
 import { projectCompileRevision } from '../build/projectRevision';
 import { assertCompatibleEngineCommit } from './engineVersion';
 import { parseBakedBundleManifest, readVerifiedBundleBytes } from './bundleIntegrity';
 import type { BakedBundleEntry, BakedBundleManifest } from './bundleIntegrity';
 import { ResolutionCache } from './resolutionCache';
+import { getPackageProxy, getRegistries } from '../vfs/packageSettings';
+import { exactPackageClosureIdentity } from './packageClosureIdentity';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
@@ -60,19 +63,31 @@ export class EngineClient {
    * the host mirrors that law here. */
   private resolutionCache = new ResolutionCache<ResolveOutcome>();
   private inited = false;
-  /** Deferred bundle entries (from the manifest) not mounted at init time. */
-  private deferred: BakedBundleEntry[] = [];
+  /** Snapshot-engine specials, separate from resolver-selected compile packages. */
+  private snapshotBundles: BakedBundleEntry[] = [];
+  private snapshotSourcesIdentity = '[]';
   /** The baked manifest's `label -> entry` map, kept so the runtime resolver can
    *  source a missing package from a same-origin prebuilt bundle (task #32). */
   private bakedByLabel = new Map<string, BakedBundleEntry>();
   /** A single in-flight lazy-mount promise so concurrent snapshot/site builds
-   *  share one fetch of the deferred bundles. */
+   * share one fetch of the snapshot-role bundles. */
   private deferredMount: Promise<void> | null = null;
+  /** Host mirror used to avoid even reading a package cache entry that the
+   * current Worker session has already mounted. */
+  private mountedLabels = new Set<string>();
+  /** Exact prepared artifact installed for every mounted label. Labels alone
+   * are not persistent identities because registries may republish a version. */
+  private mountedPackageIdentities = new Map<string, string>();
+  private preparedFallbacks = new Map<string, () => Promise<PackageMountInput>>();
   private progressCb: ProgressCb | null = null;
   /** The mounted engine's commit — the invalidation key for the OPFS materialized-
    *  template cache (#40 scope 4): a wasm bump changes this, so stale trees are
    *  never served. Captured on init. */
   private engineCommit = 'unknown';
+  /** Exact emitted JS+WASM bytes used for semantic cache authority. */
+  private readonly engineRecipe = typeof __ENGINE_RECIPE__ === 'undefined'
+    ? `unavailable-${performance.timeOrigin}`
+    : __ENGINE_RECIPE__;
   /** Verification hook (#40 E2E): force the LIVE template path (resolve→fetch→
    *  mount→mountTemplate) by suppressing the warm-start artifact + cache, so the
    *  live materialization can be gated even for a coord that HAS a committed
@@ -103,8 +118,33 @@ export class EngineClient {
 
   /** Fetch/inflate (or read from OPFS) one bundle into a mountable BundleSpec.
    *  Emits progress and back-fills the OPFS cache on a cold fetch. */
-  private async loadBundle(entry: BakedBundleEntry, stageLabel: string): Promise<BundleSpec> {
-    const cached = await readCachedBundle(entry.label, entry.sha256);
+  private async loadBundle(
+    entry: BakedBundleEntry,
+    stageLabel: string,
+    forceRaw = false,
+  ): Promise<PackageMountInput> {
+    const started = performance.now();
+    const transportIdentity = `tgz-${entry.sha256}`;
+    // Template-chain walking currently reads package.json on the host. Keep that
+    // deliberately on the raw path until template metadata joins the catalog.
+    const preparedEligible = !entry.label.includes('.template#');
+    if (!forceRaw && preparedEligible) {
+      const { findPreparedPackage } = await import('./preparedPackageCache');
+      const pointer = await findPreparedPackage(entry.label, transportIdentity);
+      if (pointer) {
+        this.preparedFallbacks.set(entry.label, () => this.loadBundle(entry, stageLabel, true));
+        this.progressCb?.({
+          stage: 'bundle-cache-hit',
+          label: entry.label,
+          message: `${stageLabel} ${entry.label} (prepared binary)`,
+          fromCache: true,
+          durationMs: performance.now() - started,
+          inputBytes: pointer.bytes,
+        });
+        return { kind: 'prepared', pointer };
+      }
+    }
+    const cached = await readCachedBundleMeasured(entry.label, entry.sha256);
     if (cached) {
       this.progressCb?.({
         stage: 'bundle-cache-hit',
@@ -112,8 +152,15 @@ export class EngineClient {
         bytes: entry.bytes,
         message: `${stageLabel} ${entry.label} (cached)`,
         fromCache: true,
+        durationMs: cached.metrics.totalMs,
+        inputBytes: cached.metrics.storedBytes,
+        metrics: {
+          opfsReadMs: cached.metrics.opfsReadMs,
+          jsonParseMs: cached.metrics.jsonParseMs,
+          validationMs: cached.metrics.validationMs,
+        },
       });
-      return cached;
+      return { kind: 'raw', spec: cached.spec, transportIdentity };
     }
     this.progressCb?.({
       stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
@@ -132,25 +179,162 @@ export class EngineClient {
     const { inflateBundle } = await import('./inflate');
     const files = await inflateBundle(compressed);
     const spec: BundleSpec = { label: entry.label, files };
-    // A same-coordinate redeploy with different bytes gets a distinct cache key.
-    void writeCachedBundle(spec, entry.sha256);
-    return spec;
+    this.progressCb?.({
+      stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
+      label: entry.label,
+      bytes: compressed.byteLength,
+      message: `${stageLabel} ${entry.label} loaded and inflated.`,
+      durationMs: performance.now() - started,
+      inputBytes: compressed.byteLength,
+      fileCount: Object.keys(files).length,
+    });
+    // The Worker prepares and persists the binary execution artifact while
+    // mounting. Do not create another inflated/base64 cache copy here.
+    return { kind: 'raw', spec, transportIdentity };
   }
 
   /** The only incremental mount path on the main thread. Keep resolution,
    * compile, and snapshot caches synchronized with the worker/Rust session. */
-  private async mountBundles(bundles: BundleSpec[]): Promise<MountResult> {
-    const result = await this.call('mountBundles', bundles);
-    if (this.resolutionCache.noteMount(result.newlyMounted)) {
-      this.compiledProjectRevision = null;
-      this.compiledProjectResult = null;
-      this.snapshotCache.clear();
+  private async mountPackages(packages: PackageMountInput[]): Promise<MountResult> {
+    let transaction = packages;
+    const hasRaw = transaction.some((item) => item.kind === 'raw');
+    const hasPrepared = transaction.some((item) => item.kind === 'prepared');
+    // Preserve one Rust transaction. A partially warm batch falls back to raw
+    // for its prepared members instead of committing two independent groups.
+    if (hasRaw && hasPrepared) {
+      transaction = await Promise.all(transaction.map(async (item) => {
+        if (item.kind === 'raw') return item;
+        return this.rawFallbackForPrepared(item.pointer.label);
+      }));
     }
+    const started = performance.now();
+    let result: MountResult;
+    try {
+      result = await this.call('mountPackages', transaction);
+    } catch (error) {
+      // A missing/corrupt prepared artifact is an optimization miss. Reacquire
+      // the authenticated original transport and prepare it again immediately.
+      if (!transaction.every((item) => item.kind === 'prepared')) throw error;
+      const fallbacks = await Promise.all(transaction.map(async (item) => {
+        try {
+          return await this.rawFallbackForPrepared(item.pointer.label);
+        } catch {
+          throw error;
+        }
+      }));
+      transaction = fallbacks;
+      result = await this.call('mountPackages', fallbacks);
+    }
+    const rpcMs = performance.now() - started;
+    for (const { label, cacheKey } of result.packageIdentities ?? []) {
+      this.mountedPackageIdentities.set(label, cacheKey);
+    }
+    for (const label of result.newlyMounted) this.mountedLabels.add(label);
+    for (const label of result.preparedStored ?? []) {
+      const raw = transaction.find((item) => item.kind === 'raw' && item.spec.label === label);
+      if (!raw || raw.kind !== 'raw') continue;
+      const compressedSha256 = raw.transportIdentity.startsWith('tgz-')
+        ? raw.transportIdentity.slice(4)
+        : undefined;
+      void deleteCachedBundle(label, compressedSha256);
+    }
+    // A mount invalidates resolution of the *next* compile, but it does not
+    // mutate the exact package allow-list retained by Rust's previous compiled
+    // revision. Keep that immutable result until re-resolution proves its
+    // closure changed.
+    this.resolutionCache.noteMount(result.newlyMounted);
+    const prepared = result.preparedMetrics;
+    this.progressCb?.({
+      stage: 'bundle-mount',
+      message: result.newlyMounted.length
+        ? `Mounted ${result.newlyMounted.join(', ')}.`
+        : 'Packages already mounted.',
+      durationMs: rpcMs,
+      inputBytes: result.inputBytes,
+      metrics: {
+        workerSerializeMs: result.serializeMs,
+        wasmMs: result.wasmMs,
+        workerAndCloneMs: Math.max(0, rpcMs - result.mountMs),
+        ...(prepared ? {
+          preparedWarmBinary: prepared.mode === 'warm-binary' ? 1 : 0,
+          preparedColdPrepare: prepared.mode === 'cold-prepare' ? 1 : 0,
+          preparedAdded: prepared.added,
+          preparedArtifactBytes: prepared.artifactBytes,
+          preparedEngineMountMs: prepared.engineMountMs,
+          ...(prepared.decodeValidatePrepareMs === undefined ? {} : {
+            preparedDecodeValidatePrepareMs: prepared.decodeValidatePrepareMs,
+          }),
+          ...(prepared.preparedMembers === undefined ? {} : { preparedMembers: prepared.preparedMembers }),
+          ...(prepared.mountMemberBodyCopies === undefined ? {} : {
+            preparedMountMemberBodyCopies: prepared.mountMemberBodyCopies,
+          }),
+          ...(prepared.inputJsonBytes === undefined ? {} : { preparedInputJsonBytes: prepared.inputJsonBytes }),
+          ...(prepared.base64Bytes === undefined ? {} : { preparedBase64Bytes: prepared.base64Bytes }),
+          ...(prepared.decodedSourceBytes === undefined ? {} : {
+            preparedDecodedSourceBytes: prepared.decodedSourceBytes,
+          }),
+          ...(prepared.normalizedBytes === undefined ? {} : { preparedNormalizedBytes: prepared.normalizedBytes }),
+          ...(prepared.jsonParseMs === undefined ? {} : { preparedJsonParseMs: prepared.jsonParseMs }),
+          ...(prepared.base64DecodeMs === undefined ? {} : { preparedBase64DecodeMs: prepared.base64DecodeMs }),
+          ...(prepared.normalizationMs === undefined ? {} : { preparedNormalizationMs: prepared.normalizationMs }),
+          ...(prepared.indexingMs === undefined ? {} : { preparedIndexingMs: prepared.indexingMs }),
+          ...(prepared.artifactEncodeMs === undefined ? {} : { preparedArtifactEncodeMs: prepared.artifactEncodeMs }),
+          ...(prepared.decodeValidateMs === undefined ? {} : {
+            preparedDecodeValidateMs: prepared.decodeValidateMs,
+          }),
+          ...(prepared.packages === undefined ? {} : { preparedPackages: prepared.packages }),
+          ...(prepared.retainedBlobBytes === undefined ? {} : {
+            preparedRetainedBlobBytes: prepared.retainedBlobBytes,
+          }),
+          ...(prepared.maxStagedArtifactBytes === undefined ? {} : {
+            preparedMaxStagedArtifactBytes: prepared.maxStagedArtifactBytes,
+          }),
+          ...(prepared.jsBatchBytes === undefined ? {} : {
+            preparedJsBatchBytes: prepared.jsBatchBytes,
+          }),
+          ...(prepared.compressedRetainedBytes === undefined ? {} : {
+            preparedCompressedRetainedBytes: prepared.compressedRetainedBytes,
+          }),
+          ...(prepared.declaredRawBytes === undefined ? {} : {
+            preparedDeclaredRawBytes: prepared.declaredRawBytes,
+          }),
+          ...(prepared.chunksInflated === undefined ? {} : {
+            preparedChunksInflated: prepared.chunksInflated,
+          }),
+          ...(prepared.rawInflatedBytes === undefined ? {} : {
+            preparedRawInflatedBytes: prepared.rawInflatedBytes,
+          }),
+          ...(prepared.chunkCacheHits === undefined ? {} : {
+            preparedChunkCacheHits: prepared.chunkCacheHits,
+          }),
+          ...(prepared.cachedRawBytes === undefined ? {} : {
+            preparedCachedRawBytes: prepared.cachedRawBytes,
+          }),
+          ...(prepared.indexedMembers === undefined ? {} : { preparedIndexedMembers: prepared.indexedMembers }),
+          ...(prepared.memberBodyCopies === undefined ? {} : {
+            preparedMemberBodyCopies: prepared.memberBodyCopies,
+          }),
+          ...(prepared.manifestJsonBytes === undefined ? {} : {
+            preparedManifestJsonBytes: prepared.manifestJsonBytes,
+          }),
+          ...(prepared.manifestParseMs === undefined ? {} : { preparedManifestParseMs: prepared.manifestParseMs }),
+        } : {}),
+      },
+    });
     return result;
   }
 
-  /** Boot: mount the compile-critical (non-deferred) bundles. Deferred bundles
-   *  (r5.core) are held back and mounted lazily on first snapshot/site build. */
+  private async rawFallbackForPrepared(label: string): Promise<PackageMountInput> {
+    const registered = this.preparedFallbacks.get(label);
+    if (registered) return registered();
+    const { obtainRawPackageByLabel } = await import('./packageResolver');
+    const recovered = await obtainRawPackageByLabel(label);
+    if (!recovered) throw new Error(`cannot reacquire original package transport for ${label}`);
+    return recovered;
+  }
+
+  /** Boot the WASM session with an empty package source. Package material is
+   * selected only after the active project's config reaches the Rust resolver. */
   async init(onProgress?: ProgressCb): Promise<InitResult> {
     if (this.inited) throw new Error('engine already initialized');
     this.progressCb = onProgress ?? null;
@@ -163,23 +347,13 @@ export class EngineClient {
     const manifest: BakedBundleManifest = parseBakedBundleManifest(await manifestResponse.json());
 
     for (const b of manifest.bundles) this.bakedByLabel.set(b.label, b);
-    const eager = manifest.bundles.filter((b) => !b.defer);
-    this.deferred = manifest.bundles.filter((b) => b.defer);
+    this.snapshotBundles = manifest.bundles.filter((bundle) => bundle.loadPhase === 'snapshot');
+    this.snapshotSourcesIdentity = JSON.stringify(this.snapshotBundles
+      .map(({ label, sha256 }) => ({ label, sha256 }))
+      .sort((left, right) => left.label.localeCompare(right.label)));
 
-    const bundles: BundleSpec[] = [];
-    for (let i = 0; i < eager.length; i++) {
-      const spec = await this.loadBundle(eager[i], 'Loading');
-      this.progressCb?.({
-        stage: 'bundle-mount',
-        label: eager[i].label,
-        message: `Mounting ${eager[i].label}…`,
-        fraction: (i + 1) / eager.length,
-      });
-      bundles.push(spec);
-    }
-
-    this.progressCb?.({ stage: 'bundle-mount', message: 'Mounting packages in engine…' });
-    const res: InitResult = await this.call('init', bundles);
+    this.progressCb?.({ stage: 'wasm', message: 'Starting compiler engine…' });
+    const res: InitResult = await this.call('init', []);
     this.engineCommit = res.version?.commit || 'unknown';
     // Stale-mix guard: the app bundle was built against a specific engine
     // commit; if the served (HTTP-cached) wasm reports a different one, the
@@ -191,39 +365,40 @@ export class EngineClient {
     this.inited = true;
     this.progressCb?.({
       stage: 'ready',
-      message: `Engine ready — mounted ${res.mounted} packages${
-        this.deferred.length ? ` (${this.deferred.length} deferred)` : ''
-      }.`,
+      message: `Engine ready — ${manifest.bundles.length} packages available on demand.`,
+      durationMs: res.initMs,
+      inputBytes: res.inputBytes,
+      metrics: { workerSerializeMs: res.serializeMs, wasmMs: res.wasmMs },
     });
     return res;
   }
 
-  /** Ensure the deferred (snapshot-only) bundles are fetched + mounted. Called
+  /** Ensure the snapshot-role bundles are fetched + mounted. Called
    *  before the first snapshot / site build. Idempotent + concurrency-safe: a
    *  single shared promise; subsequent calls resolve instantly. */
   async ensureSnapshotBundles(): Promise<void> {
-    if (this.deferred.length === 0) return;
+    if (this.snapshotBundles.length === 0) return;
     if (this.deferredMount) return this.deferredMount;
     this.deferredMount = (async () => {
-      const specs: BundleSpec[] = [];
-      for (const entry of this.deferred) {
-        specs.push(await this.loadBundle(entry, 'Loading (snapshot data)'));
-      }
+      const needed = this.snapshotBundles.filter((entry) => !this.mountedLabels.has(entry.label));
+      const specs = await Promise.all(
+        needed.map((entry) => this.loadBundle(entry, 'Loading (snapshot data)')),
+      );
       this.progressCb?.({
         stage: 'bundle-mount',
-        message: `Mounting ${specs.map((s) => s.label).join(', ')}…`,
+        message: `Mounting ${specs.map((item) => item.kind === 'raw' ? item.spec.label : item.pointer.label).join(', ')}…`,
       });
-      const r = await this.mountBundles(specs);
+      const r = await this.mountPackages(specs);
       // Mounted now; clear the deferred list so we don't re-fetch.
-      this.deferred = [];
+      this.snapshotBundles = [];
       this.progressCb?.({
         stage: 'ready',
         message: `Snapshot data ready — ${r.mounted} packages mounted.`,
       });
     })();
-    // Don't LATCH a failure: if the deferred fetch/mount rejects (flaky network,
+    // Don't LATCH a failure: if the snapshot fetch/mount rejects (flaky network,
     // corrupt bundle), clear the shared promise so a later snapshot/site build can
-    // retry instead of re-inheriting the same rejection forever. `this.deferred`
+    // retry instead of re-inheriting the same rejection forever. `snapshotBundles`
     // is only cleared on success (above), so a retry re-fetches the right set.
     this.deferredMount.catch(() => {
       this.deferredMount = null;
@@ -267,12 +442,12 @@ export class EngineClient {
   async acquireForProject(config: string): Promise<ResolveOutcome> {
     const cached = this.resolutionCache.get(config);
     if (cached) return cached;
-    // Acquisition can change the package material a subsequent compile reads,
-    // even when authored bytes are unchanged. Do not reuse a pre-acquisition
-    // compile result across that boundary.
-    this.compiledProjectRevision = null;
-    this.compiledProjectResult = null;
-    const { acquireForProject, indexFromLabels } = await import('./packageResolver');
+    const {
+      acquireForProject,
+      indexFromLabels,
+      obtainLockedPackages,
+      refreshMutableVersionIndex,
+    } = await import('./packageResolver');
     // Seed the resolver's version index with the baked manifest's pinned labels so
     // a `latest`/`x` request for a package that exists ONLY as a baked bundle (the
     // publisher-internal `.r4` alias set — hl7.fhir.uv.tools.r4 / hl7.terminology.r4
@@ -281,25 +456,133 @@ export class EngineClient {
     // as an unresolved_version, the registry can never answer, and it hard-blocks
     // with "no versions found" even though the bytes are already mounted.
     const seedIndex = indexFromLabels(this.bakedByLabel.keys());
-    const outcome = await acquireForProject(
-      {
-        resolveStep: (cfg, idx) => this.resolveStep(cfg, idx),
-        mount: async (bundles) => {
-          await this.mountBundles(bundles);
-        },
-        bakedBundle: (label) => this.bakedByLabel.get(label),
-        fetchBaked: (bundle) => this.loadBundle(bundle, 'Loading (dependency)'),
+    const host = {
+      resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
+      mount: async (bundles: PackageMountInput[]) => {
+        await this.mountPackages(bundles);
       },
+      bakedBundle: (label: string) => this.bakedByLabel.get(label),
+      fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (dependency)'),
+    };
+
+    // Persistent locks are prefetch plans, never authority. Refresh mutable
+    // requests, obtain the exact package bytes concurrently, mount once, then
+    // require Rust to reproduce the exact ordered closure before accepting it.
+    const lockStarted = performance.now();
+    const lockCache = await import('./resolutionLockCache');
+    const authority = {
+      engineRecipe: this.engineRecipe,
+      bakedPackages: [...this.bakedByLabel.values()].map(({ label, sha256 }) => ({ label, sha256 })),
+      registries: getRegistries(),
+      proxy: getPackageProxy(),
+    };
+    const lock = await lockCache.readResolutionLock(config, authority);
+    const lockReadMs = performance.now() - lockStarted;
+    let validatedIndex: VersionIndex | null = null;
+    if (lock) {
+      const freshnessStarted = performance.now();
+      validatedIndex = await refreshMutableVersionIndex(
+        lock.mutableRequests,
+        seedIndex,
+        (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+      );
+      const freshnessMs = performance.now() - freshnessStarted;
+      if (validatedIndex) {
+        const labels = lockCache.lockedLabels(lock);
+        const needed = labels.filter((label) => !this.mountedLabels.has(label));
+        const acquireStarted = performance.now();
+        const exact = await obtainLockedPackages(
+          host,
+          needed,
+          (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+        );
+        const acquireMs = performance.now() - acquireStarted;
+        if (exact.blocked.length === 0 && exact.packages.length === needed.length) {
+          const mountStarted = performance.now();
+          const lockMount = exact.packages.length > 0
+            ? await this.mountPackages(exact.packages)
+            : null;
+          const lockMountMs = performance.now() - mountStarted;
+          const verifyStarted = performance.now();
+          const verified = await this.resolveStep(config, validatedIndex);
+          const verifyMs = performance.now() - verifyStarted;
+          if (lockCache.resolutionMatchesLock(verified, lock)) {
+            const outcome: ResolveOutcome = {
+              step: verified,
+              blocked: [],
+              mounted: lockMount?.newlyMounted ?? [],
+              versionIndex: validatedIndex,
+            };
+            this.resolutionCache.record(config, outcome);
+            this.progressCb?.({
+              stage: 'resolve',
+              message: `Verified cached package closure (${labels.length} packages).`,
+              fromCache: true,
+              durationMs: performance.now() - lockStarted,
+              fileCount: labels.length,
+              metrics: {
+                persistentLockHit: 1,
+                lockReadMs,
+                freshnessMs,
+                exactAcquireMs: acquireMs,
+                lockMountMs,
+                rustVerifyMs: verifyMs,
+              },
+            });
+            return outcome;
+          }
+        }
+      }
+      this.progressCb?.({
+        stage: 'resolve',
+        message: 'Cached package closure was stale or incomplete; resolving normally.',
+        fromCache: false,
+        durationMs: performance.now() - lockStarted,
+        metrics: { persistentLockHit: 0, lockReadMs },
+      });
+    } else {
+      this.progressCb?.({
+        stage: 'resolve',
+        message: 'No cached package closure; resolving normally.',
+        fromCache: false,
+        durationMs: lockReadMs,
+        metrics: { persistentLockHit: 0, lockReadMs },
+      });
+    }
+    const outcome = await acquireForProject(
+      host,
       config,
       (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
-      seedIndex,
+      validatedIndex ?? seedIndex,
     );
     // The loop's final resolve happened after its final mount, so a satisfied
     // outcome belongs to the current package generation. Do not memoize a
     // blocked/network outcome forever: an unchanged project must be able to
     // retry when a registry or proxy recovers.
-    if (outcome.step.satisfied) this.resolutionCache.record(config, outcome);
-    else this.resolutionCache.clear();
+    if (outcome.step.satisfied) {
+      this.resolutionCache.record(config, outcome);
+      await lockCache.writeResolutionLock(
+        config,
+        authority,
+        outcome.step,
+        outcome.versionIndex,
+      ).catch(() => {});
+    } else {
+      this.resolutionCache.clear();
+    }
+    this.progressCb?.({
+      stage: 'resolve',
+      message: outcome.step.satisfied
+        ? `Resolved package closure (${outcome.step.context_closure.length} packages).`
+        : `Package resolution stopped with ${outcome.step.missing.length} missing packages.`,
+      durationMs: performance.now() - lockStarted,
+      fileCount: outcome.step.context_closure.length,
+      metrics: {
+        persistentLockHit: 0,
+        mountedPackages: outcome.mounted.length,
+        missingPackages: outcome.step.missing.length,
+      },
+    });
     return outcome;
   }
 
@@ -312,9 +595,21 @@ export class EngineClient {
     // Correctness is bound to both authored bytes and the package generation.
     // UI-level config memoization may suppress progress chrome, but it may not
     // bypass re-resolution after a deferred/template/dependency mount.
-    await this.acquireForProject(config);
-    const revision = await projectCompileRevision({ config, files, predefined, siteFiles });
+    const resolution = await this.acquireForProject(config);
+    const started = performance.now();
+    const packageClosure = exactPackageClosureIdentity(
+      resolution.step,
+      this.mountedPackageIdentities,
+    );
+    const revision = await projectCompileRevision({ config, files, predefined, siteFiles, packageClosure });
     if (revision === this.compiledProjectRevision && this.compiledProjectResult) {
+      this.progressCb?.({
+        stage: 'compile',
+        message: 'Reusing unchanged compiled project.',
+        fromCache: true,
+        durationMs: performance.now() - started,
+        fileCount: Object.keys(files).length + Object.keys(predefined).length,
+      });
       return this.compiledProjectResult;
     }
     // Every compile invalidates memoized snapshots (resources may have changed).
@@ -322,6 +617,23 @@ export class EngineClient {
     const result = await this.call('compile', config, files, predefined, siteFiles);
     this.compiledProjectRevision = revision;
     this.compiledProjectResult = result;
+    this.progressCb?.({
+      stage: 'compile',
+      message: `Compiled ${result.fileCount} FSH files and ${Object.keys(predefined).length} predefined resources.`,
+      durationMs: performance.now() - started,
+      fileCount: result.fileCount + Object.keys(predefined).length,
+      metrics: {
+        wasmBuildMs: result.buildMs,
+        ...(result.packageStorage ? {
+          packageCompressedRetainedBytes: result.packageStorage.compressedRetainedBytes,
+          packageDeclaredRawBytes: result.packageStorage.declaredRawBytes,
+          packageChunksInflated: result.packageStorage.chunksInflated,
+          packageRawInflatedBytes: result.packageStorage.rawInflatedBytes,
+          packageChunkCacheHits: result.packageStorage.cacheHits,
+          packageCachedRawBytes: result.packageStorage.cachedRawBytes,
+        } : {}),
+      },
+    });
     return result;
   }
 
@@ -339,17 +651,28 @@ export class EngineClient {
 
   async snapshot(url: string): Promise<SnapshotResult> {
     const cached = this.snapshotCache.get(url);
-    if (cached) return cached;
+    if (cached) {
+      this.progressCb?.({ stage: 'snapshot', label: url, message: `Reusing snapshot for ${url}.`, fromCache: true, durationMs: 0 });
+      return cached;
+    }
+    const started = performance.now();
     // Snapshots need the deferred (R5 core) bundle — mount it lazily first.
     await this.ensureSnapshotBundles();
     const res: SnapshotResult = await this.call('snapshot', url);
     this.snapshotCache.set(url, res);
+    this.progressCb?.({
+      stage: 'snapshot',
+      label: url,
+      message: `Prepared snapshot for ${url}.`,
+      durationMs: performance.now() - started,
+      metrics: { wasmSnapshotMs: res.snapshotMs },
+    });
     return res;
   }
 
   /** Tier-1 in-engine ValueSet expansion (spec §6 tier 1). Pure function of IG
    *  content — needs no mounted packages beyond the resources passed in, so it
-   *  runs even before the deferred bundles are mounted. */
+   * runs even before the snapshot bundles are mounted. */
   async expandValueSet(valueSetJson: string, resourcesJson: string): Promise<ExpandResult> {
     return this.call('expandValueSet', valueSetJson, resourcesJson);
   }
@@ -364,12 +687,54 @@ export class EngineClient {
     siteFiles: Record<string, string>,
     buildEpochSecs: number,
   ): Promise<SitePreviewResult> {
-    // The site build snapshots every SD, so it needs the deferred bundle too.
-    await this.ensureSnapshotBundles();
-    // A fresh deferred mount invalidates the resolver fixpoint and the host's
-    // compiled-revision cache. Re-establish both before projecting SiteBuild.
+    const started = performance.now();
+    // Establish the exact ProjectRevision + PackageLock digest without mounting
+    // snapshot-only material. A persistent closed-build hit can then skip both
+    // snapshot package work and Rust site production.
     await this.ensureCompiledProject(config, files, predefined, siteFiles);
-    return this.call('buildSite', config, files, predefined, siteFiles, buildEpochSecs);
+    let projectRevision = this.compiledProjectRevision;
+    if (!projectRevision) throw new Error('compiled project has no exact revision identity');
+    const restored = await this.call(
+      'restoreCycleSite',
+      projectRevision,
+      buildEpochSecs,
+      this.snapshotSourcesIdentity,
+    );
+    if (restored) {
+      this.progressCb?.({
+        stage: 'site-build',
+        message: `Restored closed Cycle SiteBuild ${restored.buildId}.`,
+        fromCache: true,
+        durationMs: performance.now() - started,
+        fileCount: restored.pages.length + restored.assets.length,
+        metrics: { workerBuildMs: restored.buildMs, persistentClosedBuildHit: 1 },
+      });
+      return restored;
+    }
+    // A cache miss needs the snapshot-role package. Its mount invalidates the
+    // resolver fixpoint; re-establish the exact compile closure afterward.
+    await this.ensureSnapshotBundles();
+    await this.ensureCompiledProject(config, files, predefined, siteFiles);
+    projectRevision = this.compiledProjectRevision;
+    if (!projectRevision) throw new Error('compiled project lost its exact revision identity');
+    const result = await this.call(
+      'buildSite',
+      config,
+      files,
+      predefined,
+      siteFiles,
+      buildEpochSecs,
+      projectRevision,
+      this.snapshotSourcesIdentity,
+    );
+    this.progressCb?.({
+      stage: 'site-build',
+      message: `Closed Cycle SiteBuild ${result.buildId}.`,
+      durationMs: performance.now() - started,
+      fileCount: result.pages.length + result.assets.length,
+      metrics: { workerBuildMs: result.buildMs, persistentClosedBuildHit: 0 },
+    });
+    return result;
   }
 
   /** Render one page to HTML (render-on-demand per visible page). */
@@ -378,7 +743,7 @@ export class EngineClient {
   }
 
   /** Fetch an asset's bytes (base64) for serving into the preview iframe. */
-  async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string } | null> {
+  async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string; fromCache?: boolean } | null> {
     return this.call('assetBytes', name);
   }
 
@@ -404,6 +769,19 @@ export class EngineClient {
     return this.call('produceStockSite');
   }
 
+  /** Freeze the current compiled/template/authored stock generation behind a
+   * content-derived predecessor handle. All page rendering must use this handle
+   * (or one of its returned successors), never the ambient Session site tree. */
+  async openStockBuild(templateCoord: string): Promise<StockBuildOpenResult> {
+    return this.call('openStockBuild', templateCoord);
+  }
+
+  /** Render from an explicit frozen stock build and return the immutable
+   * successor plus its typed Need<ArtifactKey> resolution batch. */
+  async renderStockPage(handle: string, name: string): Promise<StockPageRenderResult> {
+    return this.call('renderStockPage', handle, name);
+  }
+
   /** LIVE template load (#40): the full resolve→fetch→mount→materialize path.
    *  Walks the template's `base` chain (Rust's rule, mirrored in JS because
    *  `mountTemplate` consumes an already-mounted chain), fetching + mounting each
@@ -422,8 +800,8 @@ export class EngineClient {
       // are reused only for their transport (baked bundle lookup + registry fetch);
       // the CHAIN decision lives in the walk, not in resolveStep.
       resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
-      mount: async (bundles: BundleSpec[]) => {
-        await this.mountBundles(bundles);
+      mount: async (packages: PackageMountInput[]) => {
+        await this.mountPackages(packages);
       },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
       fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (template)'),
@@ -450,7 +828,7 @@ export class EngineClient {
     // OPFS materialized-tree cache first (#40 scope 4): a mapped tree we already
     // materialized under THIS engine commit — a pure read, no network/re-map.
     const { readCachedTemplateTree, writeCachedTemplateTree } = await import('./templateTreeCache');
-    const cached = await readCachedTemplateTree(coord, this.engineCommit);
+    const cached = await readCachedTemplateTree(coord, this.engineRecipe);
     if (cached) {
       this.progressCb?.({ stage: 'bundle-cache-hit', label: coord, message: `Template ${coord} (materialized cache)`, fromCache: true });
       return cached;
@@ -478,7 +856,7 @@ export class EngineClient {
       mapped[inc] = val;
     }
     // Write-through so the next load (any session) skips the fetch + re-map.
-    void writeCachedTemplateTree(coord, this.engineCommit, mapped);
+    void writeCachedTemplateTree(coord, this.engineRecipe, mapped);
     return mapped;
   }
 

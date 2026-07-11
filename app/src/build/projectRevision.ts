@@ -11,6 +11,9 @@ export interface ProjectCompileInputs {
   files: Record<string, string>;
   predefined: Record<string, unknown>;
   siteFiles: Record<string, string>;
+  /** Exact resolved package closure installed for this compile. Within one
+   * engine session labels are immutable content identities. */
+  packageClosure?: string;
 }
 
 function stableJson(value: unknown): string {

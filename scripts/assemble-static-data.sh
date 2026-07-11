@@ -16,7 +16,7 @@ node "$HERE/export-ig-manifest.mjs"
 # Catalog projects are pinned in igCatalog.json and baked as same-origin source
 # archives. Passing IDs to this script is intentionally unsupported: a complete
 # app assembly must never silently omit projects visible in the selector.
-find "$REPO/app/public/data" -mindepth 2 -maxdepth 2 -name source.tgz -delete 2>/dev/null || true
+find "$REPO/app/public/data" -mindepth 2 -maxdepth 2 \( -name source.tgz -o -name source.json \) -delete 2>/dev/null || true
 node "$HERE/bake-catalog.mjs"
 node "$HERE/copy-site-assets.mjs"
 
@@ -47,5 +47,6 @@ node "$HERE/build-publisher-runtime-pack.mjs"
 
 test -f "$REPO/app/public/data/cycle/manifest.json"
 test -f "$REPO/app/public/data/uscore/source.tgz"
+test -f "$REPO/app/public/data/uscore/source.json"
 test -f "$REPO/app/public/data/publisher-runtime/1.0.0.json"
 echo "[assemble-static-data] complete app/public/data assembled"
