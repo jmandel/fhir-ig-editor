@@ -87,6 +87,10 @@ Dependency landing receipts for this overhaul:
   any compiler-visible identity change takes the real compile path.
 - Normative README/runbook prose is updated. A stale Pages invocation of the
   deleted `site-gen/ingest.ts` and a stale Cycle tsconfig entry were removed.
+- The package-list drift recipe now asks Cargo to validate its default
+  `rust_sushi` binary against the current engine checkout before resolving. A
+  stale target binary can no longer make a local drift check disagree with CI;
+  the generated exact-version ordering is refreshed from `579cacf4`.
 
 ## Current verification
 

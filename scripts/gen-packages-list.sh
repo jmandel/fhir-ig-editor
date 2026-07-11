@@ -20,11 +20,20 @@ ENGINE="$REPO/vendor/sushi-rs"
 IG_DIR="$REPO/vendor/cycle"
 LIST="$HERE/packages.list"
 CACHE="${FHIR_CACHE:?set FHIR_CACHE to a populated packages dir (scripts/fetch-packages.sh)}"
-BIN="${RUST_SUSHI_BIN:-$ENGINE/target/release/rust_sushi}"
-
-if [ ! -x "$BIN" ]; then
-  echo "[gen-packages-list] building rust_sushi --release"
+if [ -n "${RUST_SUSHI_BIN:-}" ]; then
+  BIN="$RUST_SUSHI_BIN"
+  [ -x "$BIN" ] || {
+    echo "[gen-packages-list] RUST_SUSHI_BIN is not executable: $BIN" >&2
+    exit 2
+  }
+else
+  # A target binary can survive a submodule update and silently generate a
+  # closure using the previous resolver. Always let Cargo validate the default
+  # binary against the current engine sources; incremental no-op builds are
+  # cheap. CI may pass its just-built binary explicitly.
+  echo "[gen-packages-list] ensuring rust_sushi matches the engine checkout"
   ( cd "$ENGINE" && cargo build --release -p rust_sushi >/dev/null )
+  BIN="$ENGINE/target/release/rust_sushi"
 fi
 
 # The header (documentation) is preserved verbatim; only the label lines are
