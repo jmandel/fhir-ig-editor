@@ -25,7 +25,6 @@ import type {
   ResolutionStep,
   VersionIndex,
 } from './protocol';
-import { readCachedBundle } from './bundleCache';
 import { BakedBundleIntegrityError } from './bundleIntegrity';
 import type { BakedBundleEntry } from './bundleIntegrity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
@@ -292,8 +291,7 @@ async function obtainPackage(
 ): Promise<PackageMountInput | null> {
   const baked = host.bakedBundle(label);
   // A baked package's exact transport digest also keys the prepared cache. Let
-  // the host select prepared-binary vs legacy raw before consulting unpinned
-  // caches that are ineligible for this authoritative deployment input.
+  // the host select the authenticated prepared artifact or original transport.
   if (baked) {
     try {
       return await host.fetchBaked(baked);
@@ -302,24 +300,13 @@ async function obtainPackage(
       /* fall through to local/registry transport */
     }
   }
-  if (!label.includes('.template#')) {
-    const { findPreparedPackage, UNPINNED_TRANSPORT_IDENTITY } = await import('./preparedPackageCache');
-    const pointer = await findPreparedPackage(label, UNPINNED_TRANSPORT_IDENTITY);
-    if (pointer) {
-      onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (prepared binary)` });
-      return { kind: 'prepared', pointer };
-    }
+  const { findPreparedPackage, UNPINNED_TRANSPORT_IDENTITY } = await import('./preparedPackageCache');
+  const pointer = await findPreparedPackage(label, UNPINNED_TRANSPORT_IDENTITY);
+  if (pointer) {
+    onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (prepared binary)` });
+    return { kind: 'prepared', pointer };
   }
-  // (a') OPFS warm cache. Baked entries can only hit the cache key carrying
-  // their manifest digest; an older registry/local cache for the same label is
-  // deliberately ineligible.
-  const cached = await readCachedBundle(label, baked?.sha256);
-  if (cached) {
-    onProgress({ stage: 'bundle-cache-hit', label, message: `${label} (cached)` });
-    return { kind: 'raw', spec: cached, transportIdentity: baked ? `tgz-${baked.sha256}` : 'unpinned' };
-  }
-
-  // (b) local .tgz drag-drop — before any network.
+  // Local .tgz drag-drop — before any network.
   if (hasLocalPackage(label)) {
     const spec = getLocalPackage(label)!;
     return { kind: 'raw', spec, transportIdentity: 'unpinned' };
@@ -339,12 +326,13 @@ async function obtainPackage(
   return null;
 }
 
-/** Recovery ladder used when an unpinned prepared artifact fails validation.
- * Ordinarily the legacy raw cache is present from the cold acquisition; if it
- * is not, refetch the exact id#version from the configured registries. */
+/** Recovery ladder used when an unpinned PreparedPackage fails validation.
+ * Reuse an explicit local package or refetch the exact coordinate; stale
+ * inflated/base64 persistence is never recovery authority. */
 export async function obtainRawPackageByLabel(label: string): Promise<PackageMountInput | null> {
-  const cached = await readCachedBundle(label);
-  if (cached) return { kind: 'raw', spec: cached, transportIdentity: 'unpinned' };
+  if (hasLocalPackage(label)) {
+    return { kind: 'raw', spec: getLocalPackage(label)!, transportIdentity: 'unpinned' };
+  }
   const hash = label.lastIndexOf('#');
   if (hash <= 0) return null;
   const missing: MissingPackage = {
@@ -358,20 +346,15 @@ export async function obtainRawPackageByLabel(label: string): Promise<PackageMou
   return { kind: 'raw', spec, transportIdentity: 'unpinned' };
 }
 
-/** Obtain + mount ONE package by label, reusing the exact source ladder (#40
- *  template chain). The runtime resolver (`acquireForProject`) is DRIVEN by the
- *  engine's ResolutionStep; the template loader instead needs a specific chain
- *  package fetched on demand (the chain walk is the loader's decision — see
- *  templateChain.ts). This shares the OPFS→local→baked→registry ladder so template
- *  packages ride the SAME transport as regular packages, and mounts the result so
- *  a later `Session.mountTemplate` can read it. Returns the inflated `{name:
- *  base64}` files (also used to read the package.json for the next chain step), or
- *  null if no source could supply it. */
+/** Obtain and mount one exact coordinate requested by Rust's private template
+ * resolution handshake. Templates use the ordinary OPFS/local/baked/registry
+ * transport ladder, including complete PreparedPackage v2 artifacts. Returns
+ * only success; no package files cross back to the host. */
 export async function obtainAndMountPackage(
   host: ResolverHost,
   label: string,
   onProgress: ResolveProgress,
-): Promise<Record<string, string> | null> {
+): Promise<boolean> {
   const hash = label.lastIndexOf('#');
   const missing: MissingPackage = {
     package_id: hash > 0 ? label.slice(0, hash) : label,
@@ -381,12 +364,9 @@ export async function obtainAndMountPackage(
   };
   const blocked: BlockedPackage[] = [];
   const packageInput = await obtainPackage(host, label, missing, onProgress, blocked);
-  if (!packageInput) return null;
-  if (packageInput.kind !== 'raw') {
-    throw new Error(`template package ${label} unexpectedly selected prepared-only transport`);
-  }
+  if (!packageInput) return false;
   await host.mount([packageInput]);
-  return packageInput.spec.files;
+  return true;
 }
 
 /** Fetch a package tarball from the configured registries (packages.fhir.org →

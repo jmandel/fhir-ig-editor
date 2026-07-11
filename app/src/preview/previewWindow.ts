@@ -1,45 +1,115 @@
-// Preview-window plumbing (task #37): the editor-tab side of the "Open site in a
-// new window" feature. Owns:
-//   - Service-Worker registration (scope `<base>preview/`) + capability probe.
-//   - The RENDER RESPONDER: answers the SW's MessageChannel render/asset requests
-//     for the currently-selected generator via its adapter (tier b of the ladder).
-//   - HTML rewriting for preview-served pages: a <base> so relative asset refs
-//     resolve under the preview path, plus a tiny, clearly-marked hot-reload +
-//     stale-banner client snippet.
-//   - HOT RELOAD coordination over a BroadcastChannel: open preview tabs announce
-//     their path; on each new compile generation the editor re-renders those pages,
-//     byte-compares, and reloads ONLY the tabs whose page actually changed.
-//
-// FOOLPROOFING: no SW support / registration failure -> capable=false; the caller
-// disables the button and keeps the in-pane preview. The BroadcastChannel snippet
-// fails silent if the channel is gone (editor closed -> the tab just stays static;
-// the SW tiers still serve it).
+/** Preview publication is a host for the same immutable site outputs used by
+ * finalize. It does not own an adapter, an asset manifest, or renderer state. */
 
-import type { SiteGeneratorAdapter } from '../adapters/types';
+import type {
+  BuildHandle,
+  ContentRef,
+  OutputCatalog,
+  OutputDescriptor,
+  RenderedOutput,
+} from '../site/contract';
+import { contentStore } from '../storage/contentStore';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 export const PREVIEW_ROOT = `${BASE}preview/`;
 const CHANNEL_NAME = 'igpreview';
+export const PREVIEW_SW_PROTOCOL = 4;
+const SHA256 = /^[0-9a-f]{64}$/;
+const MAX_OUTPUTS = 20_000;
+const MAX_CATALOG_CHARS = 8 * 1024 * 1024;
+const PREVIEW_CLIENT_TTL_MS = 5 * 60_000;
 
-/** Bump this whenever the editor/SW control-message contract changes
- * incompatibly. The version is part of the script URL so an already-installed
- * worker cannot remain active merely because a browser reuses a cached
- * `preview-sw.js` registration during a rolling deployment. */
-export const PREVIEW_SW_PROTOCOL = 3;
+export interface PreviewSource {
+  igId: string;
+  handle: BuildHandle;
+  buildId: string;
+  catalog: OutputCatalog;
+}
 
 export function previewWorkerScriptPath(base = BASE): string {
   return `${base.replace(/\/?$/, '/')}preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}`;
 }
 
-/** Build the real preview URL for a page under a generator. */
-export function previewUrl(generatorId: string, pagePath: string): string {
-  const gen = encodeURIComponent(generatorId);
-  // Encode each path segment but keep the slashes (real nested URLs).
+export function previewUrl(igId: string, pagePath: string): string {
+  const ig = encodeURIComponent(igId);
   const path = pagePath.split('/').map(encodeURIComponent).join('/');
-  return `${PREVIEW_ROOT}${gen}/${path}`;
+  return `${PREVIEW_ROOT}${ig}/${path}`;
 }
 
-// ---- SW registration -----------------------------------------------------------
+function validContentRef(value: unknown): value is ContentRef {
+  if (!value || typeof value !== 'object') return false;
+  const ref = value as Partial<ContentRef>;
+  return typeof ref.sha256 === 'string'
+    && SHA256.test(ref.sha256)
+    && Number.isSafeInteger(ref.byteLength)
+    && (ref.byteLength ?? -1) >= 0
+    && (ref.mediaType == null || (typeof ref.mediaType === 'string' && !/[\r\n]/.test(ref.mediaType)));
+}
+
+/** Catalog paths are URL-relative exact output names. Reject traversal,
+ * aliases, query/fragment ambiguity, and duplicate names at publication. */
+export function isSafePreviewPath(path: unknown): path is string {
+  if (typeof path !== 'string' || !path || path.length > 2_048) return false;
+  if (path.startsWith('/') || path.includes('\\') || /[?#\0]/.test(path)) return false;
+  const parts = path.split('/');
+  return parts.every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
+export function validatePreviewSource(value: PreviewSource): PreviewSource {
+  if (!value || typeof value !== 'object') throw new Error('preview source is required');
+  if (typeof value.igId !== 'string' || !value.igId || value.igId.length > 256 || /[\\/\0]/.test(value.igId)) {
+    throw new Error('preview IG id is invalid');
+  }
+  if (typeof value.handle !== 'string' || !value.handle || value.handle.length > 512) {
+    throw new Error('preview build handle is invalid');
+  }
+  if (typeof value.buildId !== 'string' || !value.buildId || value.buildId.length > 512) {
+    throw new Error('preview build id is invalid');
+  }
+  if (!value.catalog || value.catalog.buildId !== value.buildId || !Array.isArray(value.catalog.outputs)) {
+    throw new Error('preview catalog does not belong to its build');
+  }
+  if (value.catalog.outputs.length > MAX_OUTPUTS) throw new Error('preview catalog is too large');
+  const paths = new Set<string>();
+  let catalogChars = 0;
+  for (const output of value.catalog.outputs) {
+    if (!isSafePreviewPath(output.path)) throw new Error(`unsafe preview output path ${String(output.path)}`);
+    if (paths.has(output.path)) throw new Error(`duplicate preview output path ${output.path}`);
+    paths.add(output.path);
+    if (!['page', 'asset', 'auxiliary'].includes(output.kind)) {
+      throw new Error(`invalid preview output kind for ${output.path}`);
+    }
+    if (typeof output.mediaType !== 'string' || !output.mediaType || output.mediaType.length > 256 || /[\r\n]/.test(output.mediaType)) {
+      throw new Error(`invalid preview media type for ${output.path}`);
+    }
+    catalogChars += output.path.length + output.mediaType.length;
+    if (catalogChars > MAX_CATALOG_CHARS) throw new Error('preview catalog metadata is too large');
+    if (output.content != null && !validContentRef(output.content)) {
+      throw new Error(`invalid preview content reference for ${output.path}`);
+    }
+    if (output.content?.mediaType && output.content.mediaType !== output.mediaType) {
+      throw new Error(`preview content media type disagrees for ${output.path}`);
+    }
+  }
+  const outputs = value.catalog.outputs.map((output) => Object.freeze({
+    ...output,
+    ...(output.content ? { content: Object.freeze({ ...output.content }) } : {}),
+  }));
+  return Object.freeze({
+    igId: value.igId,
+    handle: value.handle,
+    buildId: value.buildId,
+    catalog: Object.freeze({ buildId: value.catalog.buildId, outputs: Object.freeze(outputs) }),
+  }) as PreviewSource;
+}
+
+export function previewContentChanged(before: ContentRef | null, after: ContentRef): boolean {
+  return before == null
+    || before.sha256 !== after.sha256
+    || before.byteLength !== after.byteLength;
+}
+
+// ---- Service Worker registration ----------------------------------------------
 
 let swRegistration: ServiceWorkerRegistration | null = null;
 let compatibleWorker: ServiceWorker | null = null;
@@ -51,10 +121,6 @@ export function isCompatiblePreviewWorkerPong(value: unknown): boolean {
   return pong.type === 'igpreview:pong' && pong.protocol === PREVIEW_SW_PROTOCOL;
 }
 
-/** Probe one worker over the same MessageChannel mechanism used by commits.
- * Legacy workers either ignore this message or reply without `protocol`; both
- * are deliberately incompatible instead of being allowed to swallow a newer
- * commit message without acknowledging it. */
 export async function previewWorkerProtocol(
   worker: Pick<ServiceWorker, 'postMessage'>,
   timeoutMs = 1_500,
@@ -87,9 +153,6 @@ export interface PreviewWorkerWaitOptions {
   pingTimeoutMs?: number;
 }
 
-/** Wait for the worker at the desired versioned script URL, not merely any
- * active worker for this scope. This is exported so the old-active/new-app
- * rolling-deployment case can be tested without a browser-global singleton. */
 export async function waitForCompatiblePreviewWorker(
   registration: Pick<ServiceWorkerRegistration, 'active' | 'update'>,
   desiredScriptUrl: string,
@@ -99,18 +162,14 @@ export async function waitForCompatiblePreviewWorker(
   const pollMs = options.pollMs ?? 100;
   const pingTimeoutMs = options.pingTimeoutMs ?? 1_500;
   const deadline = Date.now() + timeoutMs;
-  // `register()` normally starts the update itself. An explicit update closes
-  // the throttled/cached-registration case seen on returning mobile browsers.
   void registration.update().catch(() => undefined);
   while (Date.now() < deadline) {
     const active = registration.active;
     if (
-      active?.state === 'activated' &&
-      active.scriptURL === desiredScriptUrl &&
-      (await previewWorkerProtocol(active, pingTimeoutMs)) === PREVIEW_SW_PROTOCOL
-    ) {
-      return active;
-    }
+      active?.state === 'activated'
+      && active.scriptURL === desiredScriptUrl
+      && (await previewWorkerProtocol(active, pingTimeoutMs)) === PREVIEW_SW_PROTOCOL
+    ) return active;
     await new Promise<void>((resolve) => globalThis.setTimeout(resolve, pollMs));
   }
   throw new Error(`preview Service Worker protocol ${PREVIEW_SW_PROTOCOL} did not activate`);
@@ -119,18 +178,11 @@ export async function waitForCompatiblePreviewWorker(
 async function registerCompatiblePreviewWorker(): Promise<ServiceWorker> {
   const scriptPath = previewWorkerScriptPath();
   const desiredScriptUrl = new URL(scriptPath, window.location.href).href;
-  const options: RegistrationOptions = {
-    scope: PREVIEW_ROOT,
-    updateViaCache: 'none',
-  };
+  const options: RegistrationOptions = { scope: PREVIEW_ROOT, updateViaCache: 'none', type: 'module' };
   swRegistration = await navigator.serviceWorker.register(scriptPath, options);
   try {
     return await waitForCompatiblePreviewWorker(swRegistration, desiredScriptUrl);
   } catch (firstError) {
-    // A stale incompatible registration should normally be replaced by the
-    // versioned register above. Some mobile browsers retain it through the
-    // update window; unregistering the scope is the bounded recovery. Cache API
-    // page bytes are independent of the registration and remain available.
     console.warn('[igpreview] replacing incompatible preview Service Worker:', firstError);
     await swRegistration.unregister();
     swRegistration = await navigator.serviceWorker.register(scriptPath, options);
@@ -138,12 +190,8 @@ async function registerCompatiblePreviewWorker(): Promise<ServiceWorker> {
   }
 }
 
-/** Register the preview SW (idempotent). Returns whether preview windows are
- *  supported in this browser/context (false in private windows without SW, etc.). */
 export async function ensurePreviewServiceWorker(): Promise<boolean> {
-  if (!('serviceWorker' in navigator)) {
-    return false;
-  }
+  if (!('serviceWorker' in navigator)) return false;
   if (compatibleWorker?.state === 'activated') return true;
   if (swReadyPromise) return (await swReadyPromise) !== null;
   const pending = registerCompatiblePreviewWorker().then(
@@ -151,8 +199,8 @@ export async function ensurePreviewServiceWorker(): Promise<boolean> {
       compatibleWorker = worker;
       return worker;
     },
-    (e) => {
-      console.warn('[igpreview] SW registration failed; preview disabled:', e);
+    (error) => {
+      console.warn('[igpreview] SW registration failed; preview disabled:', error);
       compatibleWorker = null;
       return null;
     },
@@ -165,283 +213,63 @@ export async function ensurePreviewServiceWorker(): Promise<boolean> {
   }
 }
 
-/** Tell the active SW the current compile generation (drives cache naming + prune). */
-export async function announceGenerationToSW(generation: number): Promise<void> {
-  try {
-    const sw = await activePreviewWorker();
-    sw?.postMessage({ type: 'igpreview:setGeneration', generation });
-  } catch {
-    /* best-effort */
-  }
-}
-
 async function activePreviewWorker(): Promise<ServiceWorker | null> {
   if (!(await ensurePreviewServiceWorker())) return null;
   return compatibleWorker?.state === 'activated' ? compatibleWorker : null;
 }
 
-async function postToPreviewWorker(
-  message: Record<string, unknown>,
-  transfer: Transferable[] = [],
-  mayCommit: () => boolean = () => true,
-): Promise<boolean> {
+async function commitToPreviewWorker(
+  source: PreviewSource,
+  generation: number,
+  mayCommit: () => boolean,
+): Promise<number | null> {
   const sw = await activePreviewWorker();
-  // The worker lookup is an await point. A project/generator request can revoke
-  // the build while registration is resolving; do not send that obsolete
-  // generation afterward.
-  if (!mayCommit()) return false;
+  if (!mayCommit()) return null;
   if (!sw) throw new Error('compatible preview Service Worker is unavailable');
-  const channel = new MessageChannel();
-  await new Promise<void>((resolve, reject) => {
-    const timer = globalThis.setTimeout(
-      () => {
-        channel.port1.close();
-        reject(new Error('preview Service Worker commit acknowledgement timed out'));
-      },
-      12_000,
-    );
+  const post = (order: number) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timer = globalThis.setTimeout(() => {
+      channel.port1.close();
+      reject(new Error('preview Service Worker commit acknowledgement timed out'));
+    }, 12_000);
     channel.port1.onmessage = (event) => {
-      if (event.data?.ok) {
-        globalThis.clearTimeout(timer);
-        channel.port1.close();
-        resolve();
-      } else {
-        globalThis.clearTimeout(timer);
-        channel.port1.close();
-        reject(new Error(event.data?.error || 'preview Service Worker rejected generation'));
-      }
+      globalThis.clearTimeout(timer);
+      channel.port1.close();
+      resolve(event.data || {});
     };
     try {
-      sw.postMessage(message, [channel.port2, ...transfer]);
+      sw.postMessage({ type: 'igpreview:commit', generation: order, source }, [channel.port2]);
     } catch (error) {
       globalThis.clearTimeout(timer);
       channel.port1.close();
       reject(error);
     }
   });
-  return true;
-}
-
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const bin = atob(b64);
-  const buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-  return buf.buffer;
-}
-
-/** Push the CURRENT generation's COMPLETE static asset set to the SW in one message,
- *  so the SW serves every asset (the ~80 table icons/css/js a page pulls) itself —
- *  no per-asset round-trip to this tab's main thread (the thing that made navigation
- *  slow). Deterministic + generation-keyed (a recompile pushes a fresh set), so it is
- *  NOT a lazy cache guessing at staleness. Bytes ride as transferables (zero-copy). */
-export async function provisionAssetsToSW(src: PreviewSource): Promise<void> {
-  try {
-    if (!src.adapter.assetManifest) return;
-    const sw = await activePreviewWorker();
-    if (!sw) return;
-    const { pagePrefix, assets } = src.adapter.assetManifest();
-    const entries = Object.entries(assets).map(([key, a]) => ({
-      key,
-      mime: a.mime,
-      bytes: base64ToArrayBuffer(a.b64),
-    }));
-    sw.postMessage(
-      { type: 'igpreview:provisionAssets', generation: src.generation, igId: src.igId, pagePrefix, assets: entries },
-      entries.map((e) => e.bytes), // transfer the ArrayBuffers (neuters our copies; we re-decode on re-provision)
-    );
-  } catch {
-    /* best-effort: the SW just falls back to per-asset serving until next provision */
+  let acknowledgement = await post(generation);
+  // A hard reload or wall-clock correction can start below the persisted
+  // order. Retry above the worker's authenticated pointer; never weaken the
+  // worker's stale-write rejection.
+  if (acknowledgement.errorCode === 'stale-generation'
+    && Number.isSafeInteger(acknowledgement.generation)
+    && mayCommit()) {
+    acknowledgement = await post((acknowledgement.generation as number) + 1);
   }
-}
-
-// ---- HTML rewriting for preview-served pages -----------------------------------
-
-/** The injected client snippet: reports this tab's path to the editor and reloads
- *  itself when the editor announces its page changed. Clearly marked; fails silent. */
-function hotReloadSnippet(generatorId: string, pagePath: string, generation: number): string {
-  const payload = JSON.stringify({ generator: generatorId, path: pagePath, generation });
-  // Kept intentionally small + defensive. `data-igpreview` marks it as injected.
-  return `<script data-igpreview="hot-reload">(function(){try{
-  var me=${payload};
-  // A prepared page can be composed into another rendered shell. A control
-  // block is authoritative only at its own URL; a stale nested block must not
-  // subscribe or react to another page's reload message.
-  var here;try{here=decodeURIComponent(location.pathname);}catch(e){here=location.pathname;}
-  if(!here.endsWith('/'+me.path))return;
-  var controlKey=me.generator+'\\n'+me.path;
-  if(window.__igpreviewHotReloadKey===controlKey)return;
-  window.__igpreviewHotReloadKey=controlKey;
-  var scrollKey='igpreview:scroll:'+controlKey;
-  // location.reload() does not consistently restore scroll in iframes/mobile
-  // browsers. Consume the position captured by the prior generation and apply
-  // it repeatedly while late layout/images settle.
-  try{var saved=sessionStorage.getItem(scrollKey);if(saved){sessionStorage.removeItem(scrollKey);var pos=JSON.parse(saved);if(Number.isFinite(pos.x)&&Number.isFinite(pos.y)){
-    var oldRestoration=history.scrollRestoration;history.scrollRestoration='manual';
-    var restore=function(){scrollTo(pos.x,pos.y);};
-    restore();requestAnimationFrame(function(){restore();requestAnimationFrame(restore);});
-    setTimeout(restore,250);setTimeout(function(){restore();history.scrollRestoration=oldRestoration;},1000);
-  }}}catch(e){}
-  var mine=document.currentScript;
-  var root=document.body||document.documentElement;
-  var prune=function(){root.querySelectorAll('script[data-igpreview="hot-reload"]').forEach(function(s){if(s!==mine)s.remove();});};
-  prune();
-  // Some page runtimes compose prepared HTML after this block has executed.
-  // Keep the one URL-authoritative control block invariant even for those late
-  // body insertions. Do not observe/remove jQuery's temporary HEAD script: its
-  // evaluator owns that node and removes it synchronously after execution.
-  var observer=new MutationObserver(prune);
-  observer.observe(root,{childList:true,subtree:true});
-  window.addEventListener('pagehide',function(){observer.disconnect();},{once:true});
-  var ch=new BroadcastChannel(${JSON.stringify(CHANNEL_NAME)});
-  var clientId;try{
-    clientId=sessionStorage.getItem('igpreview:client-id');
-    if(!clientId){clientId=(globalThis.crypto&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);sessionStorage.setItem('igpreview:client-id',clientId);}
-  }catch(e){clientId=Date.now().toString(36)+Math.random().toString(36).slice(2);}
-  var say=function(){try{ch.postMessage({type:'hello',clientId:clientId,generator:me.generator,path:me.path,generation:me.generation});}catch(e){}};
-  ch.onmessage=function(ev){var d=ev.data;if(!d)return;
-    if(d.type==='reload'&&d.generator===me.generator&&d.generation>=me.generation&&Array.isArray(d.paths)&&d.paths.indexOf(me.path)>=0){
-      // Our page changed in a newer generation. Persist position explicitly;
-      // browser-native restoration is unreliable for same-URL iframe reloads.
-      try{sessionStorage.setItem(scrollKey,JSON.stringify({x:scrollX,y:scrollY}));}catch(e){}
-      location.reload();
-    }
-    if(d.type==='who')say();
-  };
-  say();
-  // Re-announce when the tab regains focus (editor may have (re)opened meanwhile).
-  window.addEventListener('pageshow',say);
-}catch(e){/* channel gone: stay static, tiers still serve us */}})();</script>`;
-}
-
-/** A minimal, clearly-marked banner shown when the served page is from a stale
- *  generation and a fresher render is available. Non-invasive; auto-dismisses on reload. */
-function staleBannerSnippet(): string {
-  return `<div data-igpreview="stale-banner" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483647;
-  font:13px/1.4 system-ui,sans-serif;background:#fef9c3;color:#713f12;padding:.4rem .8rem;
-  border-top:1px solid #eab308;text-align:center">A newer version of this page is available — reloading…</div>`;
-}
-
-/** Rewrite a rendered page for preview serving: inject <base> (so the adapter's
- *  asset refs resolve under the preview path) + the hot-reload snippet. */
-export function preparePreviewHtml(
-  rawHtml: string,
-  generatorId: string,
-  pagePath: string,
-  generation: number,
-  opts?: { stale?: boolean },
-): string {
-  // This boundary is deliberately idempotent. A cached/prepared page can be fed
-  // through the responder again; retaining its old control block would make one
-  // document listen as two different paths and reload on an unrelated edit.
-  let out = rawHtml
-    .replace(/<script\b[^>]*data-igpreview=["']hot-reload["'][^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<div\b[^>]*data-igpreview=["']stale-banner["'][^>]*>[\s\S]*?<\/div>/gi, '')
-    .replace(/<base\b[^>]*data-igpreview=["']base["'][^>]*>/gi, '');
-  // <base>: use the page's FULL preview URL. Relative assets still resolve
-  // against its containing directory, while fragment-only links such as
-  // `#tabs-key` resolve to this exact document. A directory base makes jQuery
-  // UI classify those anchors as remote tabs; it then AJAX-loads `index.html`
-  // and inserts a complete second site shell into the tab panel.
-  const baseHref = previewUrl(generatorId, pagePath);
-  const baseTag = `<base data-igpreview="base" href="${baseHref}">`;
-  if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
-  else out = `${baseTag}${out}`;
-
-  const inject = hotReloadSnippet(generatorId, pagePath, generation) + (opts?.stale ? staleBannerSnippet() : '');
-  if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, `${inject}</body>`);
-  else out += inject;
-  return out;
-}
-
-// ---- render responder + hot-reload coordinator ---------------------------------
-
-export interface PreviewSource {
-  /** The IG id — the URL-scheme KEY (`preview/<igId>/<path>`). Content is identified
-   *  by the IG, so the SAME URL works embedded (iframe src) and external (new tab),
-   *  and IGs with overlapping page names never collide. */
-  igId: string;
-  /** The generator id whose adapter is currently initialized in this editor tab. */
-  generatorId: string;
-  adapter: SiteGeneratorAdapter;
-  /** The current compile generation (monotonic). */
-  generation: number;
-}
-
-export interface PreviewAssetTransfer {
-  key: string;
-  mime: string;
-  bytes: ArrayBuffer;
-}
-
-type PreviewWorkerPost = (
-  message: Record<string, unknown>,
-  transfer?: Transferable[],
-  mayCommit?: () => boolean,
-) => Promise<boolean>;
-
-/** Commit the optimized generation+asset pair, but preserve correctness when a
- * mobile worker cannot accept the large transfer promptly. The fallback is a
- * small generation-only commit; assets remain available through the existing
- * live responder and may be provisioned again after UI publication. */
-export async function commitPreviewGenerationWithFallback(
-  next: Pick<PreviewSource, 'generation' | 'igId'>,
-  pagePrefix: string,
-  entries: PreviewAssetTransfer[],
-  hasAssetManifest: boolean,
-  mayCommit: () => boolean,
-  post: PreviewWorkerPost = postToPreviewWorker,
-): Promise<{ committed: boolean; fullAssetsCommitted: boolean; fullAssetError?: unknown }> {
-  try {
-    const committed = await post(
-      {
-        type: 'igpreview:commitGeneration',
-        generation: next.generation,
-        igId: next.igId,
-        pagePrefix,
-        hasAssetManifest,
-        assets: entries,
-      },
-      entries.map((entry) => entry.bytes),
-      mayCommit,
-    );
-    return { committed, fullAssetsCommitted: true };
-  } catch (fullAssetError) {
-    if (!mayCommit()) return { committed: false, fullAssetsCommitted: false, fullAssetError };
-    const committed = await post(
-      {
-        type: 'igpreview:commitGeneration',
-        generation: next.generation,
-        igId: next.igId,
-        pagePrefix,
-        hasAssetManifest: false,
-        assets: [],
-      },
-      [],
-      mayCommit,
-    );
-    return { committed, fullAssetsCommitted: false, fullAssetError };
+  if (acknowledgement.ok && Number.isSafeInteger(acknowledgement.generation)) {
+    return acknowledgement.generation as number;
   }
+  throw new Error(String(acknowledgement.error || 'preview Service Worker rejected publication'));
 }
 
-/** Live source, updated by the editor as the selected generator / generation changes. */
+// ---- Immutable publication + live unresolved-output responder -----------------
+
+type RenderOutput = (handle: BuildHandle, path: string) => Promise<RenderedOutput>;
+let renderOutput: RenderOutput | null = null;
 let source: PreviewSource | null = null;
-
-const CACHE_PREFIX = `igpreview:v${PREVIEW_SW_PROTOCOL}::`;
-
-/** Cache search law for hot-reload comparison: never inspect a generation newer
- * than the page set that was current before publication. */
-export function previewCacheCandidates(available: string[], generation: number): string[] {
-  const exact = `${CACHE_PREFIX}${generation}`;
-  return [
-    ...(available.includes(exact) ? [exact] : []),
-    ...available
-      .filter((key) => {
-        if (!key.startsWith(CACHE_PREFIX) || key === exact) return false;
-        return (Number(key.slice(CACHE_PREFIX.length)) || 0) <= generation;
-      })
-      .sort((a, b) => (Number(b.slice(CACHE_PREFIX.length)) || 0) - (Number(a.slice(CACHE_PREFIX.length)) || 0)),
-  ];
-}
+let sourceGeneration = 0;
+let lastPublicationOrder = 0;
+let channel: BroadcastChannel | null = null;
+let responderWired = false;
+const resolvedRefs = new Map<string, ContentRef>();
 
 export interface PreviewClientRegistration {
   igId: string;
@@ -449,22 +277,16 @@ export interface PreviewClientRegistration {
   lastSeen: number;
 }
 
-/** One current path per live preview browsing context. A stable client id means
- * navigating a tab replaces its old path instead of accumulating every page it
- * has ever visited. The IG key still prevents cross-project publication. */
 const openPreviews = new Map<string, PreviewClientRegistration>();
-const PREVIEW_CLIENT_TTL_MS = 5 * 60_000;
 
 export function registeredPreviewPaths(
   registry: ReadonlyMap<string, PreviewClientRegistration>,
   igId: string,
   now = Date.now(),
 ): string[] {
-  return [...new Set(
-    [...registry.values()]
-      .filter((client) => client.igId === igId && now - client.lastSeen <= PREVIEW_CLIENT_TTL_MS)
-      .map((client) => client.path),
-  )];
+  return [...new Set([...registry.values()]
+    .filter((client) => client.igId === igId && now - client.lastSeen <= PREVIEW_CLIENT_TTL_MS)
+    .map((client) => client.path))];
 }
 
 function registerPreviewPath(clientId: string, igId: string, path: string): void {
@@ -475,278 +297,175 @@ function registerPreviewPath(clientId: string, igId: string, path: string): void
   }
 }
 
-/** The full preview URL pathname for a page under the current source's generator. */
-function pagePathname(generatorId: string, page: string): string {
-  return new URL(previewUrl(generatorId, page), self.location.origin).pathname;
+function descriptor(catalog: OutputCatalog, path: string): OutputDescriptor | null {
+  return catalog.outputs.find((output) => output.path === path) ?? null;
 }
 
-/** Read the page bytes from the generation that was current before publication.
- * Looking in the newest cache is racy: the embedded iframe can render the new
- * page before this comparison, making an old external tab appear up to date. */
-async function readCachedPage(pathname: string, generation: number): Promise<string | null> {
-  if (typeof caches === 'undefined') return null;
-  const available = await caches.keys();
-  const keys = previewCacheCandidates(available, generation);
-  for (const k of keys) {
-    const c = await caches.open(k);
-    const hit = await c.match(pathname);
-    if (hit) return hit.text();
+function resolvedKey(build: PreviewSource, path: string): string {
+  return `${build.handle}\u0000${build.buildId}\u0000${path}`;
+}
+
+async function resolveRef(build: PreviewSource, path: string): Promise<ContentRef | null> {
+  const output = descriptor(build.catalog, path);
+  if (!output) return null;
+  if (output.content) return output.content;
+  const known = resolvedRefs.get(resolvedKey(build, path));
+  if (known) return known;
+  if (!renderOutput) return null;
+  const rendered = await renderOutput(build.handle, path);
+  if (rendered.path !== path || rendered.mediaType !== output.mediaType || !validContentRef(rendered.content)) {
+    throw new Error(`renderer returned an invalid output for ${path}`);
   }
-  return null;
+  resolvedRefs.set(resolvedKey(build, path), rendered.content);
+  return rendered.content;
 }
 
-/** Write fresh bytes into the current generation's cache (so a reloaded tab gets
- *  the new render straight from tier a). */
-async function writeCachedPage(pathname: string, html: string, generation: number): Promise<void> {
-  if (typeof caches === 'undefined') return;
-  try {
-    const c = await caches.open(`${CACHE_PREFIX}${generation}`);
-    await c.put(
-      pathname,
-      new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'refresh' } }),
-    );
-  } catch {
-    /* best-effort */
-  }
-}
-
-let channel: BroadcastChannel | null = null;
-let responderWired = false;
-
-/** Point the responder at the currently-selected generator + generation. Call on
- *  every adapter (re)init. Kicks off a smart hot-reload pass for open preview tabs. */
-export async function publishPreviewSource(
-  next: PreviewSource,
-  mayCommit: () => boolean = () => true,
-): Promise<boolean> {
-  const prevGen = source?.generation ?? -1;
-  const manifest = next.adapter.assetManifest?.();
-  const entries = manifest
-    ? Object.entries(manifest.assets).map(([key, asset]) => ({
-        key,
-        mime: asset.mime,
-        bytes: base64ToArrayBuffer(asset.b64),
-      }))
-    : [];
-
-  // One acknowledged message atomically advances BOTH the generation pointer and
-  // its complete asset manifest. The UI does not navigate an iframe to the new
-  // build until this resolves, so first-load asset requests cannot race an older
-  // provisioned set.
-  const commit = await commitPreviewGenerationWithFallback(
-    next,
-    manifest?.pagePrefix ?? '',
-    entries,
-    !!manifest,
-    mayCommit,
-  );
-  if (!commit.committed) return false;
-  if (!commit.fullAssetsCommitted) {
-    // A large stock-template asset transfer can exceed a mobile browser's SW
-    // wake/clone budget even though page rendering already succeeded. The small
-    // commit above keeps the actual site usable through the live asset responder.
-    console.warn('[igpreview] full asset commit failed; using live asset fallback:', commit.fullAssetError);
-  }
-
-  source = next;
-  if (!commit.fullAssetsCommitted && manifest) void provisionAssetsToSW(next);
-  if (next.generation !== prevGen) void refreshOpenPreviews(prevGen);
-  return true;
-}
-
-/** Backward-compatible best-effort wrapper for older callers. New build code
- * should await publishPreviewSource before committing its UI generation. */
-export function updatePreviewSource(next: PreviewSource): void {
-  void publishPreviewSource(next);
-}
-
-/** Wire the SW render responder + the BroadcastChannel hot-reload bus (idempotent). */
-export function wirePreviewResponder(): void {
+export function wirePreviewResponder(render: RenderOutput): void {
+  renderOutput = render;
   if (responderWired) return;
   responderWired = true;
-
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (event) => {
-      const msg = event.data;
-      if (!msg) return;
-      // The SW restarted (idle-killed) and lost its provisioned asset set — re-push it.
-      if (msg.type === 'igpreview:needAssets') {
-        if (source) void provisionAssetsToSW(source);
-        return;
-      }
-      if (msg.type !== 'igpreview:render') return;
+      const message = event.data;
       const port = event.ports[0];
       if (!port) return;
-      void answerRender(msg.generator, msg.path, !!msg.isPage, port);
+      if (message?.type === 'igpreview:render') void answerRender(message, port);
+      if (message?.type === 'igpreview:content') void answerContent(message, port);
     });
   }
-
   try {
     channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.onmessage = (ev) => {
-      const d = ev.data;
-      if (!d) return;
-      if (d.type === 'hello' && typeof d.generator === 'string' && typeof d.path === 'string') {
-        // Cached pages from the pre-client-id protocol remain functional; their
-        // path-derived id cannot replace navigation history, but expires by TTL.
-        const clientId = typeof d.clientId === 'string' && d.clientId
-          ? d.clientId
-          : `legacy:${d.generator}:${d.path}`;
-        registerPreviewPath(clientId, d.generator, d.path);
-        // A tab can miss the original reload broadcast while its document is
-        // loading. If it later reports an older generation, compare that tab's
-        // cached bytes with the current render. A generation mismatch alone does
-        // NOT imply a content change and must not reload an unrelated page.
-        if (
-          source &&
-          d.generator === source.igId &&
-          typeof d.generation === 'number' &&
-          d.generation < source.generation
-        ) {
-          const src = source;
-          const token = refreshToken;
-          void refreshPreviewPage(src, d.path, d.generation, token);
-        }
+    channel.onmessage = (event) => {
+      const message = event.data;
+      if (message?.type !== 'hello'
+        || typeof message.clientId !== 'string'
+        || typeof message.generator !== 'string'
+        || !isSafePreviewPath(message.path)) return;
+      registerPreviewPath(message.clientId, message.generator, message.path);
+      const current = source;
+      if (current && current.igId === message.generator) {
+        const announcedSha = typeof message.contentSha256 === 'string' && SHA256.test(message.contentSha256)
+          ? message.contentSha256
+          : null;
+        void resolveRef(current, message.path).then((latest) => {
+          if (source !== current || !latest || latest.sha256 === announcedSha) return;
+          channel?.postMessage({
+            type: 'reload',
+            generator: current.igId,
+            generation: sourceGeneration,
+            paths: [message.path],
+          });
+        }).catch(() => undefined);
       }
     };
-    // Ask any already-open preview tabs to announce themselves.
     channel.postMessage({ type: 'who' });
   } catch {
     channel = null;
   }
 }
 
-/** Answer one SW render request using the currently-initialized adapter. */
-async function answerRender(
-  generator: string,
-  path: string,
-  isPage: boolean,
-  port: MessagePort,
-): Promise<void> {
+async function answerRender(message: Record<string, unknown>, port: MessagePort): Promise<void> {
   try {
-    const src = source;
-    // `generator` is the first URL segment — now the IG id (the scheme's key).
-    if (!src || src.igId !== generator) {
-      // We don't hold this IG loaded — decline; the SW falls back.
+    const current = source;
+    if (!current
+      || message.igId !== current.igId
+      || message.handle !== current.handle
+      || message.buildId !== current.buildId
+      || !isSafePreviewPath(message.path)) {
       port.postMessage({ ok: false });
       return;
     }
-    if (isPage) {
-      const { html } = await src.adapter.renderPage(path);
-      // Always base at the PREVIEW ROOT (never the adapter's static baseHref): that
-      // way EVERY asset ref — design assets AND IG images — flows back through the SW
-      // asset tier as a real, cacheable, navigable URL. The responder resolves design
-      // assets from the adapter's static tree below when assetBytes doesn't know them.
-      const prepared = preparePreviewHtml(html, generator, path, src.generation);
-      port.postMessage({ ok: true, isBase64: false, mime: 'text/html; charset=utf-8', body: prepared });
-    } else {
-      const name = path.replace(/^\.?\//, '');
-      // Tier 1: adapter-known bytes (IG images, stock template statics).
-      let asset = await src.adapter.assetBytes(name).catch(() => null);
-      // Tier 2: the adapter's static design-asset tree (cycle's css/js/fonts served
-      // from the app's own static path). Relay the bytes so they too ride the SW.
-      if (!asset && src.adapter.baseHref) {
-        asset = await fetchStaticAsset(src.adapter.baseHref, name).catch(() => null);
-      }
-      if (!asset) {
-        port.postMessage({ ok: false });
-        return;
-      }
-      port.postMessage({ ok: true, isBase64: true, mime: asset.mime, body: asset.base64 });
+    const output = descriptor(current.catalog, message.path);
+    // Ready outputs are never requested from the editor. Refuse them here too,
+    // making the SW's OPFS path the only ready-output path.
+    if (!output || output.content || !renderOutput) {
+      port.postMessage({ ok: false });
+      return;
     }
-  } catch {
-    port.postMessage({ ok: false });
+    const rendered = await renderOutput(current.handle, output.path);
+    if (rendered.path !== output.path || rendered.mediaType !== output.mediaType || !validContentRef(rendered.content)) {
+      throw new Error('renderer output does not match catalog');
+    }
+    resolvedRefs.set(resolvedKey(current, output.path), rendered.content);
+    const body = await contentStore.get(rendered.content);
+    if (!body) throw new Error('rendered output is absent from ContentStore');
+    port.postMessage(
+      { ok: true, path: rendered.path, mediaType: rendered.mediaType, content: rendered.content, body },
+      [body],
+    );
+  } catch (error) {
+    port.postMessage({ ok: false, error: String(error) });
   }
 }
 
-/** Smart hot-reload: after a new generation, re-render every OPEN preview page,
- *  byte-compare against what was last served, and reload only the changed ones.
- *  Debounced to the latest generation: a newer pass supersedes an in-flight one. */
-let refreshToken = 0;
-const pageRefreshes = new Map<string, Promise<void>>();
-
-async function refreshOpenPreviews(previousGeneration: number): Promise<void> {
-  const src = source;
-  if (!src || !channel) return;
-  const myToken = ++refreshToken;
-  const paths = registeredPreviewPaths(openPreviews, src.igId);
-
-  for (const path of paths) {
-    if (myToken !== refreshToken) return; // a newer generation superseded us
-    await refreshPreviewPage(src, path, previousGeneration, myToken);
+async function answerContent(message: Record<string, unknown>, port: MessagePort): Promise<void> {
+  try {
+    const current = source;
+    if (!current
+      || message.igId !== current.igId
+      || message.handle !== current.handle
+      || message.buildId !== current.buildId
+      || !isSafePreviewPath(message.path)) {
+      port.postMessage({ ok: false });
+      return;
+    }
+    const output = descriptor(current.catalog, message.path);
+    const requested = message.content;
+    if (!output?.content
+      || !validContentRef(requested)
+      || requested.sha256 !== output.content.sha256
+      || requested.byteLength !== output.content.byteLength) {
+      port.postMessage({ ok: false });
+      return;
+    }
+    const body = await contentStore.get(output.content);
+    if (!body) throw new Error('output is absent from ContentStore');
+    port.postMessage(
+      { ok: true, path: output.path, mediaType: output.mediaType, content: output.content, body },
+      [body],
+    );
+  } catch (error) {
+    port.postMessage({ ok: false, error: String(error) });
   }
 }
 
-/** Compare and refresh one page, coalescing the publish pass with a stale hello
- * for the same IG/generation/path. The broadcast is emitted only after a real
- * byte change and is scoped by both IG id and page path. */
-async function refreshPreviewPage(
-  src: PreviewSource,
-  path: string,
-  previousGeneration: number,
-  token: number,
+export async function publishPreviewSource(
+  next: PreviewSource,
+  generation: number,
+  mayCommit: () => boolean = () => true,
+): Promise<boolean> {
+  const published = validatePreviewSource(next);
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('invalid preview generation');
+  const previous = source;
+  // UI counters restart on a hard reload. Publication order is deliberately
+  // process-independent and has no role in cache/content identity.
+  const order = Math.max(Date.now(), generation, lastPublicationOrder + 1);
+  const committedOrder = await commitToPreviewWorker(published, order, mayCommit);
+  if (committedOrder == null || !mayCommit()) return false;
+  lastPublicationOrder = committedOrder;
+  source = published;
+  sourceGeneration = committedOrder;
+  if (previous && previous.igId === published.igId) {
+    void refreshOpenPreviews(previous, published, committedOrder);
+  }
+  return true;
+}
+
+async function refreshOpenPreviews(
+  previous: PreviewSource,
+  next: PreviewSource,
+  generation: number,
 ): Promise<void> {
-  if (!channel || source !== src || token !== refreshToken) return;
-  const key = `${src.igId}\u0000${src.generation}\u0000${previousGeneration}\u0000${path}`;
-  const pending = pageRefreshes.get(key);
-  if (pending) return pending;
-
-  const work = (async () => {
+  if (!channel || source !== next || sourceGeneration !== generation) return;
+  for (const path of registeredPreviewPaths(openPreviews, next.igId)) {
     try {
-      const pathname = pagePathname(src.igId, path);
-      // Read the generation reported by the tab before writing the new render.
-      // Looking in a newer cache can confuse an embedded iframe's eager render
-      // with the bytes still displayed by an older external tab.
-      const before = await readCachedPage(pathname, previousGeneration);
-      const { html } = await src.adapter.renderPage(path);
-      const prepared = preparePreviewHtml(html, src.igId, path, src.generation);
-      if (source !== src || token !== refreshToken) return;
-      // Always refresh the current cache; only changed content drives navigation.
-      await writeCachedPage(pathname, prepared, src.generation);
-      if (source !== src || token !== refreshToken) return;
-      if (previewContentChanged(before, prepared)) {
-        channel?.postMessage({
-          type: 'reload',
-          generator: src.igId,
-          generation: src.generation,
-          paths: [path],
-        });
+      const [before, after] = await Promise.all([resolveRef(previous, path), resolveRef(next, path)]);
+      if (source !== next || sourceGeneration !== generation) return;
+      if (after && previewContentChanged(before, after)) {
+        channel.postMessage({ type: 'reload', generator: next.igId, generation, paths: [path] });
       }
     } catch {
-      /* a page that no longer renders is skipped, not reloaded */
+      // A removed/non-renderable path remains on its last verified response.
     }
-  })();
-  pageRefreshes.set(key, work);
-  try {
-    await work;
-  } finally {
-    if (pageRefreshes.get(key) === work) pageRefreshes.delete(key);
   }
-}
-
-/** Remove the parts of the injected HTML that change every generation (the snippet's
- *  embedded generation number) so byte-compare reflects real content changes only. */
-function stripVolatile(html: string): string {
-  return html.replace(/"generation":\d+/g, '"generation":0');
-}
-
-export function previewContentChanged(before: string | null, after: string): boolean {
-  return before == null || stripVolatile(before) !== stripVolatile(after);
-}
-
-/** Fetch a design asset from the adapter's STATIC tree (e.g. cycle's
- *  `<base>data/cycle/site-assets/`) and return it as base64 so it can ride the SW
- *  ladder as a real preview URL. `baseHref` ends in '/'; `name` is page-relative. */
-async function fetchStaticAsset(
-  baseHref: string,
-  name: string,
-): Promise<{ name: string; mime: string; base64: string } | null> {
-  const url = new URL(name, new URL(baseHref, self.location.origin)).toString();
-  const resp = await fetch(url);
-  if (!resp.ok) return null;
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  let bin = '';
-  for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-  const mime = resp.headers.get('Content-Type') || 'application/octet-stream';
-  return { name, mime, base64: btoa(bin) };
 }

@@ -18,10 +18,10 @@
 #   hl7.fhir.template       — STOCK TEMPLATE CHAIN (#40 live template loader): the
 #   hl7.base.template         default template + its `base` chain. NOT sushi-config
 #   fhir.base.template        deps — the template loader's walk_base_chain decides
-#                             the chain; the editor fetches it on the SAME
-#                             resolve→fetch→mount path then calls mountTemplate.
-#                             Bundling them lets the LIVE path source the chain from
-#                             same-origin baked bundles. Walked by gen-template-chain.sh.
+#                             the chain inside Publisher `prepare`; the host only
+#                             acquires each exact missing coordinate and retries.
+#                             Bundling lets that acquisition use same-origin bytes.
+#                             Pins are checked at build time by gen-template-chain.sh.
 #   hl7.terminology.r4#7.1.0  — CLOSURE-COMPLETENESS (bundle-closure): the EXACT dep
 #   hl7.fhir.uv.extensions.r4#5.2.0  versions tools.r4#1.1.2's package.json DECLARES.
 #                             The compile loads 7.2.0/5.3.0 (auto-dep `latest`); but

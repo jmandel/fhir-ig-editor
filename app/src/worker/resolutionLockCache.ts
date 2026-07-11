@@ -12,7 +12,7 @@ import type { MutableVersionRequest, ResolutionStep, VersionIndex } from './prot
 
 const CACHE_DIR = 'fhir-ig-editor-resolution-locks-v1';
 export const RESOLUTION_LOCK_SCHEMA = 1;
-export const EXPECTED_RESOLVER_SCHEMA = 2;
+export const EXPECTED_RESOLVER_SCHEMA = 3;
 const MEDIA_TYPE = 'application/vnd.fhir.package-resolution-lock.v1+json';
 const SHA256 = /^[0-9a-f]{64}$/;
 

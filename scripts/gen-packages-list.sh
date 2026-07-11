@@ -50,10 +50,10 @@ HEADER="$(cat <<'EOF'
 #   hl7.fhir.template       — STOCK TEMPLATE CHAIN (#40 live template loader): the
 #   hl7.base.template         default template + its `base` chain. NOT sushi-config
 #   fhir.base.template        deps — the template loader's walk_base_chain decides
-#                             the chain; the editor fetches it on the SAME
-#                             resolve→fetch→mount path then calls mountTemplate.
-#                             Bundling them lets the LIVE path source the chain from
-#                             same-origin baked bundles. Walked by gen-template-chain.sh.
+#                             the chain inside Publisher `prepare`; the host only
+#                             acquires each exact missing coordinate and retries.
+#                             Bundling lets that acquisition use same-origin bytes.
+#                             Pins are checked at build time by gen-template-chain.sh.
 #   hl7.terminology.r4#7.1.0  — CLOSURE-COMPLETENESS (bundle-closure): the EXACT dep
 #   hl7.fhir.uv.extensions.r4#5.2.0  versions tools.r4#1.1.2's package.json DECLARES.
 #                             The compile loads 7.2.0/5.3.0 (auto-dep `latest`); but
@@ -82,9 +82,9 @@ fi
 # `hl7.fhir.template#1.0.0` and its `base` chain. These are NOT sushi-config deps
 # (resolve_project doesn't surface them) — the template loader's walk_base_chain
 # decides the chain, and the editor fetches it on the SAME resolve→fetch→mount
-# path regular packages take, then calls Session.mountTemplate. Bundling them
-# here lets the LIVE path source them from same-origin baked bundles (registry is
-# the fallback). The chain is walked+verified by scripts/gen-template-chain.sh
+# path as regular packages and retries `prepare`; no host template-tree assembly
+# occurs. Bundling here lets acquisition use same-origin bytes (registry is the
+# fallback). The pinned default chain is checked by scripts/gen-template-chain.sh
 # (fig): hl7.fhir.template#1.0.0 → hl7.base.template#1.0.0 → fhir.base.template#1.0.0.
 TEMPLATE_CHAIN="$("$HERE/gen-template-chain.sh" "hl7.fhir.template#1.0.0" 2>/dev/null || printf 'hl7.fhir.template#1.0.0\nhl7.base.template#1.0.0\nfhir.base.template#1.0.0')"
 while IFS= read -r tl; do

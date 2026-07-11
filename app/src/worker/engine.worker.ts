@@ -13,14 +13,33 @@ declare const __ENGINE_COMMIT__: string;
 declare const __ENGINE_RECIPE__: string;
 declare const __CYCLE_RENDER_RECIPE__: string;
 
-import type { EngineOps, Op, WorkerRequest, WorkerReply, BundleSpec, PackageMountInput, PreparedMountMetrics, SiteTreeFile, StockSiteOptions } from './protocol';
+import type { EngineOps, Op, WorkerRequest, WorkerReply, PackageMountInput, PreparedMountMetrics, CompileResult } from './protocol';
 import { ClosedBuildHandle } from '@cycle/core/closed-build';
-import type { CycleSiteBuildPayload } from '@cycle/core/json-site-build';
-import { openCycleSiteBuildPayload } from '@cycle/core/open-site-build';
-import type { PortableCycleSiteBuildView } from '@cycle/core/open-site-build';
-import type { CyclePreviewRenderer } from '../preview/render';
+import type { ClosedSiteBuild } from '@cycle/core/closed-build';
+import { openCycleGenerator } from '@cycle/core/open-site-build';
+import type { CycleGenerator, CycleGeneratorOutput } from '@cycle/core/open-site-build';
+import {
+  CycleRendererPackage,
+  type CycleRendererPackageManifest,
+} from '@cycle/core/renderer-package';
+import {
+  CYCLE_OUTPUT_SCHEMA,
+  CYCLE_RENDERER_IDENTITY,
+  rendererOutputDeclaration,
+} from '@cycle/core/output-receipt';
+import type {
+  ContentRef,
+  OutputCatalog,
+  OutputDescriptor,
+  ProjectInput,
+  RenderedOutput,
+  SiteOutput,
+  SiteOutputFile,
+} from '../site/contract';
+import { contentStore } from '../storage/contentStore';
+import { assertClosedNonPageCatalog } from '../site/catalog';
 import { MountedLabels } from './mountedLabels';
-import { cycleBuildRecipe, cycleOutputRecipe } from './cycleCacheIdentity';
+import { BuildRuntimeRegistry } from './buildRuntimeRegistry';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -29,8 +48,6 @@ const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 /** The wasm-bindgen `Session` class surface (string-envelope methods). */
 interface WasmSession {
   init(bundlesJson: string): string;
-  mount(bundlesJson: string): string;
-  mountPreparedBatch(bytes: Uint8Array, manifestJson: string): string;
   beginPreparedMount(expectedPackages: number): string;
   stagePreparedMount(bytes: Uint8Array, expectedKey: string): string;
   commitPreparedMount(): string;
@@ -39,24 +56,16 @@ interface WasmSession {
   prepareAndMount(bundlesJson: string): string;
   takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
-  compile(filesJson: string, config: string, predefinedJson: string): string;
+  resolveTemplate(coordinate: string): string;
   compileProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string): string;
-  setLocalResources(json: string): string;
   snapshot(input: string): string;
-  buildSiteDb(inputJson: string): string;
-  buildSiteDbFromCompile(inputJson: string): string;
-  buildSiteBuildFromCompile(inputJson: string): string;
+  prepare(generatorSpecJson: string): string;
+  outputs(handle: string): string;
+  render(handle: string, path: string): string;
+  finalize(handle: string): string;
+  readContent(handle: string, sha256: string): Uint8Array;
+  finalizeExternal(handle: string, inputJson: string): string;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
-  mountSite(filesJson: string, optionsJson: string): string;
-  mountTemplate(coord: string): string;
-  produceStockSite(): string;
-  openStockBuild(templateCoord: string): string;
-  renderStockPage(handle: string, name: string): string;
-  renderLiquid(source: string, dataJson: string): string;
-  renderMarkdown(md: string, optsJson: string): string;
-  listPages(): string;
-  renderPage(name: string): string;
-  renderFragment(ref: string, kind: string): string;
 }
 
 type WasmModule = {
@@ -93,48 +102,187 @@ function unwrap<T>(envelopeJson: string): T {
   return env.result;
 }
 
-/** Labels currently mounted in the engine — so `mountBundles` is idempotent and
- *  the UI's lazy loader never re-fetches an already-mounted package. */
+/** Labels currently mounted in the engine, keeping transactional package
+ * acquisition idempotent without relying on package labels as cache identity. */
 const mountedLabels = new MountedLabels();
 
-/** One atomically installed external-builder runtime. Its proof-bearing handle,
- * typed view, and prepared renderer can never refer to different builds. */
 interface CycleBuildRuntime {
-  build: ClosedBuildHandle;
-  view: PortableCycleSiteBuildView;
-  renderer: CyclePreviewRenderer;
+  kind: 'cycle';
+  generator: CycleGenerator;
+  buildId: string;
+  catalog: CycleGeneratorOutput[];
+  publicCatalog: OutputCatalog;
+  rendered: Map<string, RenderedOutput>;
+  rendererPackageId: string;
+}
+
+interface PublisherBuildRuntime {
+  kind: 'publisher';
   buildId: string;
 }
 
-let cycleBuild: CycleBuildRuntime | null = null;
+type SiteBuildRuntime = CycleBuildRuntime | PublisherBuildRuntime;
+const siteBuilds = new BuildRuntimeRegistry<SiteBuildRuntime>();
 
-const CYCLE_BUILD_CACHE = 'cycle-closed-build';
-const CYCLE_OUTPUT_CACHE = 'cycle-site-output';
-const JSON_MEDIA = 'application/vnd.fhir.site-build+json';
-
-async function installCycleBuild(
-  handoff: CycleSiteBuildPayload,
-  started: number,
-  fromCache: boolean,
-): Promise<EngineOps['buildSite']['result']> {
-  const { build, view } = await openCycleSiteBuildPayload(handoff);
-  const render = await import('../preview/render');
-  const renderer = render.createCycleRenderer(view);
-  const pages = renderer.listPages();
-  renderer.listOutputs();
-  const assets = view.assets().map((asset) => ({ name: asset.Name, mime: asset.Mime }));
-  const buildId = build.manifest.buildId;
-  cycleBuild = { build, view, renderer, buildId };
-  return { buildId, pages, assets, buildMs: performance.now() - started, fromCache };
+class PrepareOperationError extends Error {
+  constructor(
+    message: string,
+    readonly stage: 'compile' | 'site',
+    readonly compiled?: CompileResult,
+  ) {
+    super(message);
+    this.name = 'PrepareOperationError';
+  }
 }
 
-function base64(bytes: Uint8Array): string {
-  let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+interface RustPrepareResult {
+  handle: string;
+  buildId: string;
+  generator: 'cycle' | 'publisher';
+  siteBuild: ClosedSiteBuild;
+}
+
+interface LoadedCycleRendererPackage {
+  package: CycleRendererPackage;
+  manifest: CycleRendererPackageManifest;
+  contentByPath: ReadonlyMap<string, ContentRef>;
+}
+
+let cycleRendererPackagePromise: Promise<LoadedCycleRendererPackage> | null = null;
+
+function sameContentRef(left: ContentRef, right: ContentRef): boolean {
+  return left.sha256 === right.sha256
+    && left.byteLength === right.byteLength
+    && left.mediaType === right.mediaType;
+}
+
+async function storeExactContent(bytes: Uint8Array, expected: ContentRef): Promise<void> {
+  const stored = await contentStore.put(bytes, expected.mediaType);
+  if (!stored || !sameContentRef(stored, expected)) {
+    throw new Error(`ContentStore rejected ${expected.sha256}`);
   }
-  return btoa(bin);
+}
+
+async function loadCycleRendererPackage(): Promise<LoadedCycleRendererPackage> {
+  if (cycleRendererPackagePromise) return cycleRendererPackagePromise;
+  const pending = (async () => {
+    const root = `${BASE}data/cycle/renderer-package/`;
+    const response = await fetch(`${root}manifest.json`);
+    if (!response.ok) throw new Error(`Cycle renderer package manifest -> ${response.status}`);
+    const manifest = await response.json() as CycleRendererPackageManifest;
+    const memory = new Map<string, Uint8Array>();
+    const unique = new Map(manifest.files.map((file) => [file.content.sha256, file.content]));
+    await Promise.all([...unique.values()].map(async (content) => {
+      const cached = await contentStore.get(content);
+      if (cached) return;
+      const bodyResponse = await fetch(`${root}objects/${content.sha256}`);
+      if (!bodyResponse.ok) throw new Error(`Cycle renderer package object ${content.sha256} -> ${bodyResponse.status}`);
+      const bytes = new Uint8Array(await bodyResponse.arrayBuffer());
+      memory.set(content.sha256, bytes);
+      await storeExactContent(bytes, content);
+    }));
+    const packageValue = await CycleRendererPackage.open(manifest, {
+      get: async (content) => {
+        const stored = await contentStore.get(content);
+        return stored ? new Uint8Array(stored) : memory.get(content.sha256) ?? null;
+      },
+    });
+    return {
+      package: packageValue,
+      manifest,
+      contentByPath: new Map(manifest.files.map((file) => [file.path, file.content])),
+    };
+  })();
+  cycleRendererPackagePromise = pending;
+  try {
+    return await pending;
+  } catch (error) {
+    if (cycleRendererPackagePromise === pending) cycleRendererPackagePromise = null;
+    throw error;
+  }
+}
+
+async function publishRustContent(
+  session: WasmSession,
+  handle: string,
+  content: ContentRef,
+): Promise<void> {
+  if (await contentStore.get(content)) return;
+  await storeExactContent(session.readContent(handle, content.sha256), content);
+}
+
+function publicCycleDescriptor(
+  output: CycleGeneratorOutput,
+  packaged?: ContentRef,
+): OutputDescriptor {
+  return {
+    path: output.file,
+    kind: output.kind,
+    mediaType: output.mime,
+    ...(packaged ? { content: packaged } : {}),
+    ...(output.title ? { title: output.title } : {}),
+    ...(output.pageKind ? { pageKind: output.pageKind } : {}),
+  };
+}
+
+async function compileProject(session: WasmSession, project: ProjectInput): Promise<CompileResult> {
+  const started = performance.now();
+  const result = unwrap<Record<string, unknown>>(session.compileProject(
+    JSON.stringify(project.files),
+    project.config,
+    JSON.stringify(project.predefined),
+    JSON.stringify(project.siteFiles),
+  ));
+  return {
+    ...result,
+    buildMs: performance.now() - started,
+    fileCount: Object.keys(project.files).length,
+    packageStorage: unwrap(session.packageStorageMetrics()),
+  } as CompileResult;
+}
+
+async function renderCycleOutput(runtime: CycleBuildRuntime, path: string): Promise<RenderedOutput> {
+  const prior = runtime.rendered.get(path);
+  if (prior) return prior;
+  const descriptor = runtime.publicCatalog.outputs.find((output) => output.path === path);
+  if (!descriptor) throw new Error(`render: path ${path} is not declared by outputs`);
+  if (descriptor.content) {
+    const ready = { path, mediaType: descriptor.mediaType, content: descriptor.content };
+    runtime.rendered.set(path, ready);
+    return ready;
+  }
+  const output = runtime.generator.render(path);
+  const bytes = typeof output.content === 'string'
+    ? new TextEncoder().encode(output.content)
+    : output.content;
+  const content = await contentStore.put(bytes, output.mime);
+  if (!content) throw new Error(`ContentStore could not publish Cycle output ${path}`);
+  const ready = { path, mediaType: output.mime, content };
+  runtime.rendered.set(path, ready);
+  descriptor.content = content;
+  return ready;
+}
+
+async function finalizeCycleOutput(
+  session: WasmSession,
+  handle: string,
+  runtime: CycleBuildRuntime,
+): Promise<SiteOutput> {
+  const files: SiteOutputFile[] = [];
+  for (const descriptor of runtime.catalog) {
+    const rendered = await renderCycleOutput(runtime, descriptor.file);
+    files.push({
+      ...rendererOutputDeclaration(descriptor),
+      content: rendered.content,
+    });
+  }
+  return unwrap<SiteOutput>(session.finalizeExternal(handle, JSON.stringify({
+    renderer: { ...CYCLE_RENDERER_IDENTITY, recipeSha256: __CYCLE_RENDER_RECIPE__ },
+    outputSchema: CYCLE_OUTPUT_SCHEMA,
+    options: { rendererPackageId: runtime.rendererPackageId },
+    catalog: runtime.catalog.map((output) => output.file),
+    files,
+  })));
 }
 
 // ---- op handlers (exactly the protocol's EngineOps table) -------------------
@@ -142,45 +290,15 @@ function base64(bytes: Uint8Array): string {
 type Handlers = { [K in Op]: (...args: EngineOps[K]['args']) => Promise<EngineOps[K]['result']> };
 
 const handlers: Handlers = {
-  async init(bundles: BundleSpec[]) {
+  async init() {
     const s = await ensureSession();
     const t0 = performance.now();
-    const serializeStarted = performance.now();
-    const input = JSON.stringify(bundles);
-    const inputBytes = new TextEncoder().encode(input).byteLength;
-    const serializeMs = performance.now() - serializeStarted;
     const wasmStarted = performance.now();
-    const { mounted } = unwrap<{ mounted: number }>(s.init(input));
+    const { mounted } = unwrap<{ mounted: number }>(s.init('[]'));
     const wasmMs = performance.now() - wasmStarted;
-    mountedLabels.replace(bundles.map((bundle) => bundle.label));
+    mountedLabels.replace([]);
     const version = JSON.parse(wasmMod!.Session.version());
-    return { mounted, version, initMs: performance.now() - t0, serializeMs, wasmMs, inputBytes };
-  },
-
-  /** Incrementally mount additional bundles (lazy per-bundle loading, spec §1).
-   *  Idempotent: labels already mounted are skipped both here and in the engine. */
-  async mountBundles(bundles: BundleSpec[]) {
-    const s = await ensureSession();
-    const t0 = performance.now();
-    const fresh: BundleSpec[] = mountedLabels.fresh(bundles);
-    const serializeStarted = performance.now();
-    const input = fresh.length > 0 ? JSON.stringify(fresh) : '[]';
-    const inputBytes = new TextEncoder().encode(input).byteLength;
-    const serializeMs = performance.now() - serializeStarted;
-    const wasmStarted = performance.now();
-    const mounted = fresh.length > 0
-      ? unwrap<{ mounted: number }>(s.mount(input)).mounted
-      : mountedLabels.size;
-    const wasmMs = performance.now() - wasmStarted;
-    mountedLabels.add(fresh);
-    return {
-      mounted,
-      newlyMounted: fresh.map((b) => b.label),
-      mountMs: performance.now() - t0,
-      serializeMs,
-      wasmMs,
-      inputBytes,
-    };
+    return { mounted, version, initMs: performance.now() - t0, serializeMs: 0, wasmMs, inputBytes: 2 };
   },
 
   /** Preferred package seam. Warm compact `.fpp` artifacts are authenticated in
@@ -208,8 +326,6 @@ const handlers: Handlers = {
     let inputBytes = 0;
     let mounted = mountedLabels.size;
     let preparedMetrics: PreparedMountMetrics | undefined;
-    let packageIdentities: Array<{ label: string; cacheKey: string }> = [];
-    const preparedStored: string[] = [];
     if (prepared.length > 0) {
       const cache = await import('./preparedPackageCache');
       const wasmStarted = performance.now();
@@ -277,10 +393,6 @@ const handlers: Handlers = {
         decodeValidateMs: result.decodeValidateMs,
         engineMountMs: result.mountMs,
       };
-      packageIdentities = prepared.map(({ pointer }) => ({
-        label: pointer.label,
-        cacheKey: pointer.cacheKey,
-      }));
     } else {
       const serializeStarted = performance.now();
       const input = JSON.stringify(raw.map(({ spec }) => spec));
@@ -326,7 +438,6 @@ const handlers: Handlers = {
         artifactEncodeMs: result.artifactEncodeMs,
         engineMountMs: result.mountMs,
       };
-      packageIdentities = result.artifacts.map(({ label, cacheKey }) => ({ label, cacheKey }));
       const cache = await import('./preparedPackageCache');
       const transportByLabel = new Map(raw.map(({ spec, transportIdentity }) => [spec.label, transportIdentity]));
       for (const artifact of result.artifacts) {
@@ -335,15 +446,14 @@ const handlers: Handlers = {
         const bytes = s.takePrepared(artifact.label);
         const transportIdentity = transportByLabel.get(artifact.label);
         if (!transportIdentity) throw new Error(`missing transport identity for ${artifact.label}`);
-        const stored = await cache.writePreparedPackage({
+        await cache.writePreparedPackage({
           schema: 2,
           label: artifact.label,
           transportIdentity,
           cacheKey: artifact.cacheKey,
           artifactSha256: artifact.artifactSha256,
           bytes: artifact.bytes,
-        }, bytes).catch(() => false);
-        if (stored) preparedStored.push(artifact.label);
+        }, bytes).catch(() => {});
       }
     }
     const committed = fresh.map(({ label }) => ({ label }));
@@ -355,9 +465,7 @@ const handlers: Handlers = {
       serializeMs,
       wasmMs,
       inputBytes,
-      preparedStored,
       preparedMetrics,
-      packageIdentities,
     };
   },
 
@@ -366,6 +474,11 @@ const handlers: Handlers = {
   async resolveProject(config, versionIndex) {
     const s = await ensureSession();
     return unwrap(s.resolveProject(config, versionIndex ? JSON.stringify(versionIndex) : ''));
+  },
+
+  async resolveTemplate(coordinate) {
+    const s = await ensureSession();
+    return unwrap(s.resolveTemplate(coordinate));
   },
 
   /** Tier-1 in-engine ValueSet expansion (spec §6 tier 1). Pure function of IG
@@ -394,22 +507,6 @@ const handlers: Handlers = {
     return { ok: false, notEnumerable: raw.notEnumerable, expandMs } as EngineOps['expandValueSet']['result'];
   },
 
-  async compile(config, files, predefined, siteFiles) {
-    const s = await ensureSession();
-    const t0 = performance.now();
-    const out = unwrap<Record<string, unknown>>(
-      s.compileProject(
-        JSON.stringify(files),
-        config,
-        JSON.stringify(predefined),
-        JSON.stringify(siteFiles),
-      ),
-    );
-    const buildMs = performance.now() - t0;
-    const packageStorage = unwrap(s.packageStorageMetrics());
-    return { ...out, buildMs, fileCount: Object.keys(files).length, packageStorage } as EngineOps['compile']['result'];
-  },
-
   async snapshot(url) {
     const s = await ensureSession();
     const t0 = performance.now();
@@ -417,169 +514,111 @@ const handlers: Handlers = {
     return { ...out, snapshotMs: performance.now() - t0 } as EngineOps['snapshot']['result'];
   },
 
-  // ---- closed Cycle external-builder path ----
+  // ---- complete four-operation site facade --------------------------------
 
-  async buildSite(config, files, predefined, siteFiles, buildEpochSecs, projectRevision, snapshotSourcesIdentity) {
+  async prepare(project, spec) {
     const s = await ensureSession();
-    const t0 = performance.now();
-    const input = {
-      config,
-      fsh: files,
-      predefined,
-      site_files: siteFiles,
-      build_epoch_secs: buildEpochSecs,
-      target: 'cycle-site/v2',
-    };
-    // The matching compileProject call already established the semantic
-    // revision. FSH/predefined bodies are equality assertions at the Rust trust
-    // boundary, never inputs to a second compile.
-    const handoff = unwrap<CycleSiteBuildPayload>(s.buildSiteBuildFromCompile(JSON.stringify(input)));
-    // Install/verify before publishing the pointer. A semantically invalid
-    // payload can therefore never become a persistent fast-path hit.
-    const result = await installCycleBuild(handoff, t0, false);
-    const cache = await import('../storage/derivedArtifactCache');
-    const bytes = new TextEncoder().encode(JSON.stringify(handoff));
-    await cache.writeDerivedArtifact(
-      CYCLE_BUILD_CACHE,
-      cycleBuildRecipe(projectRevision, buildEpochSecs, __ENGINE_COMMIT__, __ENGINE_RECIPE__, snapshotSourcesIdentity),
-      bytes,
-      JSON_MEDIA,
-    ).catch(() => null);
-    return result;
-  },
-
-  async restoreCycleSite(projectRevision, buildEpochSecs, snapshotSourcesIdentity) {
-    const t0 = performance.now();
-    const cache = await import('../storage/derivedArtifactCache');
-    const cached = await cache.readDerivedArtifact(
-      CYCLE_BUILD_CACHE,
-      cycleBuildRecipe(projectRevision, buildEpochSecs, __ENGINE_COMMIT__, __ENGINE_RECIPE__, snapshotSourcesIdentity),
-      JSON_MEDIA,
-    );
-    if (!cached) return null;
+    let compiled: CompileResult;
     try {
-      const handoff = JSON.parse(new TextDecoder().decode(cached.bytes)) as CycleSiteBuildPayload;
-      return await installCycleBuild(handoff, t0, true);
-    } catch {
-      // The ContentStore object is authentic but no longer semantically usable.
-      // Recipe versioning normally prevents this; treat it as a miss, never as
-      // authority or a reason to skip normal site production.
-      return null;
+      compiled = await compileProject(s, project);
+    } catch (error) {
+      throw new PrepareOperationError(String(error), 'compile');
     }
-  },
-
-  async renderPage(file) {
-    if (!cycleBuild) throw new Error('renderPage before buildSite');
-    const t0 = performance.now();
-    const cache = await import('../storage/derivedArtifactCache');
-    const recipe = cycleOutputRecipe(cycleBuild.buildId, 'page', file, __CYCLE_RENDER_RECIPE__);
-    const cached = await cache.readDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe, 'text/html');
-    if (cached) {
-      return { file, html: new TextDecoder().decode(cached.bytes), renderMs: performance.now() - t0, fromCache: true };
-    }
-    const { html } = cycleBuild.renderer.renderPage(file);
-    await cache.writeDerivedArtifact(
-      CYCLE_OUTPUT_CACHE,
-      recipe,
-      new TextEncoder().encode(html),
-      'text/html',
-    ).catch(() => null);
-    return { file, html, renderMs: performance.now() - t0, fromCache: false };
-  },
-
-  async assetBytes(name) {
-    if (!cycleBuild) return null;
     try {
-      const cache = await import('../storage/derivedArtifactCache');
-      const recipe = cycleOutputRecipe(cycleBuild.buildId, 'asset', name, __CYCLE_RENDER_RECIPE__);
-      const cached = await cache.readDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe);
-      if (cached?.content.mediaType) {
-        return {
-          name,
-          mime: cached.content.mediaType,
-          base64: base64(new Uint8Array(cached.bytes)),
-          fromCache: true,
-        };
+      const rustSpec = { ...spec, buildEpochSecs: project.buildEpochSecs };
+      const prepared = unwrap<RustPrepareResult>(s.prepare(JSON.stringify(rustSpec)));
+      if (prepared.generator !== spec.generator || prepared.handle !== prepared.buildId) {
+        throw new Error('prepare: Rust returned an inconsistent immutable build handle');
       }
-      const output = cycleBuild.renderer.renderOutput(name);
-      const bytes = typeof output.content === 'string'
-        ? new TextEncoder().encode(output.content)
-        : output.content;
-      await cache.writeDerivedArtifact(CYCLE_OUTPUT_CACHE, recipe, bytes, output.mime).catch(() => null);
-      return { name: output.file, mime: output.mime, base64: base64(bytes), fromCache: false };
-    } catch {
-      return null;
+      if (prepared.generator === 'cycle') {
+        const rendererPackage = await loadCycleRendererPackage();
+        const closed = await ClosedBuildHandle.open(prepared.siteBuild, {
+          get: async (content) => {
+            const bytes = s.readContent(prepared.handle, content.sha256);
+            await storeExactContent(bytes, content);
+            return bytes;
+          },
+        });
+        const generator = await openCycleGenerator(closed, rendererPackage.package);
+        const catalog = generator.outputs();
+        const publicCatalog: OutputCatalog = {
+          buildId: prepared.buildId,
+          outputs: catalog.map((output) => publicCycleDescriptor(
+            output,
+            rendererPackage.contentByPath.get(output.file),
+          )),
+        };
+        const runtime: CycleBuildRuntime = {
+          kind: 'cycle',
+          generator,
+          buildId: prepared.buildId,
+          catalog,
+          publicCatalog,
+          rendered: new Map(),
+          rendererPackageId: rendererPackage.manifest.packageId,
+        };
+        // Preview assets are a closed catalog, never a live mutable-adapter query.
+        // Materialize every non-page before publication; pages alone stay lazy.
+        for (const output of catalog) {
+          if (output.kind !== 'page') await renderCycleOutput(runtime, output.file);
+        }
+        assertClosedNonPageCatalog(publicCatalog);
+        siteBuilds.install(prepared.handle, runtime);
+      } else {
+        siteBuilds.install(prepared.handle, { kind: 'publisher', buildId: prepared.buildId });
+      }
+      return {
+        handle: prepared.handle,
+        buildId: prepared.buildId,
+        generator: prepared.generator,
+        compiled,
+      };
+    } catch (error) {
+      throw new PrepareOperationError(String(error), 'site', compiled);
     }
   },
 
-  // ---- F6 stock-template render surface (engine-side pages/fragments) ----
-
-  async mountSite(files: Record<string, SiteTreeFile>, options?: StockSiteOptions) {
+  async outputs(handle) {
     const s = await ensureSession();
-    return unwrap(s.mountSite(JSON.stringify(files), options ? JSON.stringify(options) : ''));
+    const runtime = siteBuilds.get(handle);
+    if (!runtime) throw new Error(`outputs: unknown build handle ${handle}`);
+    if (runtime.kind === 'cycle') return runtime.publicCatalog;
+    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
+    for (const output of catalog.outputs) {
+      if (output.content) await publishRustContent(s, handle, output.content);
+    }
+    assertClosedNonPageCatalog(catalog);
+    return catalog;
   },
 
-  /** Materialize a template `id#ver` chain from the MOUNTED bundle packages and
-   *  merge it into the engine site tree (Rust: walk_base_chain + union-copy +
-   *  config deep-merge, byte-exact, no ant). The whole base chain must already
-   *  be mounted (the host fetched it on the resolve→fetch→mount path). A custom-
-   *  ant template surfaces here as `mountTemplate <coord>: … never execute ant`
-   *  (unwrap re-throws it as an Error the adapter maps to a friendly message). */
-  async mountTemplate(coord: string) {
+  async render(handle, path) {
     const s = await ensureSession();
-    return unwrap<{ files: number }>(s.mountTemplate(coord));
+    const runtime = siteBuilds.get(handle);
+    if (!runtime) throw new Error(`render: unknown build handle ${handle}`);
+    if (runtime.kind === 'cycle') return renderCycleOutput(runtime, path);
+    const rendered = unwrap<RenderedOutput>(s.render(handle, path));
+    await publishRustContent(s, handle, rendered.content);
+    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
+    const descriptor = catalog.outputs.find((output) => output.path === path);
+    if (!descriptor) throw new Error(`render: Rust omitted declared output ${path}`);
+    return { ...rendered, mediaType: descriptor.mediaType };
   },
 
-  /** Source-driven stock site (task #45): produce the artifact page shells + the
-   *  `_data` model from the current compile + mounted template, merging both into
-   *  the engine site tree. Replaces the pre-baked `{id}-stock.json` bundle. */
-  async produceStockSite() {
+  async finalize(handle) {
     const s = await ensureSession();
-    return unwrap<{ pages: number; data: number }>(s.produceStockSite());
-  },
-
-  async openStockBuild(templateCoord) {
-    const s = await ensureSession();
-    const result = unwrap<EngineOps['openStockBuild']['result']>(s.openStockBuild(templateCoord));
-    return { ...result, packageStorage: unwrap(s.packageStorageMetrics()) };
-  },
-
-  async renderStockPage(handle, name) {
-    const s = await ensureSession();
-    const t0 = performance.now();
-    const result = unwrap<Omit<EngineOps['renderStockPage']['result'], 'renderMs'>>(
-      s.renderStockPage(handle, name),
-    );
-    return { ...result, renderMs: performance.now() - t0 };
-  },
-
-  async listSitePages() {
-    const s = await ensureSession();
-    return unwrap(s.listPages());
-  },
-
-  async renderSitePage(name) {
-    const s = await ensureSession();
-    const t0 = performance.now();
-    const { html } = unwrap<{ html: string }>(s.renderPage(name));
-    return { html, renderMs: performance.now() - t0 };
-  },
-
-  async renderFragment(ref, kind) {
-    const s = await ensureSession();
-    return unwrap(s.renderFragment(ref, kind));
-  },
-
-  // ---- generic native Rust content surface (not Cycle LiquidJS) ----
-
-  async renderLiquid(source, data) {
-    const s = await ensureSession();
-    return unwrap(s.renderLiquid(source, data ? JSON.stringify(data) : ''));
-  },
-
-  async renderMarkdown(md, opts) {
-    const s = await ensureSession();
-    return unwrap(s.renderMarkdown(md, opts ? JSON.stringify(opts) : ''));
+    const runtime = siteBuilds.get(handle);
+    if (!runtime) throw new Error(`finalize: unknown build handle ${handle}`);
+    if (runtime.kind === 'cycle') return finalizeCycleOutput(s, handle, runtime);
+    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
+    for (const output of catalog.outputs) {
+      if (!output.content) {
+        const rendered = unwrap<RenderedOutput>(s.render(handle, output.path));
+        await publishRustContent(s, handle, rendered.content);
+      } else {
+        await publishRustContent(s, handle, output.content);
+      }
+    }
+    return unwrap<SiteOutput>(s.finalize(handle));
   },
 };
 
@@ -591,7 +630,12 @@ async function handleRequest(msg: WorkerRequest): Promise<void> {
     reply({ id: msg.id, ok: true, result: await handler(...msg.args) });
   } catch (err) {
     const e2 = err as Error;
-    reply({ id: msg.id, ok: false, error: String(e2?.stack ?? e2) });
+    const detail = err instanceof PrepareOperationError
+      ? err.stage === 'site'
+        ? { operation: 'prepare' as const, stage: 'site' as const, compiled: err.compiled! }
+        : { operation: 'prepare' as const, stage: 'compile' as const }
+      : undefined;
+    reply({ id: msg.id, ok: false, error: String(e2?.stack ?? e2), ...(detail ? { detail } : {}) });
   }
 }
 

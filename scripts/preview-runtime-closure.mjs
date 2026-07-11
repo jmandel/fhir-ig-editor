@@ -103,7 +103,7 @@ export async function collectPreviewRuntimeClosure(expectedPage) {
   const badAssets = rows.filter((row) => row.bad);
   const jqueryCompatScript = doc.querySelector(
     'script[data-fhir-ig-editor-preview-compat="jquery-3.7.0-ui-tabs-1.11.1"]' +
-    '[data-producer="editor-jquery-compat"]',
+    '[data-producer="publisher-runtime"]',
   );
   const scripts = [...doc.querySelectorAll('script[src]')];
   const jqueryIndex = scripts.findIndex((script) => new URL(script.getAttribute('src'), doc.baseURI).pathname.endsWith('/assets/js/jquery.js'));

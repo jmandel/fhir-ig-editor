@@ -10,5 +10,5 @@ self.addEventListener('message', (event) => {
   if (message?.type === 'igpreview:ping') {
     event.ports[0]?.postMessage({ type: 'igpreview:pong', generation: 0 });
   }
-  // The legacy worker has no igpreview:commitGeneration handler or ACK.
+  // The legacy worker has no igpreview:commit handler or ACK.
 });

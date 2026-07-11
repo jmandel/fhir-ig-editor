@@ -8,11 +8,10 @@
 #        hl7.base.template#1.0.0
 #        fhir.base.template#1.0.0
 #
-# This is the fetch list the editor's live template loader needs mounted before
-# Session.mountTemplate — kept in lockstep with scripts/packages.list so the LIVE
-# path can source the chain from same-origin baked bundles. Reads from the flat
-# FHIR cache (FHIR_CACHE, populated by fetch-packages.sh); each package must be
-# fetched already (fetch-packages.sh pulls the chain because packages.list lists it).
+# This is a build-time pin/drift helper for the baked default template packages.
+# Runtime template traversal belongs to Rust Publisher `prepare`; the host only
+# acquires the exact coordinate reported by its private resolution handshake.
+# Reads from the flat FHIR cache (FHIR_CACHE, populated by fetch-packages.sh).
 set -euo pipefail
 
 COORD="${1:?usage: gen-template-chain.sh <id#ver>}"

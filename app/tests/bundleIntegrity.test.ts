@@ -5,11 +5,6 @@ import {
   parseBakedBundleManifest,
   readVerifiedBundleBytes,
 } from '../src/worker/bundleIntegrity';
-import {
-  bundleCacheKey,
-  contentBundleCacheIdentity,
-  pinnedBundleCacheIdentity,
-} from '../src/worker/bundleCache';
 import { obtainAndMountPackage } from '../src/worker/packageResolver';
 
 const ABC_SHA256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
@@ -74,28 +69,5 @@ describe('baked package transport integrity', () => {
       },
     }, baked.label, () => {})).rejects.toThrow('digest mismatch');
     expect(mounted).toBe(false);
-  });
-
-  test('v3 OPFS identity includes the compressed digest and unpinned content is deterministic', async () => {
-    const pinned = pinnedBundleCacheIdentity(ABC_SHA256);
-    const key = bundleCacheKey('example.pkg#1.0.0', pinned);
-    expect(key).toContain('v3__example.pkg＃1.0.0__tgz-');
-    expect(key).toContain(ABC_SHA256);
-    expect(bundleCacheKey('example.pkg#1.0.0', `tgz-${'0'.repeat(64)}`)).not.toBe(key);
-
-    const first = await contentBundleCacheIdentity({
-      label: 'example.pkg#1.0.0',
-      files: { 'b.json': 'Yg==', 'a.json': 'YQ==' },
-    });
-    const reordered = await contentBundleCacheIdentity({
-      label: 'example.pkg#1.0.0',
-      files: { 'a.json': 'YQ==', 'b.json': 'Yg==' },
-    });
-    const changed = await contentBundleCacheIdentity({
-      label: 'example.pkg#1.0.0',
-      files: { 'a.json': 'eA==', 'b.json': 'Yg==' },
-    });
-    expect(first).toBe(reordered);
-    expect(changed).not.toBe(first);
   });
 });

@@ -18,7 +18,7 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
-const PREVIEW_SW_PROTOCOL = 3;
+const PREVIEW_SW_PROTOCOL = 4;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
@@ -145,8 +145,10 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     out.indexRenderedLen = await tabEval(preview, `document.body ? document.body.textContent.length : 0`);
     // The served HTML (not the JS-rewritten DOM) must carry the injected snippet.
     out.snippetInjected = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return /data-igpreview="hot-reload"/.test(t); })()`);
-    // Write-through: the editor's SW cache holds the page after it was served.
-    out.cachedWriteThrough = await editorEval(`(async () => { const ks = (await caches.keys()).filter(k => k.startsWith('igpreview:')); for (const k of ks) { const c = await caches.open(k); if (await c.match('${indexPath}')) return true; } return false; })()`);
+    // Every successful response names a verified immutable source. Ready files
+    // come directly from OPFS; unresolved pages render once into a build-id
+    // namespace. Generation-number response caches no longer exist.
+    out.initialVerifiedSource = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); await r.arrayBuffer(); return r.headers.get('X-IGPreview-Source'); })()`);
     // Latency numbers: live render (cache-busted) vs cache hit.
     out.liveRenderMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}?nocache=' + Date.now()); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
     out.cacheHitMs = await tabEval(preview, `(async () => { const t = performance.now(); const r = await fetch('${indexPath}'); await r.text(); return Math.round((performance.now() - t) * 10) / 10; })()`).catch(() => null);
@@ -248,21 +250,18 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     } catch (e) {
       out.indexHotReloaded = false;
       out.hotReloadErr = String(e).slice(0, 120);
-      // Preserve enough state to distinguish "build never published" from
-      // "fresh bytes reached the generation cache but the tab missed reload".
+      // Preserve enough state to distinguish an unpublished build from a page
+      // whose ContentRef changed but whose browsing context missed the signal.
       out.hotReloadDebug = await editorEval(`(async () => {
         const path = ${JSON.stringify(indexPath)};
-        const cachesState = [];
-        for (const key of (await caches.keys()).filter(k => k.startsWith('igpreview:')).sort()) {
-          const response = await (await caches.open(key)).match(path);
-          if (!response) continue;
-          const html = await response.text();
-          cachesState.push({ key, hasMarker: /HOTRELOAD/.test(html), length: html.length });
-        }
+        const response = await fetch(path);
+        const html = await response.text();
         const frame = document.querySelector('.preview-frame');
         const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
         return {
-          caches: cachesState,
+          source: response.headers.get('X-IGPreview-Source'),
+          fetchedHasMarker: /HOTRELOAD/.test(html),
+          previewCaches: (await caches.keys()).filter(k => k.startsWith('igpreview-')).sort(),
           embeddedHasMarker: /HOTRELOAD/.test(doc?.body?.textContent || ''),
           selected: document.querySelector('.preview-page-select select')?.value || '',
           siteBuilding: !!document.querySelector('.preview-building'),
@@ -280,19 +279,48 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       ? !out.profileTargetedReload && out.profileNavigationsAfterEdit.length === 0
       : true;
 
-    // --- editor-closed fallback ladder (the gate: close the editor, then a CACHED
-    //     page still 200s and a NON-cached page yields the friendly fallback) ---
-    // Close the profile tab and the EDITOR tab so NO client can live-render. This is
-    // the LAST step that touches the editor; the harness does not eval it afterward.
+    // --- worker-restart persistence + editor-closed fallback ----------------
+    // Remove every controlled preview context (including the embedded iframe),
+    // replace the worker registration, then close the editor. The new worker
+    // must recover the per-IG catalog pointer and bytes from persistent stores;
+    // there is no in-memory asset re-provision step available to rescue it.
     if (profileTabId) await closeTab(profileTabId);
+    await closeTab(pv.id);
+    out.previewWorkerRestart = await editorEval(`(async () => {
+      document.querySelector('.preview-frame')?.remove();
+      const scope = new URL('preview/', location.href).href;
+      const previous = await navigator.serviceWorker.getRegistration(scope);
+      if (previous) await previous.unregister();
+      const script = new URL('preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}', location.href).href;
+      const registration = await navigator.serviceWorker.register(script, {
+        scope,
+        type: 'module',
+        updateViaCache: 'none',
+      });
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        if (registration.active?.state === 'activated') {
+          const protocol = await new Promise(resolve => {
+            const channel = new MessageChannel();
+            const timer = setTimeout(() => resolve(null), 1000);
+            channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data?.protocol ?? null); };
+            registration.active.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
+          });
+          if (protocol === ${PREVIEW_SW_PROTOCOL}) return { ok: true, scriptURL: registration.active.scriptURL };
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return { ok: false, state: registration.active?.state || null };
+    })()`);
     if (editorTabId) await closeTab(editorTabId);
-    await sleep(1200);
-    // Tier (a): the index page was cached (write-through) -> still 200 with content.
-    out.cachedAfterClose = await tabEval(preview, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return { status: r.status, len: t.length, src: r.headers.get('X-IGPreview-Source') }; })()`);
-    // Tier (c): a page that was never rendered/cached, editor closed -> friendly
-    // fallback (200, never a browser error page).
+    await sleep(500);
+    const restarted = await newTab(indexUrl);
+    await tabWaitFor(restarted.ws, `document.readyState === 'complete' && document.body?.textContent.length > 400 && !document.querySelector('[data-igpreview-fallback]')`, 20000, 'preview after Service Worker restart and editor close');
+    out.persistedAfterRestart = await tabEval(restarted.ws, `(async () => { const r = await fetch('${indexPath}'); const t = await r.text(); return { status: r.status, len: t.length, src: r.headers.get('X-IGPreview-Source') }; })()`);
+    // A path absent from the complete catalog has no verified output and gets
+    // the friendly page, never a browser/network error.
     const nonCached = pathOf(PREVIEW + 'cycle/en/ZZZ-NeverRendered-xyz.html');
-    out.fallbackAfterClose = await tabEval(preview, `(async () => { const r = await fetch('${nonCached}'); const t = await r.text(); return { status: r.status, isFallback: /data-igpreview-fallback/.test(t), src: r.headers.get('X-IGPreview-Source') }; })()`);
+    out.fallbackAfterClose = await tabEval(restarted.ws, `(async () => { const r = await fetch('${nonCached}'); const t = await r.text(); return { status: r.status, isFallback: /data-igpreview-fallback/.test(t), src: r.headers.get('X-IGPreview-Source') }; })()`);
   } catch (e) {
     out.error = String(e);
     out.stack = (e && e.stack ? String(e.stack) : '').split('\n').slice(0, 4).join(' | ');
@@ -661,8 +689,8 @@ try {
   // ---- Edit a title in the IG source -> preview updates (the demo's goal) --
   // Switch the preview back to the index page (its <title>/heading reflects the
   // IG title from sushi-config). Then edit the IG `title:` in sushi-config.yaml —
-  // a robust, unambiguous source edit that flows through compile -> site.db ->
-  // rendered page.
+  // a robust, unambiguous source edit that flows through semantic preparation
+  // into the rendered page.
   await evalJs(ws, `(() => {
     const sel = document.querySelector('.preview-page-select select');
     if (sel) { sel.value = 'index.html'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -693,8 +721,8 @@ try {
   })()`);
   // Cycle's auxiliary outputs must cross the worker + preview Service Worker
   // seam directly, without first rendering their owning page. These requests
-  // run while the Cycle adapter is active (the later independent-tab gate uses
-  // the stock Publisher adapter for its navigation coverage).
+  // run while the Cycle generator is active (the later independent-tab gate
+  // uses the Publisher generator for its navigation coverage).
   results.cycleDirectOutputs = await evalJs(ws, `(async () => {
     const preview = document.querySelector('.preview-frame')?.contentWindow;
     if (!preview) return { error: 'no-preview-window' };
@@ -745,7 +773,7 @@ try {
     results.editToPreviewMs = Date.now() - tEdit;
   }
 
-  // ---- stock-template adapter (F6): switch generators, render, warm-edit ----
+  // ---- Publisher generator (F6): switch generators, render, warm-edit ----
   await evalJs(ws, `(() => {
     const sel = document.querySelector('.preview-generator-select select');
     const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
@@ -908,6 +936,7 @@ try {
 
   // WARM EDIT (the F6 gate): the engine + template tree are mounted; edit the
   // already-open index.md and time source-edit -> stock-rendered page update.
+  const stockMetricStart = await evalJs(ws, `window.__igDebug?.metrics?.length || 0`);
   const stockEdit = await evalJs(ws, `(() => {
     const ed = window.monaco && window.monaco.editor.getEditors()[0];
     if (!ed) return 'no-editor';
@@ -929,6 +958,9 @@ try {
     })()`;
     await waitFor(ws, stockMarkerCurrent, 30000, 'stock preview reflects warm edit');
     results.stockWarmEditMs = Date.now() - t0;
+    results.stockWarmEditMetrics = await evalJs(ws, `
+      (window.__igDebug?.metrics || []).slice(${JSON.stringify(stockMetricStart)})
+    `);
     await waitForStable(ws, stockMarkerCurrent, 5000, 'stock warm edit remains current');
   }
 
@@ -947,9 +979,9 @@ try {
   }
 
   // ---- LIVE template path (#40): mount hl7.fhir.template#1.0.0 via the LIVE
-  // resolve→fetch→mount→mountTemplate path (NOT the warm-start artifact) and
+  // resolve→fetch→mount→retry-prepare path (NOT a prebuilt site artifact) and
   // assert the US Core / index page still renders (byte-identical tree ⇒ same
-  // render — the template-parity gate proves the tree equality at build time).
+  // render through the same Rust-owned prepare facade used by curated versions).
   // `forceLiveTemplate` suppresses the warm artifact + cache so the live loader
   // runs even though a committed artifact exists; the chain packages are baked
   // (packages.list), so this stays offline-deterministic.
@@ -1261,10 +1293,70 @@ try {
       }
     }
 
+    // ---- mCODE catalog stock-preparation regression -----------------------
+    // A catalog entry is useful only if project preparation reaches a real page.
+    // This specifically guards the failure mode where the source archive loads
+    // but the stock build ends at "Site build failed". Keep this in the existing
+    // catalog/browser flow: it exercises the baked archive, package resolution,
+    // compile, Publisher preparation, preview publication, and the SW URL.
+    results.mcodeClicked = await evalJs(ws, `(() => {
+      const select = document.querySelector('.open-ig-select');
+      if (!select || ![...select.options].some((option) => option.value === 'mcode')) return 'no-mcode-option';
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'mcode');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'clicked';
+    })()`);
+    if (results.mcodeClicked === 'clicked') {
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'mcode' && !!document.querySelector('.open-progress')`, 30000, 'mCODE open-progress overlay appeared');
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'mcode' && !document.querySelector('.open-progress')`, 180000, 'mCODE catalog preparation completed');
+      await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+      await waitFor(ws, `(() => {
+        if (document.querySelector('.preview-error')) return true;
+        return [...document.querySelectorAll('.preview-page-select option')]
+          .some((option) => /(^|\\/)index\\.html$/i.test(option.value));
+      })()`, 120000, 'mCODE stock page or explicit build error');
+      const mcodeIndex = await evalJs(ws, `(() => {
+        const options = [...document.querySelectorAll('.preview-page-select option')];
+        return options.find((option) => option.value === 'en/index.html')?.value
+          || options.find((option) => /(^|\\/)index\\.html$/i.test(option.value))?.value
+          || '';
+      })()`);
+      if (mcodeIndex) {
+        await evalJs(ws, `(() => {
+          const select = document.querySelector('.preview-page-select select');
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+          setter.call(select, ${JSON.stringify(mcodeIndex)});
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        await waitForStable(ws, `(() => {
+          const frame = document.querySelector('.preview-frame');
+          const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+          return document.querySelector('.preview-page-select select')?.value === ${JSON.stringify(mcodeIndex)}
+            && (frame?.contentWindow?.location.pathname || '').endsWith('/' + ${JSON.stringify(mcodeIndex)})
+            && doc?.readyState === 'complete'
+            && !doc.querySelector('[data-igpreview-fallback]')
+            && (doc.body?.textContent || '').length > 500;
+        })()`, 120000, 'mCODE real stock preview page');
+      }
+      results.mcodeStockPreview = await evalJs(ws, `(() => {
+        const frame = document.querySelector('.preview-frame');
+        const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+        return {
+          target: ${JSON.stringify(mcodeIndex)},
+          project: localStorage.getItem('igEditor.project'),
+          generator: document.querySelector('.preview-generator-select select')?.value || '',
+          error: document.querySelector('.preview-error')?.textContent || '',
+          fallback: !!doc?.querySelector('[data-igpreview-fallback]'),
+          textLen: doc?.body?.textContent?.length || 0,
+        };
+      })()`);
+    }
+
     // Restore the exact stock-template project state the preview-window gate needs:
     // re-open the demo IG, switch the preview generator back to the stock template,
-    // and wait for its page list + index render. (Opening US Core switched the
-    // project + reset the generator to 'cycle'.)
+    // and wait for its page list + index render. (Opening catalog IGs switched the
+    // project and its default generator.)
     await evalJs(ws, `(() => {
       const button = [...document.querySelectorAll('.topbar-actions button')]
         .find((candidate) => /open demo IG/i.test(candidate.textContent || ''));
@@ -1426,6 +1518,23 @@ try {
       console.error('assert: US Core CarePlan contains nested/remote tab content —', JSON.stringify(carePlan)); ok = false;
     }
   }
+  // mCODE catalog regression: opening the baked catalog entry must reach the
+  // stock generator's real index page, not merely finish loading source files.
+  if (results.mcodeClicked !== 'clicked') {
+    console.error('assert: could not open mCODE from the catalog —', results.mcodeClicked); ok = false;
+  } else {
+    const mp = results.mcodeStockPreview || {};
+    if (
+      mp.project !== 'mcode'
+      || mp.generator !== 'hl7.fhir.template'
+      || !mp.target
+      || mp.error
+      || mp.fallback
+      || !(mp.textLen > 500)
+    ) {
+      console.error('assert: mCODE preparation did not reach a real stock preview page —', JSON.stringify(mp)); ok = false;
+    }
+  }
   // preview-window gates (task #37).
   const pw = results.previewWindow || {};
   if (pw.skipped) {
@@ -1434,7 +1543,9 @@ try {
     if (!pw.previewCapable) { console.error('assert: preview window not capable (SW missing?)'); ok = false; }
     if (!(pw.indexRenderedLen > 400)) { console.error('assert: preview index did not render via SW'); ok = false; }
     if (!pw.snippetInjected) { console.error('assert: hot-reload snippet not injected into preview HTML'); ok = false; }
-    if (!pw.cachedWriteThrough) { console.error('assert: preview page not written through to cache'); ok = false; }
+    if (!['content-store', 'build-cache', 'content-transfer', 'render'].includes(pw.initialVerifiedSource)) {
+      console.error('assert: preview page did not come from a verified output source —', pw.initialVerifiedSource); ok = false;
+    }
     if (!pw.crossPageNav) { console.error('assert: cross-page link navigation failed'); ok = false; }
     if (!(pw.reloadLen > 200)) { console.error('assert: F5 reload did not render'); ok = false; }
     if (!pw.reloadUrlStable) { console.error('assert: F5 reload changed the preview URL'); ok = false; }
@@ -1457,8 +1568,14 @@ try {
       console.error('assert: profile page did not contain exactly one correctly-scoped hot-reload control block —', JSON.stringify(pw.profileHotReloadPayloads)); ok = false;
     }
     if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
-    if (!(pw.cachedAfterClose && pw.cachedAfterClose.status === 200 && pw.cachedAfterClose.len > 200)) {
-      console.error('assert: cached page did not serve 200 after editor closed'); ok = false;
+    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=4(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
+      console.error('assert: preview worker did not restart at the current module protocol —', pw.previewWorkerRestart); ok = false;
+    }
+    if (!(pw.persistedAfterRestart
+      && pw.persistedAfterRestart.status === 200
+      && pw.persistedAfterRestart.len > 200
+      && ['content-store', 'build-cache'].includes(pw.persistedAfterRestart.src))) {
+      console.error('assert: verified preview did not survive worker restart + editor close —', pw.persistedAfterRestart); ok = false;
     }
     if (!(pw.fallbackAfterClose && pw.fallbackAfterClose.status === 200 && pw.fallbackAfterClose.isFallback)) {
       console.error('assert: non-cached page did not serve the friendly fallback'); ok = false;
@@ -1511,7 +1628,7 @@ try {
   if (!(tc.versionCount > 0)) { console.error('assert: template version catalog empty'); ok = false; }
   if (!tc.defaultIsPublished) { console.error('assert: default template version is not a published version:', tc.defaultVersion); ok = false; }
   if (!(Array.isArray(tc.verified) && tc.verified.length > 0)) { console.error('assert: no oracle-verified version badged in the catalog'); ok = false; }
-  // #40 LIVE template path: mounted via resolve→fetch→mount→mountTemplate.
+  // #40 LIVE template path: acquired via resolve→fetch→mount→retry-prepare.
   if (results.forcedLive === 'set') {
     if (!(results.liveTemplateIndexLen > 500)) { console.error('assert: live-mounted template did not render index'); ok = false; }
     if (!results.liveMatchesWarm) { console.error('assert: live-rendered index diverged from warm-rendered', results.liveTemplateIndexLen, 'vs', results.stockIndexLen); ok = false; }

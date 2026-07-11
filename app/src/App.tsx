@@ -3,29 +3,30 @@
 // generation, and wires Monaco/resource/snapshot/diagnostic views.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { EngineClient } from './worker/client';
+import { EngineClient, PrepareError } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
-import { getSiteGenerator, listSiteGenerators, registerSiteGenerator } from './adapters/types';
-import type { PageInfo } from './adapters/types';
-import { cycleAdapter } from './adapters/cycleAdapter';
-import { stockAdapter } from './adapters/stockAdapter';
+import type { GeneratorSpec, OutputDescriptor, ProjectInput } from './site/contract';
 import {
   ensurePreviewServiceWorker,
   wirePreviewResponder,
   publishPreviewSource,
 } from './preview/previewWindow';
 import { LatestTaskQueue, type TaskLease } from './build/latestTaskQueue';
+import { getCuratedCatalogs, type TemplateCatalog } from './adapters/templateCatalog';
 
-// Adapter API v1 build-time registry: the selectable site generators.
-registerSiteGenerator(cycleAdapter);
-registerSiteGenerator(stockAdapter);
 const GENERATOR_KEY = 'igEditor.siteGenerator';
 const PROJECT_KEY = 'igEditor.project';
 const TEMPLATE_KEY = 'igEditor.templateCoord';
 const DEFAULT_TEMPLATE = 'hl7.fhir.template#1.0.0';
+const CYCLE_GENERATOR = 'cycle';
+const PUBLISHER_GENERATOR = 'hl7.fhir.template';
+const GENERATORS = [
+  { id: CYCLE_GENERATOR, label: 'Cycle site generator (LiquidJS)' },
+  { id: PUBLISHER_GENERATOR, label: 'FHIR IG Publisher template (Rust)' },
+] as const;
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -38,14 +39,19 @@ import type { ProgressEvent } from './worker/protocol';
 
 const DEBOUNCE_MS = 300;
 
-interface ProjectBuildSnapshot {
-  projectId: string;
-  config: string;
-  files: Record<string, string>;
-  predefined: Record<string, unknown>;
+interface ProjectBuildSnapshot extends ProjectInput {
   predefinedDisplay: CompileResult['resources'];
-  siteFiles: Record<string, string>;
-  buildEpochSecs: number;
+}
+
+function generatorSpec(id: string, templateCoordinate: string): GeneratorSpec {
+  return id === CYCLE_GENERATOR
+    ? { generator: 'cycle' }
+    : {
+        generator: 'publisher',
+        templateCoordinate,
+        activeTables: true,
+        runUuid: 'e0e0e0e0-0000-4000-8000-igeditor0000',
+      };
 }
 
 function captureProject(st: ProjectStore, projectId: string): ProjectBuildSnapshot {
@@ -71,9 +77,8 @@ function recordRuntimeMetric(event: ProgressEvent): void {
 
 export function App() {
   const engineRef = useRef<EngineClient | null>(null);
-  // The wasm renderer still exposes a mutable site tree. Serialize every compile
-  // and adapter initialization until that state moves behind isolated BuildHandles;
-  // leases prevent obsolete work from publishing UI/SW generations.
+  // Engine work is serialized; leases prevent obsolete immutable build handles
+  // from publishing UI or Service Worker generations.
   const buildQueueRef = useRef(new LatestTaskQueue());
   const [store, setStore] = useState<ProjectStore | null>(null);
   const storeRef = useRef<ProjectStore | null>(null);
@@ -115,23 +120,19 @@ export function App() {
 
   // task #32: packages the runtime resolver could not obtain from any source.
   const [blockedPackages, setBlockedPackages] = useState<BlockedPackage[]>([]);
-  // The last config we ran package acquisition for (so we don't re-resolve the
-  // whole closure on every keystroke — only when dependencies/fhirVersion change).
-  const acquiredConfigRef = useRef<string | null>(null);
-
-  // Site preview (adapter-driven).
+  // Site preview (immutable BuildHandle-driven).
   const [inspectTab, setInspectTab] = useState<'resource' | 'preview'>('resource');
   const [generatorId, setGeneratorId] = useState<string>(
     () => localStorage.getItem(GENERATOR_KEY) || 'cycle',
   );
-  const [sitePages, setSitePages] = useState<PageInfo[] | null>(null);
-  const [siteGeneration, setSiteGeneration] = useState(0);
+  const [sitePages, setSitePages] = useState<OutputDescriptor[] | null>(null);
+  const [siteIgId, setSiteIgId] = useState(projectIdRef.current);
   // Use a process-epoch seed so a reloaded editor always advances beyond cache
   // generations retained by an older Service Worker session.
   const siteGenerationRef = useRef(Date.now());
   const [siteBuilding, setSiteBuilding] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
-  // Live template loader (#40): the selected stock template#version + the last
+  // Live template loader (#40): the selected Publisher template#version + the last
   // load error (custom-ant refusal etc.). The coord persists across reloads.
   const [templateCoord, setTemplateCoord] = useState<string>(
     () => localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
@@ -140,7 +141,7 @@ export function App() {
   // Curated templates' live version catalogs (#40 default UX): fetched from the
   // registry (OPFS-cached, TTL, last-known-good, pinned fallback) so the selector
   // offers a version list with NO typing. Null until first load.
-  const [templateCatalogs, setTemplateCatalogs] = useState<Record<string, import('./adapters/templateCatalog').TemplateCatalog> | null>(null);
+  const [templateCatalogs, setTemplateCatalogs] = useState<Record<string, TemplateCatalog> | null>(null);
   // Whether the user has EXPLICITLY chosen a template this session (persisted key
   // present). If not, the boot catalog load defaults the coord to the family's
   // latest PUBLISHED version rather than the hardcoded DEFAULT_TEMPLATE.
@@ -164,7 +165,7 @@ export function App() {
       (window as unknown as { __igDebug?: unknown }).__igDebug = { engine, metrics: [] };
       // Preview-window (task #37): register the SW + render responder early so an
       // "Open site in new window" tab can be answered as soon as it exists.
-      wirePreviewResponder();
+      wirePreviewResponder((handle, path) => engine.render(handle, path));
       void ensurePreviewServiceWorker().then((ok) => {
         if (!cancelled) setPreviewCapable(ok);
       });
@@ -209,7 +210,6 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { getCuratedCatalogs } = await import('./adapters/templateCatalog');
       const cats = await getCuratedCatalogs();
       if (cancelled) return;
       setTemplateCatalogs(cats);
@@ -235,7 +235,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- site preview build: adapter init for one immutable project snapshot. --
+  // ---- one project crossing -> immutable BuildHandle -> atomic publication --
   const performBuildSite = useCallback(async (
     project: ProjectBuildSnapshot,
     engine: EngineClient,
@@ -253,50 +253,39 @@ export function App() {
       setSiteBuilding(true);
       setSiteError(null);
     }
-    try {
-      // Adapter initialization reads the wasm session's current compile. Bind
-      // that mutable state to this immutable snapshot first; same-revision
-      // generator/template switches reuse the cached compile result.
-      await engine.ensureCompiledProject(
-        project.config,
-        project.files,
-        project.predefined,
-        project.siteFiles,
-      );
+    const showCompiled = (compiled: CompileResult) => {
       if (!lease.isLatest()) return;
-      const adapter = getSiteGenerator(genId);
-      if (!adapter) throw new Error(`no site generator '${genId}'`);
-      report({ stage: 'site-build', message: `Building ${genId} site…` });
-      const siteStarted = performance.now();
-      // Live template loader (#40): tell the stock adapter which template#version
-      // to materialize BEFORE init. Surface the template fetch/materialize stages
-      // (chain fetch, mountTemplate) through the shared progress → status line.
-      if (genId === 'hl7.fhir.template') {
-        stockAdapter.setTemplate(selectedTemplate);
-        engine.setProgress(report);
-      }
-      await adapter.init({
-        engine,
-        project: {
-          projectId: project.projectId,
-          config: project.config,
-          files: project.files,
-          predefined: project.predefined,
-          siteFiles: project.siteFiles,
-          buildEpochSecs: project.buildEpochSecs,
-        },
+      setCompile(compiled);
+      const sushiNames = new Set(compiled.resources.map((resource) => resource.filename));
+      const predef = project.predefinedDisplay.filter((resource) => !sushiNames.has(resource.filename));
+      setPredefinedResources(predef);
+      const allResources = [...compiled.resources, ...predef];
+      setSelectedResource((current) => {
+        if (current && allResources.some((resource) => resource.filename === current)) return current;
+        const first = allResources.find((resource) => resource.resourceType === 'StructureDefinition' && resource.url);
+        return first?.filename ?? allResources[0]?.filename ?? null;
       });
-      const pages = await adapter.listPages();
+    };
+    try {
+      report({ stage: 'site-build', message: `Preparing ${genId} site…` });
+      const siteStarted = performance.now();
+      engine.setProgress(report);
+      const prepared = await engine.prepare(project, generatorSpec(genId, selectedTemplate));
+      // Compilation remains useful UI state even if catalog validation,
+      // rendering, or preview publication subsequently fails.
+      showCompiled(prepared.compiled);
+      const catalog = await engine.outputs(prepared.handle);
+      const pages = catalog.outputs.filter((output) => output.kind === 'page');
       report({
         stage: 'site-build',
-        message: `Built ${pages.length} site pages.`,
+        message: `Prepared ${pages.length} site pages.`,
         durationMs: performance.now() - siteStarted,
         fileCount: pages.length,
       });
       if (!lease.isLatest()) return;
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
-      if (genId === 'hl7.fhir.template') {
+      if (genId === PUBLISHER_GENERATOR) {
         lastGoodTemplateRef.current = selectedTemplate;
         setTemplateError(null);
       }
@@ -306,10 +295,11 @@ export function App() {
       const published = await publishPreviewSource(
         {
           igId: project.projectId,
-          generatorId: genId,
-          adapter,
-          generation: nextGeneration,
+          handle: prepared.handle,
+          buildId: prepared.buildId,
+          catalog,
         },
+        nextGeneration,
         () => lease.isLatest(),
       );
       if (!published || !lease.isLatest()) return;
@@ -319,14 +309,13 @@ export function App() {
         durationMs: performance.now() - publishStarted,
         fileCount: pages.length,
       });
-      // Publish React state only after the SW has acknowledged the matching asset
-      // manifest + generation pointer.
+      // Swap React state only after the SW acknowledges this exact handle/catalog.
       siteGenerationRef.current = nextGeneration;
+      setSiteIgId(project.projectId);
       setSitePages(pages);
-      setSiteGeneration(nextGeneration);
     } catch (e) {
       if (lease.isLatest()) {
-        setSitePages(null);
+        if (e instanceof PrepareError && e.compiled) showCompiled(e.compiled);
         setSiteError(String(e));
         throw e; // let selectTemplate see the failure so it can fall back
       }
@@ -334,7 +323,7 @@ export function App() {
       // The queue does not start the next engine operation until this returns, so
       // clearing transient flags/callbacks here cannot clobber a newer task.
       setSiteBuilding(false);
-      if (genId === 'hl7.fhir.template') engine.setProgress(null);
+      engine.setProgress(null);
     }
   }, []);
 
@@ -354,14 +343,13 @@ export function App() {
   const switchGenerator = useCallback((id: string) => {
     localStorage.setItem(GENERATOR_KEY, id);
     setGeneratorId(id);
-    setSitePages(null);
     if (storeRef.current && engineRef.current) {
       void enqueueSiteBuild(storeRef.current, engineRef.current, id).catch(() => {});
     }
   }, [enqueueSiteBuild]);
 
   // Live template loader (#40): select a template#version (known or write-your-own).
-  // Persist it, re-init the stock adapter; on failure (custom-ant refusal, chain
+  // Persist it, prepare a new immutable Publisher build; on failure (custom-ant refusal, chain
   // unfetchable) surface the message and FALL BACK to the previous good template
   // so the selector never wedges.
   const selectTemplate = useCallback((coord: string) => {
@@ -370,20 +358,19 @@ export function App() {
     localStorage.setItem(TEMPLATE_KEY, coord);
     setTemplateCoord(coord);
     setTemplateError(null);
-    setSitePages(null);
     if (!storeRef.current || !engineRef.current) return;
-    void enqueueSiteBuild(storeRef.current, engineRef.current, 'hl7.fhir.template').catch((e) => {
+    void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch((e) => {
       // Revert to the last template that loaded — never leave the preview wedged.
       setTemplateError(String(e).replace(/^Error:\s*/, ''));
       localStorage.setItem(TEMPLATE_KEY, previous);
       setTemplateCoord(previous);
       if (previous !== coord && storeRef.current && engineRef.current) {
-        void enqueueSiteBuild(storeRef.current, engineRef.current, 'hl7.fhir.template').catch(() => {});
+        void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch(() => {});
       }
     });
   }, [enqueueSiteBuild]);
 
-  // ---- compile (full project) ----------------------------------------------
+  // ---- prepare full project + selected generator in one worker request ------
   const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient) => {
     if (!engine.initialized) return;
     // Snapshot before entering the queue: loading another IG or typing while an
@@ -394,68 +381,10 @@ export function App() {
     await buildQueueRef.current.enqueue(async (lease) => {
       if (lease.isLatest()) setCompiling(true);
       try {
-        const cfg = project.config;
-        // task #32: acquire visibly when config changes so blocked packages and
-        // progress reach the UI. EngineClient.compile independently enforces the
-        // stronger config + package-generation invariant; a deferred/template
-        // mount cannot bypass re-resolution merely because this UI ref is stable.
-        if (cfg !== acquiredConfigRef.current) {
-          engine.setProgress((ev) => {
-            if (lease.isLatest()) {
-              recordRuntimeMetric(ev);
-              setProgress(ev);
-              setStatus(ev.message);
-            }
-          });
-          try {
-            const outcome = await engine.acquireForProject(cfg);
-            if (lease.isLatest()) setBlockedPackages(outcome.blocked);
-            acquiredConfigRef.current = cfg;
-          } catch (e) {
-            // Acquisition failure is non-fatal: compile with whatever is mounted and
-            // let the compiler's own diagnostics report unresolved references.
-            if (lease.isLatest()) setStatus(`Package acquisition warning: ${String(e)}`);
-          } finally {
-            engine.setProgress(null);
-          }
-        }
-        const result = await engine.compile(
-          cfg,
-          project.files,
-          project.predefined,
-          project.siteFiles,
-        );
-        if (!lease.isLatest()) return;
-        setCompile(result);
-        // Predefined conformance resources are part of the IG's browsable resource
-        // set even though SUSHI (FSH-only) does not re-emit them (see the state
-        // decl). Merge them for the panel, deduped by filename against SUSHI output.
-        const sushiNames = new Set(result.resources.map((r) => r.filename));
-        const predef = project.predefinedDisplay.filter((r) => !sushiNames.has(r.filename));
-        setPredefinedResources(predef);
-        const allResources = [...result.resources, ...predef];
-        // Default-select the first StructureDefinition for the inspector.
-        setSelectedResource((cur) => {
-          if (cur && allResources.some((r) => r.filename === cur)) return cur;
-          const firstSd = allResources.find((r) => r.resourceType === 'StructureDefinition' && r.url);
-          return firstSd?.filename ?? allResources[0]?.filename ?? null;
-        });
-        // Build and publish the corresponding site before this queued request
-        // completes. Engine mutations cannot interleave, and openProject's progress
-        // overlay now truthfully spans compile + site preparation.
-        const hasError = result.diagnostics.some((d) => d.severity === 'error');
-        if (!hasError) {
-          try {
-            await performBuildSite(project, engine, genId, selectedTemplate, lease);
-          } catch {
-            // performBuildSite owns the visible site error; compilation itself is
-            // still a valid result and must remain browsable.
-          }
-        } else {
-          setSiteError('Fix the FSH errors to update the site preview.');
-        }
+        await performBuildSite(project, engine, genId, selectedTemplate, lease);
+        if (lease.isLatest()) setBlockedPackages([]);
       } catch (e) {
-        if (lease.isLatest()) {
+        if (lease.isLatest() && e instanceof PrepareError && e.stage === 'compile') {
           setPredefinedResources([]);
           setCompile({
             resources: [],
@@ -488,7 +417,6 @@ export function App() {
     // catalog fetch mutates the shared ProjectStore.
     buildQueueRef.current.invalidate();
     setSiteBuilding(false);
-    setSitePages(null);
     // Surface the SAME staged progress the boot path shows for the whole open:
     // manifest fetch → package acquisition (bundle fetch/mount) → compile →
     // snapshot data mount → site render. Every stage flows through `setProgress`;
@@ -507,10 +435,10 @@ export function App() {
     localStorage.setItem(PROJECT_KEY, projectId);
     projectIdRef.current = projectId;
     // The `cycle` generator is bespoke to the cycle demo IG; every other IG (the
-    // catalog / published IGs) renders with the stock template generator. Default
-    // the preview generator PER PROJECT so the first preview isn't the cycle-only
-    // generator failing (`buildSiteDb: base not found …`) on a published IG.
-    const defaultGen = projectId === 'cycle' ? cycleAdapter.id : stockAdapter.id;
+    // catalog / published IGs) renders with the Publisher generator. Default
+    // the preview generator per project so a published IG never opens with the
+    // Cycle-specific generator selected.
+    const defaultGen = projectId === 'cycle' ? CYCLE_GENERATOR : PUBLISHER_GENERATOR;
     localStorage.setItem(GENERATOR_KEY, defaultGen);
     setGeneratorId(defaultGen);
     try {
@@ -613,14 +541,10 @@ export function App() {
           <PackageSettings
             onChange={() => {
               // A registry/proxy/local-package change may unblock packages — allow
-              // the next compile to re-run acquisition.
-              acquiredConfigRef.current = null;
               setSettingsVersion((v) => v + 1);
             }}
             onDropTgz={async (bytes) => {
               const label = (await engineRef.current?.ingestLocalTgz(bytes)) ?? '';
-              // A newly-provided package may satisfy a previously-blocked closure.
-              acquiredConfigRef.current = null;
               if (store && engineRef.current) void runCompile(store, engineRef.current);
               return label;
             }}
@@ -770,12 +694,11 @@ export function App() {
                 )
               ) : engineRef.current ? (
                 <PreviewPane
-                  igId={projectIdRef.current}
-                  adapter={getSiteGenerator(generatorId) ?? cycleAdapter}
-                  generators={listSiteGenerators().map((g) => ({ id: g.id, label: g.label }))}
+                  igId={siteIgId}
+                  generatorId={generatorId}
+                  generators={[...GENERATORS]}
                   onSelectGenerator={switchGenerator}
                   pages={sitePages}
-                  generation={siteGeneration}
                   building={siteBuilding}
                   error={siteError}
                   previewCapable={previewCapable}

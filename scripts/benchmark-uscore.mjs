@@ -200,7 +200,6 @@ const INSTRUMENTATION = String.raw`(() => {
         operation.inputBytes = result.inputBytes ?? null;
         operation.serializeMs = result.serializeMs ?? null;
         operation.wasmMs = result.wasmMs ?? null;
-        operation.preparedStored = result.preparedStored || [];
         operation.preparedMetrics = result.preparedMetrics || null;
         operation.packageStorage = result.packageStorage || null;
         operation.pageCount = Array.isArray(result.pages) ? result.pages.length : result.pages ?? null;
@@ -256,7 +255,7 @@ function networkSummary(events, phase) {
   const selected = events.filter((event) => event.phase === phase);
   const encodedBytes = selected.reduce((sum, event) => sum + event.encodedBytes, 0);
   const packageLike = selected.filter((event) =>
-    /packages\.fhir\.org|packages2\.fhir\.org|\/data\/(?:bundles|templates|publisher-runtime|uscore)\//.test(event.url),
+    /packages\.fhir\.org|packages2\.fhir\.org|\/data\/(?:bundles|uscore)\//.test(event.url),
   );
   return {
     requestCount: selected.length,
@@ -461,7 +460,6 @@ async function traceSnapshot(target, phaseStart) {
     inputBytes: operation.inputBytes,
     serializeMs: operation.serializeMs,
     wasmMs: operation.wasmMs,
-    preparedStored: operation.preparedStored,
     preparedMetrics: operation.preparedMetrics,
     packageStorage: operation.packageStorage,
     newlyMounted: operation.newlyMounted,
@@ -526,8 +524,8 @@ async function waitForProjectOpen(target, id) {
     `!document.querySelector('.open-progress') && document.querySelectorAll('.res-row').length > 100`,
     `${id} project open to complete`,
   );
-  // Publication to the preview Service Worker follows the adapter's page-list
-  // handoff by a small asynchronous tail. Include it without adding an arbitrary
+  // Publication to the preview Service Worker follows the OutputCatalog
+  // acknowledgement by a small asynchronous tail. Include it without adding an arbitrary
   // multi-second pad.
   await sleep(250);
 }
@@ -593,8 +591,8 @@ async function main() {
       'warm engine boot',
     );
     await target.waitFor(
-      `window.__usCoreBenchmark.operations.some((entry) => entry.op === 'openStockBuild' && entry.end != null && entry.ok) && document.querySelectorAll('.res-row').length > 100`,
-      'warm US Core immutable stock build',
+      `window.__usCoreBenchmark.operations.some((entry) => entry.op === 'prepare' && entry.end != null && entry.ok) && window.__usCoreBenchmark.operations.some((entry) => entry.op === 'outputs' && entry.end != null && entry.ok) && document.querySelectorAll('.res-row').length > 100`,
+      'warm US Core prepare and OutputCatalog',
     );
     await sleep(250);
     const warm = await traceSnapshot(target, 0);
@@ -629,7 +627,6 @@ async function main() {
     same.network = networkSummary(networkEvents, 'sameWorkerReopen');
 
     const warmMountMs = (warm.operationTotals.init?.durationMs || 0)
-      + (warm.operationTotals.mountBundles?.durationMs || 0)
       + (warm.operationTotals.mountPackages?.durationMs || 0);
     const report = {
       schemaVersion: 1,

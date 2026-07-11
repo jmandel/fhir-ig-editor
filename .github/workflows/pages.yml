@@ -1,9 +1,9 @@
-# Build the static FHIR IG Editor and deploy to GitHub Pages (spec §8).
+# Build the static FHIR IG Editor and deploy to GitHub Pages.
 #
 # The engine that ships is EXACTLY the pinned vendor/sushi-rs commit; the default
 # IG is EXACTLY the pinned vendor/cycle commit. Bumping a submodule is the upgrade
 # event. CI runs the engine's own fast gates before deploying — the demo never
-# ships an engine that fails its own tests (spec §8 step 2, §9).
+# ships an engine that fails its own tests.
 #
 # Package acquisition: CI downloads the pinned closure (scripts/packages.list)
 # from the FHIR package registry into .fhir-cache, wrapped in actions/cache keyed
@@ -51,15 +51,15 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('vendor/sushi-rs/Cargo.lock') }}
 
       # --- Engine gate: the demo never deploys an engine that fails its own tests.
-      # Fast subset per spec §8 step 2 (full suite is heavy; this is the ladder +
+      # Fast subset (the full corpus is heavy; this is the ladder +
       # in-memory compile-equivalence + wasm_api). Widen as CI budget allows.
       - name: Engine gate (fast tests)
         working-directory: vendor/sushi-rs
         run: |
           cargo test -p compiler -p wasm_api -p snapshot_gen --release
-          # SiteBuild's closed-artifact law and its optional site.db projection
-          # are not reached by the legacy compile/snapshot packages above.
-          cargo test -p site_build --features site-db-compat --release
+          # SiteBuild and SiteOutput contract tests are not reached by the
+          # compiler/snapshot packages above.
+          cargo test -p site_build --release
           # Typed fragment resolution/read-set behavior is renderer-owned.
           cargo test -p render_page --release
           # Fig's ordinary tests are hermetic and include the native typed
@@ -87,7 +87,7 @@ jobs:
       # documents WHY each package incl. r5.core) is downloaded once from the
       # FHIR package registry and cached by actions/cache keyed on the list, so
       # repeat runs don't re-download (~240 MB). This is CI's only registry
-      # traffic; no live tx server is ever called (spec §6 tier 3 / §8 step 5).
+      # traffic; no live terminology server is ever called.
       - name: Restore FHIR package cache
         uses: actions/cache@v4
         with:
@@ -126,9 +126,26 @@ jobs:
           FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
         run: bash scripts/build-wasm.sh
 
+      # Static-data assembly now imports Cycle's own renderer-package builder,
+      # so install the already-required Bun dependency graphs before running the
+      # one canonical assembly recipe. These installs are reused by later gates.
+      - name: Setup Bun (the committed lockfile is bun.lock)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install app dependencies
+        working-directory: app
+        run: bun install --frozen-lockfile
+
+      - name: Install Cycle renderer dependencies
+        working-directory: vendor/cycle
+        run: bun install --frozen-lockfile
+
       # Canonical app-data recipe shared with scripts/prepare-data.sh. This also
-      # bakes every catalog IG, stages template/site/expansion artifacts and E2E
-      # fixtures, and copies Cycle assets; CI must not carry a second recipe.
+      # bakes every catalog IG, stages expansion/E2E inputs, and bakes Cycle's
+      # authenticated renderer package; CI must not
+      # carry a second recipe.
       - name: Assemble static app data
         env:
           FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
@@ -147,18 +164,9 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           node scripts/byte-check.mjs .pkg-node app/public/data/bundles vendor/cycle .native-out/fsh-generated/resources
 
-      # --- Template-parity gate (#40): the LIVE mountTemplate tree == the packed
-      # `fig` warm-start artifact (both from the ONE loader) — "pages rendered via
-      # the live-mounted template == the packed-artifact path". Uses the nodejs
-      # wasm from the byte-check step + the repacked template chain bundles.
-      - name: Template-parity gate (live mountTemplate == packed artifact)
-        run: |
-          node scripts/template-parity.mjs .pkg-node app/public/data/bundles \
-            "site-bundles/templates/hl7.fhir.template/1.0.0.json"
-
       # --- Consistency gate: the in-engine tier-1 expander (expand_enumerable)
-      # must agree with the committed expansion cache on the shared domain
-      # (spec §6 tier 3). This cycle's committed cache is EMPTY, so the gate is
+      # must agree with the committed expansion cache on the shared domain.
+      # This cycle's committed cache is EMPTY, so the gate is
       # trivially green over it — but it is WIRED and proven by a fixture-based
       # self-test (an agreeing case AND a deliberately-wrong case the gate must
       # reject), so a green result means the machinery genuinely compares. CI
@@ -166,30 +174,16 @@ jobs:
       - name: Consistency gate (expand_enumerable ↔ committed cache)
         run: node scripts/consistency-gate.mjs "$GITHUB_WORKSPACE/.pkg-node"
 
-      - name: Setup Bun (the committed lockfile is bun.lock)
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install app dependencies
-        working-directory: app
-        run: bun install --frozen-lockfile
-
-      - name: Install Cycle renderer dependencies
-        working-directory: vendor/cycle
-        run: bun install --frozen-lockfile
-
       - name: Cycle shared renderer contract tests
         working-directory: vendor/cycle
         run: |
           bun run typecheck:renderer
-          SITE_GEN_USE_FIXTURE=1 bun site-gen/ingest.ts
           bun test
 
       # Exercise the actual portable native seam, not only its synthetic handle
       # tests. Archive the pinned Cycle source into a disposable tree so its
       # guide-specific example preprocessor cannot dirty the submodule checkout.
-      - name: Cycle closed Fig v1/v2 integration and output parity
+      - name: Cycle closed Fig v2 integration and verified output
         working-directory: vendor/cycle
         env:
           FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
@@ -202,22 +196,18 @@ jobs:
           EXAMPLE_OUT="$WORK/ig/input/resources/Bundle-period-tracking-longitudinal-example.json" \
             bun "$WORK/ig/scripts/gen-example.ts"
           SOURCE_DATE_EPOCH=1783555200 "$FIG_BIN" prepare "$WORK/ig" \
-            --target cycle-site/v1 \
-            --sushi-out "$WORK/fig-sushi-v1" \
-            --cache "$FHIR_CACHE" \
-            --out "$WORK/closed-v1"
-          SOURCE_DATE_EPOCH=1783555200 "$FIG_BIN" prepare "$WORK/ig" \
             --target cycle-site/v2 \
             --sushi-out "$WORK/fig-sushi-v2" \
             --cache "$FHIR_CACHE" \
             --out "$WORK/closed-v2"
-          OUT_DIR="$WORK/out-v1" SITE_BUILD_DIR="$WORK/closed-v1" bun site-gen/build.tsx
           OUT_DIR="$WORK/out-v2" SITE_BUILD_DIR="$WORK/closed-v2" bun site-gen/build.tsx
-          V1_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputId)' "$WORK/out-v1/site-output.json")"
-          V2_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputId)' "$WORK/out-v2/site-output.json")"
-          test "$V1_RECEIPT" != "$V2_RECEIPT"
-          rm "$WORK/out-v1/site-output.json" "$WORK/out-v2/site-output.json"
-          diff -ru "$WORK/out-v1" "$WORK/out-v2"
+          bun -e '
+            const receipt = JSON.parse(await Bun.file(process.argv[1]).text());
+            if (receipt.schemaVersion !== "site-output/v1") throw new Error("unexpected SiteOutput schema");
+            if (!String(receipt.inputBuildId).startsWith("sb1-sha256:")) throw new Error("SiteOutput is not bound to a SiteBuild");
+            if (!String(receipt.outputId).startsWith("so1-sha256:")) throw new Error("invalid SiteOutput id");
+            if (!Array.isArray(receipt.files) || receipt.files.length < 2) throw new Error("SiteOutput inventory is incomplete");
+          ' "$WORK/out-v2/site-output.json"
 
       - name: App data-contract tests
         working-directory: app

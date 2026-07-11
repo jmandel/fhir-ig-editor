@@ -14,7 +14,7 @@ export class MountedLabels {
     for (const bundle of bundles) {
       if (this.labels.has(bundle.label)) continue;
       if (transaction.has(bundle.label)) {
-        throw new Error(`mountBundles: duplicate new package label in one transaction: ${bundle.label}`);
+        throw new Error(`mountPackages: duplicate new package label in one transaction: ${bundle.label}`);
       }
       transaction.add(bundle.label);
       fresh.push(bundle);

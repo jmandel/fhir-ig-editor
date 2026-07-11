@@ -22,27 +22,41 @@ import type {
   Op,
   PackageMountInput,
   ProgressEvent,
-  RenderPageResult,
   ResolutionStep,
-  SitePreviewResult,
-  SiteTreeFile,
   SnapshotResult,
-  StockBuildOpenResult,
-  StockPageRenderResult,
-  StockSiteOptions,
+  TemplateResolution,
   VersionIndex,
   WorkerReply,
 } from './protocol';
-import { deleteCachedBundle, readCachedBundleMeasured } from './bundleCache';
+import type {
+  BuildHandle,
+  GeneratorSpec,
+  OutputCatalog,
+  PrepareResult,
+  ProjectInput,
+  RenderedOutput,
+  SiteOutput,
+} from '../site/contract';
 import type { ResolveOutcome } from './packageResolver';
-import { projectCompileRevision } from '../build/projectRevision';
 import { assertCompatibleEngineCommit } from './engineVersion';
 import { parseBakedBundleManifest, readVerifiedBundleBytes } from './bundleIntegrity';
 import type { BakedBundleEntry, BakedBundleManifest } from './bundleIntegrity';
 import { ResolutionCache } from './resolutionCache';
 import { getPackageProxy, getRegistries } from '../vfs/packageSettings';
-import { exactPackageClosureIdentity } from './packageClosureIdentity';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
+
+/** A failed atomic prepare. A successful compile is retained as presentation
+ * metadata when only the selected site generator failed afterward. */
+export class PrepareError extends Error {
+  constructor(
+    message: string,
+    readonly stage: 'compile' | 'site',
+    readonly compiled?: CompileResult,
+  ) {
+    super(message);
+    this.name = 'PrepareError';
+  }
+}
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -53,11 +67,6 @@ export class EngineClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private snapshotCache = new Map<string, SnapshotResult>();
-  /** Exact compileProject input currently installed in the mutable wasm
-   * session, plus its result. This makes repeated renderer/template selection a
-   * projection of the same compile rather than a second semantic compile. */
-  private compiledProjectRevision: string | null = null;
-  private compiledProjectResult: CompileResult | null = null;
   /** One resolver-loop outcome bound to exact config bytes and the current
    * package-mount generation. Rust invalidates its fixpoint on a fresh mount;
    * the host mirrors that law here. */
@@ -65,7 +74,6 @@ export class EngineClient {
   private inited = false;
   /** Snapshot-engine specials, separate from resolver-selected compile packages. */
   private snapshotBundles: BakedBundleEntry[] = [];
-  private snapshotSourcesIdentity = '[]';
   /** The baked manifest's `label -> entry` map, kept so the runtime resolver can
    *  source a missing package from a same-origin prebuilt bundle (task #32). */
   private bakedByLabel = new Map<string, BakedBundleEntry>();
@@ -75,24 +83,15 @@ export class EngineClient {
   /** Host mirror used to avoid even reading a package cache entry that the
    * current Worker session has already mounted. */
   private mountedLabels = new Set<string>();
-  /** Exact prepared artifact installed for every mounted label. Labels alone
-   * are not persistent identities because registries may republish a version. */
-  private mountedPackageIdentities = new Map<string, string>();
   private preparedFallbacks = new Map<string, () => Promise<PackageMountInput>>();
   private progressCb: ProgressCb | null = null;
-  /** The mounted engine's commit — the invalidation key for the OPFS materialized-
-   *  template cache (#40 scope 4): a wasm bump changes this, so stale trees are
-   *  never served. Captured on init. */
+  /** The mounted engine's commit, checked against the app's expected commit so
+   * stale app/engine mixes fail clearly. Captured on init. */
   private engineCommit = 'unknown';
   /** Exact emitted JS+WASM bytes used for semantic cache authority. */
   private readonly engineRecipe = typeof __ENGINE_RECIPE__ === 'undefined'
     ? `unavailable-${performance.timeOrigin}`
     : __ENGINE_RECIPE__;
-  /** Verification hook (#40 E2E): force the LIVE template path (resolve→fetch→
-   *  mount→mountTemplate) by suppressing the warm-start artifact + cache, so the
-   *  live materialization can be gated even for a coord that HAS a committed
-   *  artifact. Set via `__igDebug.engine.forceLiveTemplate = true`. */
-  forceLiveTemplate = false;
 
   constructor() {
     this.worker = new EngineWorker();
@@ -102,7 +101,15 @@ export class EngineClient {
       if (!p) return;
       this.pending.delete(id);
       if (e.data.ok) p.resolve(e.data.result);
-      else p.reject(new Error(e.data.error));
+      else if (e.data.detail?.operation === 'prepare') {
+        p.reject(new PrepareError(
+          e.data.error,
+          e.data.detail.stage,
+          e.data.detail.stage === 'site' ? e.data.detail.compiled : undefined,
+        ));
+      } else {
+        p.reject(new Error(e.data.error));
+      }
     };
   }
 
@@ -116,8 +123,8 @@ export class EngineClient {
     });
   }
 
-  /** Fetch/inflate (or read from OPFS) one bundle into a mountable BundleSpec.
-   *  Emits progress and back-fills the OPFS cache on a cold fetch. */
+  /** Select a complete PreparedPackage or fetch/authenticate/inflate its exact
+   * baked transport into a mountable BundleSpec. */
   private async loadBundle(
     entry: BakedBundleEntry,
     stageLabel: string,
@@ -125,10 +132,10 @@ export class EngineClient {
   ): Promise<PackageMountInput> {
     const started = performance.now();
     const transportIdentity = `tgz-${entry.sha256}`;
-    // Template-chain walking currently reads package.json on the host. Keep that
-    // deliberately on the raw path until template metadata joins the catalog.
-    const preparedEligible = !entry.label.includes('.template#');
-    if (!forceRaw && preparedEligible) {
+    // PreparedPackage v2 represents the complete package, including template
+    // metadata. Templates therefore use the same authenticated warm path and
+    // raw cold fallback as every other package.
+    if (!forceRaw) {
       const { findPreparedPackage } = await import('./preparedPackageCache');
       const pointer = await findPreparedPackage(entry.label, transportIdentity);
       if (pointer) {
@@ -143,24 +150,6 @@ export class EngineClient {
         });
         return { kind: 'prepared', pointer };
       }
-    }
-    const cached = await readCachedBundleMeasured(entry.label, entry.sha256);
-    if (cached) {
-      this.progressCb?.({
-        stage: 'bundle-cache-hit',
-        label: entry.label,
-        bytes: entry.bytes,
-        message: `${stageLabel} ${entry.label} (cached)`,
-        fromCache: true,
-        durationMs: cached.metrics.totalMs,
-        inputBytes: cached.metrics.storedBytes,
-        metrics: {
-          opfsReadMs: cached.metrics.opfsReadMs,
-          jsonParseMs: cached.metrics.jsonParseMs,
-          validationMs: cached.metrics.validationMs,
-        },
-      });
-      return { kind: 'raw', spec: cached.spec, transportIdentity };
     }
     this.progressCb?.({
       stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
@@ -189,7 +178,7 @@ export class EngineClient {
       fileCount: Object.keys(files).length,
     });
     // The Worker prepares and persists the binary execution artifact while
-    // mounting. Do not create another inflated/base64 cache copy here.
+    // mounting. There is no inflated/base64 persistence layer.
     return { kind: 'raw', spec, transportIdentity };
   }
 
@@ -226,18 +215,7 @@ export class EngineClient {
       result = await this.call('mountPackages', fallbacks);
     }
     const rpcMs = performance.now() - started;
-    for (const { label, cacheKey } of result.packageIdentities ?? []) {
-      this.mountedPackageIdentities.set(label, cacheKey);
-    }
     for (const label of result.newlyMounted) this.mountedLabels.add(label);
-    for (const label of result.preparedStored ?? []) {
-      const raw = transaction.find((item) => item.kind === 'raw' && item.spec.label === label);
-      if (!raw || raw.kind !== 'raw') continue;
-      const compressedSha256 = raw.transportIdentity.startsWith('tgz-')
-        ? raw.transportIdentity.slice(4)
-        : undefined;
-      void deleteCachedBundle(label, compressedSha256);
-    }
     // A mount invalidates resolution of the *next* compile, but it does not
     // mutate the exact package allow-list retained by Rust's previous compiled
     // revision. Keep that immutable result until re-resolution proves its
@@ -348,12 +326,8 @@ export class EngineClient {
 
     for (const b of manifest.bundles) this.bakedByLabel.set(b.label, b);
     this.snapshotBundles = manifest.bundles.filter((bundle) => bundle.loadPhase === 'snapshot');
-    this.snapshotSourcesIdentity = JSON.stringify(this.snapshotBundles
-      .map(({ label, sha256 }) => ({ label, sha256 }))
-      .sort((left, right) => left.label.localeCompare(right.label)));
-
     this.progressCb?.({ stage: 'wasm', message: 'Starting compiler engine…' });
-    const res: InitResult = await this.call('init', []);
+    const res: InitResult = await this.call('init');
     this.engineCommit = res.version?.commit || 'unknown';
     // Stale-mix guard: the app bundle was built against a specific engine
     // commit; if the served (HTTP-cached) wasm reports a different one, the
@@ -586,69 +560,6 @@ export class EngineClient {
     return outcome;
   }
 
-  async compile(
-    config: string,
-    files: Record<string, string>,
-    predefined: Record<string, unknown>,
-    siteFiles: Record<string, string>,
-  ): Promise<CompileResult> {
-    // Correctness is bound to both authored bytes and the package generation.
-    // UI-level config memoization may suppress progress chrome, but it may not
-    // bypass re-resolution after a deferred/template/dependency mount.
-    const resolution = await this.acquireForProject(config);
-    const started = performance.now();
-    const packageClosure = exactPackageClosureIdentity(
-      resolution.step,
-      this.mountedPackageIdentities,
-    );
-    const revision = await projectCompileRevision({ config, files, predefined, siteFiles, packageClosure });
-    if (revision === this.compiledProjectRevision && this.compiledProjectResult) {
-      this.progressCb?.({
-        stage: 'compile',
-        message: 'Reusing unchanged compiled project.',
-        fromCache: true,
-        durationMs: performance.now() - started,
-        fileCount: Object.keys(files).length + Object.keys(predefined).length,
-      });
-      return this.compiledProjectResult;
-    }
-    // Every compile invalidates memoized snapshots (resources may have changed).
-    this.snapshotCache.clear();
-    const result = await this.call('compile', config, files, predefined, siteFiles);
-    this.compiledProjectRevision = revision;
-    this.compiledProjectResult = result;
-    this.progressCb?.({
-      stage: 'compile',
-      message: `Compiled ${result.fileCount} FSH files and ${Object.keys(predefined).length} predefined resources.`,
-      durationMs: performance.now() - started,
-      fileCount: result.fileCount + Object.keys(predefined).length,
-      metrics: {
-        wasmBuildMs: result.buildMs,
-        ...(result.packageStorage ? {
-          packageCompressedRetainedBytes: result.packageStorage.compressedRetainedBytes,
-          packageDeclaredRawBytes: result.packageStorage.declaredRawBytes,
-          packageChunksInflated: result.packageStorage.chunksInflated,
-          packageRawInflatedBytes: result.packageStorage.rawInflatedBytes,
-          packageChunkCacheHits: result.packageStorage.cacheHits,
-          packageCachedRawBytes: result.packageStorage.cachedRawBytes,
-        } : {}),
-      },
-    });
-    return result;
-  }
-
-  /** Ensure the mutable engine session contains exactly these authored inputs.
-   * Same-revision calls are free; a site-only request for newer inputs performs
-   * the missing compile before any adapter can observe session state. */
-  async ensureCompiledProject(
-    config: string,
-    files: Record<string, string>,
-    predefined: Record<string, unknown>,
-    siteFiles: Record<string, string>,
-  ): Promise<CompileResult> {
-    return this.compile(config, files, predefined, siteFiles);
-  }
-
   async snapshot(url: string): Promise<SnapshotResult> {
     const cached = this.snapshotCache.get(url);
     if (cached) {
@@ -677,213 +588,65 @@ export class EngineClient {
     return this.call('expandValueSet', valueSetJson, resourcesJson);
   }
 
-  // ---- site-build projections and preview ----
+  // ---- the complete public site-generation API ---------------------------
 
-  /** Close the typed Cycle SiteBuild + enumerate renderable pages. */
-  async buildSite(
-    config: string,
-    files: Record<string, string>,
-    predefined: Record<string, unknown>,
-    siteFiles: Record<string, string>,
-    buildEpochSecs: number,
-  ): Promise<SitePreviewResult> {
+  async prepare(project: ProjectInput, spec: GeneratorSpec): Promise<PrepareResult> {
     const started = performance.now();
-    // Establish the exact ProjectRevision + PackageLock digest without mounting
-    // snapshot-only material. A persistent closed-build hit can then skip both
-    // snapshot package work and Rust site production.
-    await this.ensureCompiledProject(config, files, predefined, siteFiles);
-    let projectRevision = this.compiledProjectRevision;
-    if (!projectRevision) throw new Error('compiled project has no exact revision identity');
-    const restored = await this.call(
-      'restoreCycleSite',
-      projectRevision,
-      buildEpochSecs,
-      this.snapshotSourcesIdentity,
-    );
-    if (restored) {
+    try {
+      await this.ensureSnapshotBundles();
+      await this.acquireForProject(project.config);
+      if (spec.generator === 'publisher') {
+        await this.ensureTemplatePackages(spec.templateCoordinate);
+        await this.acquireForProject(project.config);
+      }
+      this.snapshotCache.clear();
+      const result = await this.call('prepare', project, spec);
       this.progressCb?.({
         stage: 'site-build',
-        message: `Restored closed Cycle SiteBuild ${restored.buildId}.`,
-        fromCache: true,
+        message: `Prepared ${result.generator} SiteBuild ${result.buildId}.`,
         durationMs: performance.now() - started,
-        fileCount: restored.pages.length + restored.assets.length,
-        metrics: { workerBuildMs: restored.buildMs, persistentClosedBuildHit: 1 },
+        fileCount: result.compiled.fileCount,
+        metrics: { wasmBuildMs: result.compiled.buildMs },
       });
-      return restored;
+      return result;
+    } catch (error) {
+      if (error instanceof PrepareError) throw error;
+      throw new PrepareError(String(error), 'site');
     }
-    // A cache miss needs the snapshot-role package. Its mount invalidates the
-    // resolver fixpoint; re-establish the exact compile closure afterward.
-    await this.ensureSnapshotBundles();
-    await this.ensureCompiledProject(config, files, predefined, siteFiles);
-    projectRevision = this.compiledProjectRevision;
-    if (!projectRevision) throw new Error('compiled project lost its exact revision identity');
-    const result = await this.call(
-      'buildSite',
-      config,
-      files,
-      predefined,
-      siteFiles,
-      buildEpochSecs,
-      projectRevision,
-      this.snapshotSourcesIdentity,
-    );
-    this.progressCb?.({
-      stage: 'site-build',
-      message: `Closed Cycle SiteBuild ${result.buildId}.`,
-      durationMs: performance.now() - started,
-      fileCount: result.pages.length + result.assets.length,
-      metrics: { workerBuildMs: result.buildMs, persistentClosedBuildHit: 0 },
-    });
-    return result;
   }
 
-  /** Render one page to HTML (render-on-demand per visible page). */
-  async renderPage(file: string): Promise<RenderPageResult> {
-    return this.call('renderPage', file);
+  async outputs(handle: BuildHandle): Promise<OutputCatalog> {
+    return this.call('outputs', handle);
   }
 
-  /** Fetch an asset's bytes (base64) for serving into the preview iframe. */
-  async assetBytes(name: string): Promise<{ name: string; mime: string; base64: string; fromCache?: boolean } | null> {
-    return this.call('assetBytes', name);
+  async render(handle: BuildHandle, path: string): Promise<RenderedOutput> {
+    return this.call('render', handle, path);
   }
 
-  // ---- F6 stock-template render surface (engine-side pages/fragments) ----
-
-  /** Mount (REPLACE) the engine's site tree for the stock-template renderer. */
-  async mountSite(files: Record<string, SiteTreeFile>, options?: StockSiteOptions): Promise<{ mounted: number }> {
-    return this.call('mountSite', files, options);
+  async finalize(handle: BuildHandle): Promise<SiteOutput> {
+    return this.call('finalize', handle);
   }
 
-  /** Live template loader (#40): materialize a template `id#ver` chain (already
-   *  mounted as bundle packages) into the engine site tree. Throws if the chain
-   *  is incomplete or the template needs server-side rendering (custom ant). */
-  async mountTemplate(coord: string): Promise<{ files: number }> {
-    return this.call('mountTemplate', coord);
-  }
-
-  /** Source-driven stock site (task #45): synthesize the artifact page shells +
-   *  the `_data` model from the CURRENT compile + the mounted template, merging
-   *  both into the engine site tree. Call AFTER compile + mountTemplate. Replaces
-   *  the pre-baked `{id}-stock.json` warm-start bundle. */
-  async produceStockSite(): Promise<{ pages: number; data: number }> {
-    return this.call('produceStockSite');
-  }
-
-  /** Freeze the current compiled/template/authored stock generation behind a
-   * content-derived predecessor handle. All page rendering must use this handle
-   * (or one of its returned successors), never the ambient Session site tree. */
-  async openStockBuild(templateCoord: string): Promise<StockBuildOpenResult> {
-    return this.call('openStockBuild', templateCoord);
-  }
-
-  /** Render from an explicit frozen stock build and return the immutable
-   * successor plus its typed Need<ArtifactKey> resolution batch. */
-  async renderStockPage(handle: string, name: string): Promise<StockPageRenderResult> {
-    return this.call('renderStockPage', handle, name);
-  }
-
-  /** LIVE template load (#40): the full resolve→fetch→mount→materialize path.
-   *  Walks the template's `base` chain (Rust's rule, mirrored in JS because
-   *  `mountTemplate` consumes an already-mounted chain), fetching + mounting each
-   *  chain package via the SAME transport regular packages use, then calls
-   *  `Session.mountTemplate` to materialize the tree into the engine site tree.
-   *  Any AntHookError (custom-ant template) propagates as an Error whose message
-   *  contains "never execute ant" — the adapter maps that to a friendly refusal. */
-  async mountTemplateChain(coord: string): Promise<{
-    chain: string[];
-    files: number;
-    assets: Record<string, SiteTreeFile>;
-  }> {
-    const { mountTemplateChain } = await import('./templateChain');
+  /** Acquire exactly the template coordinates requested by Rust's private
+   * resolution handshake. No host-side template tree or chain is retained. */
+  private async ensureTemplatePackages(coordinate: string): Promise<void> {
+    const { obtainAndMountPackage } = await import('./packageResolver');
     const host = {
-      // Template chain packages are not sushi-config deps, so resolveStep/bakedBundle
-      // are reused only for their transport (baked bundle lookup + registry fetch);
-      // the CHAIN decision lives in the walk, not in resolveStep.
-      resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
-      mount: async (packages: PackageMountInput[]) => {
-        await this.mountPackages(packages);
-      },
+      resolveStep: (config: string, index?: VersionIndex) => this.resolveStep(config, index),
+      mount: async (packages: PackageMountInput[]) => { await this.mountPackages(packages); },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
       fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (template)'),
     };
-    const { chain, assets } = await mountTemplateChain(host, coord, (ev) =>
-      this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
-    );
-    this.progressCb?.({ stage: 'bundle-mount', label: coord, message: `Materializing template ${coord}…` });
-    const { files } = await this.mountTemplate(coord);
-    this.progressCb?.({ stage: 'ready', message: `Template ${coord} materialized — ${files} files.` });
-    return { chain, files, assets };
-  }
-
-  /** WARM-START template layer (#40): fetch the committed `fig packages bundle
-   *  --template` artifact and map it to the engine site tree EXACTLY as the engine
-   *  `mount_template` does (`includes/*`→`_includes/*`, everything else →
-   *  `template/*`), so the warm and live paths mount byte-identical trees (the
-   *  byte gate). Returns the mapped `mountSite` files, or null on 404 (no committed
-   *  artifact for this coord → the caller falls back to the live path). */
-  async fetchTemplateArtifact(coord: string): Promise<Record<string, SiteTreeFile> | null> {
-    // Verification hook: force the LIVE path (return null → adapter falls through
-    // to mountTemplateChain). Used by the E2E live-template gate.
-    if (this.forceLiveTemplate) return null;
-    // OPFS materialized-tree cache first (#40 scope 4): a mapped tree we already
-    // materialized under THIS engine commit — a pure read, no network/re-map.
-    const { readCachedTemplateTree, writeCachedTemplateTree } = await import('./templateTreeCache');
-    const cached = await readCachedTemplateTree(coord, this.engineRecipe);
-    if (cached) {
-      this.progressCb?.({ stage: 'bundle-cache-hit', label: coord, message: `Template ${coord} (materialized cache)`, fromCache: true });
-      return cached;
+    for (let round = 0; round < 24; round += 1) {
+      const step: TemplateResolution = await this.call('resolveTemplate', coordinate);
+      if (step.satisfied) return;
+      if (!step.missing) throw new Error(`Template ${coordinate} is unresolved without a missing coordinate`);
+      const mounted = await obtainAndMountPackage(host, step.missing, (event) => {
+        this.progressCb?.({ stage: event.stage, label: event.label, message: event.message });
+      });
+      if (!mounted) throw new Error(`Template ${coordinate} requires unavailable ${step.missing}`);
     }
-    // Nested path `data/templates/<id>/<version>.json` — NOT `<id>%23<version>`.
-    // A `%23` in the filename 404s on any server that decodes it back to `#`
-    // (GitHub Pages does), which silently dropped the whole template (CSS/JS/images
-    // → unstyled preview). Splitting id#version into path segments is decode-safe.
-    const [tplId, tplVer] = coord.split('#');
-    const url = `${BASE}data/templates/${tplId}/${tplVer ?? '1.0.0'}.json`;
-    let resp: Response;
-    try {
-      resp = await fetch(url);
-    } catch (e) {
-      // Network-level failure (offline, CORS, stale app shell mid-deploy) must
-      // NOT abort the ladder — fall through to the live chain-mount path.
-      console.warn(`template warm artifact fetch failed (${url}): ${e}`);
-      return null;
-    }
-    if (!resp.ok) return null;
-    const doc = (await resp.json()) as { files: Record<string, SiteTreeFile> };
-    const mapped: Record<string, SiteTreeFile> = {};
-    for (const [rel, val] of Object.entries(doc.files)) {
-      const inc = rel.startsWith('includes/') ? `_includes/${rel.slice('includes/'.length)}` : `template/${rel}`;
-      mapped[inc] = val;
-    }
-    // Write-through so the next load (any session) skips the fetch + re-map.
-    void writeCachedTemplateTree(coord, this.engineRecipe, mapped);
-    return mapped;
-  }
-
-  /** Renderable page rel paths from the engine's mounted site tree. */
-  async listSitePages(): Promise<{ pages: string[] }> {
-    return this.call('listSitePages');
-  }
-
-  /** Render one page through the engine's stock-template surface. */
-  async renderSitePage(name: string): Promise<{ html: string; renderMs: number }> {
-    return this.call('renderSitePage', name);
-  }
-
-  /** Render one Publisher fragment (`{Type}-{id}`, kind) through the native
-   * typed artifact cache. Used by the stock-template warm-up path. */
-  async renderFragment(ref: string, kind: string): Promise<{ html: string }> {
-    return this.call('renderFragment', ref, kind);
-  }
-
-  /** Generic native Rust Liquid operation over the mounted session provider. */
-  async renderLiquid(source: string, data?: Record<string, unknown>): Promise<{ html: string }> {
-    return this.call('renderLiquid', source, data);
-  }
-
-  /** Generic native Markdown operation with Jekyll markdownify semantics. */
-  async renderMarkdown(md: string, opts?: { rougeWrappers?: boolean }): Promise<{ html: string }> {
-    return this.call('renderMarkdown', md, opts);
+    throw new Error(`Template ${coordinate} dependency chain exceeded 24 packages`);
   }
 
   get initialized() {

@@ -1,412 +1,385 @@
-/* FHIR IG Editor — preview Service Worker (task #37).
- *
- * Serves the rendered IG site as a REAL site under `<base>preview/<generator>/...`
- * so the browser's URL bar, links, back/forward, and F5 behave like a real site —
- * because to the browser it IS one. This file is plain JS (no bundler): Vite copies
- * public/ verbatim, so it ships at `<base>preview-sw.js`.
- *
- * SCOPE DISCIPLINE (foolproofing): this SW registers with scope `<base>preview/`
- * and its fetch handler answers ONLY requests whose pathname is under that prefix.
- * Every other request (the editor app shell, /pkg/ wasm, /data/ bundles incl. the
- * %23-encoded .tgz URLs, /src) falls straight through to the network — the SW must
- * NEVER intercept the editor's own traffic. The scope guard is asserted below.
- *
- * ANSWER LADDER (foolproof, three tiers) for a /preview/ request:
- *   (a) Cache API hit  -> return cached response (survives editor-tab close + SW restart).
- *   (b) Live render    -> ask an open editor tab (postMessage over a MessageChannel)
- *                         to render the page / produce the asset; cache write-through; return.
- *   (c) Neither        -> a friendly, self-contained fallback page (never a browser error).
- *
- * LIFECYCLE: skipWaiting() + clients.claim() so the newest SW controls /preview/
- * immediately. Safe because the SW governs ONLY /preview/.
- */
+import { preparePreviewHtml } from './preview-controls.js';
 
-// The registration scope path (e.g. "/fhir-ig-editor/preview/"). Derived from this
-// script's own URL: the SW script sits at "<base>preview-sw.js", so its directory IS
-// the app base, and the preview root is "<base>preview/".
-const BASE = new URL('./', self.location).pathname; // e.g. /fhir-ig-editor/
-const PREVIEW_ROOT = BASE + 'preview/'; // e.g. /fhir-ig-editor/preview/
-// Must match PREVIEW_SW_PROTOCOL in previewWindow.ts. The editor registers this
-// script with `?protocol=3` and refuses an older active worker before publishing.
-const PREVIEW_SW_PROTOCOL = 3;
+/* Immutable FHIR IG preview host. The worker persists only an authenticated
+ * build/catalog pointer. Canonical output bytes live in the shared ContentStore;
+ * HTML controls are added to the response and never alter renderer identity. */
 
-// Cache naming: one cache per compile generation. Keep the last two generations so a
-// just-bumped generation (still lazily refilling) can fall back to the previous
-// complete one for a page it has not re-rendered yet.
-const CACHE_PREFIX = `igpreview:v${PREVIEW_SW_PROTOCOL}::`;
-const LEGACY_CACHE_PREFIXES = ['igpreview::', 'igpreview:v2::'];
-const KEEP_GENERATIONS = 2;
+const BASE = new URL('./', self.location).pathname;
+const PREVIEW_ROOT = BASE + 'preview/';
+const PREVIEW_SW_PROTOCOL = 4;
+const STATE_CACHE = `igpreview-state:v${PREVIEW_SW_PROTOCOL}`;
+const OUTPUT_CACHE_PREFIX = `igpreview-output:v${PREVIEW_SW_PROTOCOL}:`;
+const LEGACY_CACHE_PREFIXES = ['igpreview::', 'igpreview:v2::', 'igpreview:v3::'];
+const OPFS_DIR = 'fhir-ig-editor-content-v1';
+const SHA256 = /^[0-9a-f]{64}$/;
+const MAX_OUTPUTS = 20_000;
+const MAX_CATALOG_CHARS = 8 * 1024 * 1024;
 
-// The editor tells us the current compile generation via a control message; new
-// fetches cache under it. Starts at 0 (unknown) — any editor announcement wins.
-let currentGeneration = 0;
+const publications = new Map();
+let commitTail = Promise.resolve();
 
-// The COMPLETE static asset set for the current generation, pushed by the editor in
-// one message (igpreview:provisionAssets). Serving assets from here means ZERO
-// per-asset round-trips to the editor's (contended) main thread — the fix for slow
-// navigation. Shape: { generation, igId, pagePrefix, assets: Map<key, {mime, bytes}> }.
-// Held in memory: if the SW is idle-killed this resets to null and the first asset
-// request self-heals by asking the editor to re-provision (see requestReprovision).
-let provisioned = null;
-let lastReprovisionAsk = 0;
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
-self.addEventListener('install', () => {
-  // Take over as the active SW without waiting for old clients to close.
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', (event) => {
-  // Activation gates the editor's protocol handshake, so keep it independent
-  // of potentially slow Cache Storage enumeration on returning mobile devices.
-  // The first generation commit performs the same best-effort pruning.
-  event.waitUntil(self.clients.claim());
-});
-
-// Control channel from the editor tab: generation bumps + cache pruning.
 self.addEventListener('message', (event) => {
-  const msg = event.data;
-  if (!msg || typeof msg !== 'object') return;
-  if (msg.type === 'igpreview:commitGeneration' && Array.isArray(msg.assets)) {
-    // Atomically install the generation pointer and the asset manifest, then ACK
-    // the editor. Until this task completes fetches continue to see the previous
-    // pair; they can never observe a new generation with old assets.
-    try {
-      const assets = new Map();
-      for (const asset of msg.assets) {
-        assets.set(asset.key, { mime: asset.mime, bytes: asset.bytes });
-      }
-      provisioned = msg.hasAssetManifest
-        ? {
-            generation: msg.generation,
-            igId: msg.igId,
-            pagePrefix: msg.pagePrefix || '',
-            assets,
-          }
-        : null;
-      // A browser reload can restart the app's UI counter below a generation
-      // retained by the SW, so an acknowledged commit REPLACES rather than only
-      // monotonically increases this pointer.
-      currentGeneration = msg.generation;
-      // The generation/asset pair is installed synchronously. ACK it before
-      // Cache Storage pruning: mobile browsers can take seconds to enumerate or
-      // delete old caches, but that maintenance is not part of commit atomicity.
-      event.ports[0]?.postMessage({
-        ok: true,
-        generation: currentGeneration,
-        protocol: PREVIEW_SW_PROTOCOL,
-      });
-      event.waitUntil(pruneCaches().catch(() => undefined));
-    } catch (error) {
-      event.ports[0]?.postMessage({ ok: false, error: String(error), protocol: PREVIEW_SW_PROTOCOL });
-    }
+  const message = event.data;
+  if (!message || typeof message !== 'object') return;
+  if (message.type === 'igpreview:ping') {
+    event.ports[0]?.postMessage({ type: 'igpreview:pong', protocol: PREVIEW_SW_PROTOCOL });
     return;
   }
-  if (msg.type === 'igpreview:setGeneration' && typeof msg.generation === 'number') {
-    if (msg.generation > currentGeneration) currentGeneration = msg.generation;
-    event.waitUntil(pruneCaches());
-  }
-  if (msg.type === 'igpreview:ping') {
-    // Reply so the editor can confirm the SW is active + which generation it holds.
-    event.ports[0]?.postMessage({
-      type: 'igpreview:pong',
-      protocol: PREVIEW_SW_PROTOCOL,
-      generation: currentGeneration,
-    });
-  }
-  if (msg.type === 'igpreview:provisionAssets' && Array.isArray(msg.assets)) {
-    // A re-provision is fire-and-forget. Do not let an older request that was
-    // delayed in the client overwrite the manifest installed by a newer atomic
-    // generation commit. Zero means this worker was restarted and lost its
-    // in-memory generation pointer, in which case the current editor restores it.
-    if (typeof msg.generation !== 'number') return;
-    if (currentGeneration !== 0 && msg.generation !== currentGeneration) return;
-    if (currentGeneration === 0) currentGeneration = msg.generation;
-    // Wholesale-replace the asset set for this generation (deterministic, not lazy).
-    const assets = new Map();
-    for (const a of msg.assets) assets.set(a.key, { mime: a.mime, bytes: a.bytes });
-    provisioned = {
-      generation: msg.generation,
-      igId: msg.igId,
-      pagePrefix: msg.pagePrefix || '',
-      assets,
-    };
-  }
-});
-
-// ---- provisioned asset serving (no editor round-trip) --------------------------
-
-/** Resolve a request path (the part after `preview/<igId>/`) to a provisioned asset,
- *  mirroring stockAdapter.assetBytes' key normalization EXACTLY so the two agree:
- *  strip leading `../`, strip the page-dir prefix (e.g. `en/`), then try the name,
- *  the `assets/`-stripped name, the `assets/`-prefixed name, and the basename. */
-function provisionedAsset(igId, pathAfterIg) {
-  const p = provisioned;
-  if (!p || p.igId !== igId) return null;
-  let n = pathAfterIg.replace(/^(?:\.\.\/)+/, '');
-  if (p.pagePrefix && n.startsWith(p.pagePrefix)) n = n.slice(p.pagePrefix.length);
-  const key = n.replace(/^assets\//, '');
-  const base = key.slice(key.lastIndexOf('/') + 1);
-  return (
-    p.assets.get(n) || p.assets.get(key) || p.assets.get('assets/' + key) || p.assets.get(base) || null
-  );
-}
-
-function assetResponse(asset) {
-  return new Response(asset.bytes, {
-    status: 200,
-    headers: { 'Content-Type': asset.mime, 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'provisioned' },
+  if (message.type !== 'igpreview:commit') return;
+  const port = event.ports[0];
+  const commit = commitTail.then(async () => {
+    try {
+      const publication = validatePublication(message.source, message.generation);
+      const existing = publications.get(publication.source.igId)
+        || await readPublication(publication.source.igId);
+      if (existing && publication.generation <= existing.generation) {
+        port?.postMessage({
+          ok: false,
+          protocol: PREVIEW_SW_PROTOCOL,
+          errorCode: 'stale-generation',
+          error: `stale preview generation ${publication.generation}`,
+          generation: existing.generation,
+        });
+        return;
+      }
+      await writePublication(publication);
+      publications.set(publication.source.igId, publication);
+      port?.postMessage({ ok: true, protocol: PREVIEW_SW_PROTOCOL, generation: publication.generation });
+    } catch (error) {
+      port?.postMessage({ ok: false, protocol: PREVIEW_SW_PROTOCOL, error: String(error) });
+    }
   });
-}
-
-/** The SW lost its in-memory asset set (idle-killed) — ask any editor tab to re-push
- *  it. Debounced so a burst of asset misses triggers just one re-provision. */
-async function requestReprovision() {
-  const now = Date.now();
-  if (now - lastReprovisionAsk < 1000) return;
-  lastReprovisionAsk = now;
-  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  for (const c of clients) {
-    if (!new URL(c.url).pathname.startsWith(PREVIEW_ROOT)) c.postMessage({ type: 'igpreview:needAssets' });
-  }
-}
+  commitTail = commit.catch(() => undefined);
+  // The acknowledgement above is independent of potentially slow cache
+  // enumeration; lifetime extension still makes old generation caches go away.
+  event.waitUntil(commit.then(() => pruneLegacyCaches()).catch(() => undefined));
+});
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // SCOPE GUARD (assert): only same-origin requests under the preview root are ours.
-  // Anything else is the editor app's own traffic — do NOT intercept.
-  if (url.origin !== self.location.origin) return;
-  if (!url.pathname.startsWith(PREVIEW_ROOT)) return;
-  // Only GET is meaningful for a static-site view.
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(PREVIEW_ROOT)) return;
   if (event.request.method !== 'GET') return;
-  event.respondWith(handlePreview(event.request, url));
+  event.respondWith(handlePreview(url));
 });
 
-async function handlePreview(request, url) {
-  const parsed = parsePreviewPath(url.pathname);
+function safePath(path) {
+  if (typeof path !== 'string' || !path || path.length > 2048) return false;
+  if (path.startsWith('/') || path.includes('\\') || /[?#\0]/.test(path)) return false;
+  return path.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
+}
 
-  // (0) Assets: serve from the generation's provisioned set — no editor round-trip,
-  // no main-thread contention. This is the fast path for the ~80 static icons/css/js
-  // a page pulls, and the whole point of the provisioning design.
-  if (parsed && !parsed.isPage) {
-    const asset = provisionedAsset(parsed.generator, parsed.path);
-    if (asset) return assetResponse(asset);
-    // The provisioned set is the COMPLETE asset inventory for this IG's generation.
-    // So if it's present for this IG, a miss means the asset genuinely doesn't exist
-    // (e.g. tree icons/backgrounds the template package doesn't ship) — answer 404
-    // IMMEDIATELY, with NO editor round-trip. Round-tripping ~68 absent images per
-    // page (each to the contended main thread) was the whole cause of slow nav.
-    if (provisioned && provisioned.igId === parsed.generator) {
-      return new Response('', {
-        status: 404,
-        headers: { 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'absent' },
-      });
+function safeRef(value) {
+  return !!value
+    && typeof value === 'object'
+    && typeof value.sha256 === 'string'
+    && SHA256.test(value.sha256)
+    && Number.isSafeInteger(value.byteLength)
+    && value.byteLength >= 0
+    && (value.mediaType == null || (typeof value.mediaType === 'string' && !/[\r\n]/.test(value.mediaType)));
+}
+
+function validatePublication(source, generation) {
+  if (!source || typeof source !== 'object') throw new Error('preview source is required');
+  if (typeof source.igId !== 'string' || !source.igId || source.igId.length > 256 || /[\\/\0]/.test(source.igId)) {
+    throw new Error('invalid preview IG id');
+  }
+  if (typeof source.handle !== 'string' || !source.handle || source.handle.length > 512) {
+    throw new Error('invalid preview build handle');
+  }
+  if (typeof source.buildId !== 'string' || !source.buildId || source.buildId.length > 512) {
+    throw new Error('invalid preview build id');
+  }
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('invalid preview generation');
+  if (!source.catalog || source.catalog.buildId !== source.buildId || !Array.isArray(source.catalog.outputs)) {
+    throw new Error('preview catalog does not belong to its build');
+  }
+  if (source.catalog.outputs.length > MAX_OUTPUTS) throw new Error('preview catalog is too large');
+  const paths = new Set();
+  let catalogChars = 0;
+  for (const output of source.catalog.outputs) {
+    if (!output || !safePath(output.path) || paths.has(output.path)) {
+      throw new Error(`unsafe or duplicate preview path ${String(output?.path)}`);
     }
-    // No set at all (SW was idle-killed) — ask the editor to re-push it, and fall
-    // through to the legacy render-via-client path for this one request.
-    void requestReprovision();
-  }
-
-  const gen = currentGeneration;
-  // (a) Only a CURRENT-generation cache entry may beat a live render. Falling
-  // back to the previous generation before consulting the open editor is what
-  // allowed a newly navigated iframe to become permanently stale.
-  const current = await cacheMatchCurrent(url.pathname, gen);
-  if (current) return current;
-
-  // (b) Live render via an open editor tab.
-  if (parsed) {
-    const live = await renderViaClient(parsed);
-    if (live) {
-      // Write-through into the current generation's cache so it survives tab close.
-      await cachePut(url.pathname, live.clone(), gen);
-      return live;
+    paths.add(output.path);
+    if (!['page', 'asset', 'auxiliary'].includes(output.kind)) throw new Error('invalid output kind');
+    if (typeof output.mediaType !== 'string' || !output.mediaType || output.mediaType.length > 256 || /[\r\n]/.test(output.mediaType)) {
+      throw new Error('invalid output media type');
+    }
+    catalogChars += output.path.length + output.mediaType.length;
+    if (catalogChars > MAX_CATALOG_CHARS) throw new Error('preview catalog metadata is too large');
+    if (output.content != null && !safeRef(output.content)) throw new Error('invalid output ContentRef');
+    if (output.content?.mediaType && output.content.mediaType !== output.mediaType) {
+      throw new Error('output ContentRef media type disagrees');
     }
   }
-
-  // (b2) With no live renderer, an older retained page is still useful for an
-  // editor-closed/offline tab. Mark it explicitly as stale for diagnostics.
-  const stale = await cacheMatchOlder(url.pathname, gen);
-  if (stale) return stale;
-
-  // (c) Friendly fallback — never a browser error page.
-  return fallbackResponse(parsed, url);
+  // Copy only the contract fields. This keeps the persisted pointer declarative
+  // even if an untrusted message carries prototypes or unrelated values.
+  return {
+    generation,
+    source: {
+      igId: source.igId,
+      handle: source.handle,
+      buildId: source.buildId,
+      catalog: {
+        buildId: source.catalog.buildId,
+        outputs: source.catalog.outputs.map((output) => ({
+          path: output.path,
+          kind: output.kind,
+          mediaType: output.mediaType,
+          ...(output.content ? { content: {
+            sha256: output.content.sha256,
+            byteLength: output.content.byteLength,
+            ...(output.content.mediaType ? { mediaType: output.content.mediaType } : {}),
+          } } : {}),
+        })),
+      },
+    },
+  };
 }
 
-// ---- (a) Cache API -------------------------------------------------------------
-
-function cacheName(gen) {
-  return CACHE_PREFIX + gen;
+function stateRequest(igId) {
+  return new Request(new URL(`__igpreview_state__/${encodeURIComponent(igId)}`, self.registration.scope));
 }
 
-async function cacheMatchCurrent(pathname, gen) {
-  const cache = await caches.open(cacheName(gen));
-  return (await cache.match(pathname)) || null;
+async function writePublication(publication) {
+  const cache = await caches.open(STATE_CACHE);
+  await cache.put(stateRequest(publication.source.igId), new Response(JSON.stringify(publication), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  }));
 }
 
-async function cacheMatchOlder(pathname, gen) {
-  const names = (await orderedCacheNames(gen)).filter((name) => name !== cacheName(gen));
-  for (const name of names) {
-    const cache = await caches.open(name);
-    const hit = await cache.match(pathname);
-    if (!hit) continue;
-    const headers = new Headers(hit.headers);
-    headers.set('X-IGPreview-Stale', 'true');
-    return new Response(await hit.arrayBuffer(), {
-      status: hit.status,
-      statusText: hit.statusText,
-      headers,
-    });
-  }
-  return null;
-}
-
-async function cachePut(pathname, response, gen) {
+async function readPublication(igId) {
   try {
-    const cache = await caches.open(cacheName(gen || 1));
-    await cache.put(pathname, response);
+    const cache = await caches.open(STATE_CACHE);
+    const response = await cache.match(stateRequest(igId));
+    if (!response) return null;
+    const stored = await response.json();
+    const publication = validatePublication(stored.source, stored.generation);
+    publications.set(igId, publication);
+    return publication;
   } catch {
-    /* best-effort: a cache write failure must never break serving */
+    return null;
   }
 }
 
-/** All igpreview cache names, newest generation first, current gen leading. */
-async function orderedCacheNames(gen) {
-  const keys = (await caches.keys()).filter((k) => k.startsWith(CACHE_PREFIX));
-  const withGen = keys
-    .map((k) => ({ k, g: Number(k.slice(CACHE_PREFIX.length)) || 0 }))
-    .sort((a, b) => b.g - a.g);
-  const ordered = withGen.map((x) => x.k);
-  // Ensure the announced current generation is tried first even if empty/new.
-  const curName = cacheName(gen);
-  return [curName, ...ordered.filter((n) => n !== curName)];
-}
-
-/** Keep only the newest KEEP_GENERATIONS caches; delete older ones. */
-async function pruneCaches() {
-  const allKeys = await caches.keys();
-  const keys = allKeys.filter((k) => k.startsWith(CACHE_PREFIX));
-  const sorted = keys
-    .map((k) => ({ k, g: Number(k.slice(CACHE_PREFIX.length)) || 0 }))
-    .sort((a, b) => b.g - a.g);
-  const doomed = [
-    ...sorted.slice(KEEP_GENERATIONS).map((x) => x.k),
-    ...allKeys.filter((key) => LEGACY_CACHE_PREFIXES.some((prefix) => key.startsWith(prefix))),
-  ];
-  await Promise.all(doomed.map((k) => caches.delete(k)));
-}
-
-// ---- (b) Live render via an editor client -------------------------------------
-
-/** Parse `<base>preview/<gen>/<rest>` into { generator, path }. */
 function parsePreviewPath(pathname) {
   const rest = pathname.slice(PREVIEW_ROOT.length);
   const slash = rest.indexOf('/');
-  if (slash < 0) return null;
-  const generator = decodeURIComponent(rest.slice(0, slash));
-  const path = decodeURIComponent(rest.slice(slash + 1));
-  if (!generator || !path) return null;
-  // Is this a page (.html) or an asset? Pages get HTML; everything else is an asset.
-  const isPage = path.endsWith('.html') || path.endsWith('/') || path === '';
-  return { generator, path: path.endsWith('/') ? path + 'index.html' : path, isPage };
+  if (slash < 1) return null;
+  try {
+    const igId = decodeURIComponent(rest.slice(0, slash));
+    let path = decodeURIComponent(rest.slice(slash + 1));
+    if (path.endsWith('/')) path += 'index.html';
+    if (!igId || !safePath(path)) return null;
+    return { igId, path };
+  } catch {
+    return null;
+  }
 }
 
-/** Ask every editor client to render; take the FIRST answer (newest-gen tabs reply,
- *  but we don't double-answer: the MessageChannel port resolves once). */
-async function renderViaClient(parsed) {
-  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  // Only real editor tabs (the app shell), never other preview tabs, can render.
-  const editors = clients.filter((c) => {
-    const p = new URL(c.url).pathname;
-    return !p.startsWith(PREVIEW_ROOT);
-  });
-  if (editors.length === 0) return null;
+async function handlePreview(url) {
+  const parsed = parsePreviewPath(url.pathname);
+  if (!parsed) return fallbackResponse(null, url);
+  const publication = publications.get(parsed.igId) || await readPublication(parsed.igId);
+  if (!publication) return fallbackResponse(parsed, url);
+  const output = publication.source.catalog.outputs.find((candidate) => candidate.path === parsed.path);
+  if (!output) return unavailableOutput(parsed, null);
 
+  // Complete outputs bypass the editor and survive both editor and worker exits.
+  if (output.content) {
+    const bytes = await readContent(output.content);
+    if (bytes) return outputResponse(bytes, output, parsed, publication.generation, 'content-store', output.content);
+    const cached = await readRenderedCache(publication.source.buildId, parsed.path, output);
+    if (cached) return outputResponse(cached.bytes, output, parsed, publication.generation, 'build-cache', cached.ref);
+    const transferred = await requestFromEditor(publication, output, 'igpreview:content');
+    if (transferred) {
+      await writeRenderedCache(publication.source.buildId, parsed.path, output, transferred.ref, transferred.bytes);
+      return outputResponse(transferred.bytes, output, parsed, publication.generation, 'content-transfer', transferred.ref);
+    }
+    return unavailableOutput(parsed, output);
+  }
+
+  // A previous successful render of this immutable build is reusable after a
+  // Service Worker restart. The cached body is canonical and re-verified.
+  const cached = await readRenderedCache(publication.source.buildId, parsed.path, output);
+  if (cached) return outputResponse(cached.bytes, output, parsed, publication.generation, 'build-cache', cached.ref);
+
+  // Assets and auxiliary files must be complete in the catalog. Only an
+  // explicitly unresolved page is allowed to invoke the renderer handle.
+  if (output.kind !== 'page') return unavailableOutput(parsed, output);
+  const rendered = await requestFromEditor(publication, output, 'igpreview:render');
+  if (rendered) {
+    await writeRenderedCache(publication.source.buildId, parsed.path, output, rendered.ref, rendered.bytes);
+    return outputResponse(rendered.bytes, output, parsed, publication.generation, 'render', rendered.ref);
+  }
+  return unavailableOutput(parsed, output);
+}
+
+async function contentDirectory() {
+  try {
+    const root = await self.navigator.storage.getDirectory();
+    return await root.getDirectoryHandle(OPFS_DIR, { create: false });
+  } catch {
+    return null;
+  }
+}
+
+async function sha256Hex(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function readContent(ref) {
+  if (!safeRef(ref)) return null;
+  const dir = await contentDirectory();
+  if (!dir) return null;
+  try {
+    const handle = await dir.getFileHandle(ref.sha256);
+    const bytes = await (await handle.getFile()).arrayBuffer();
+    if (bytes.byteLength !== ref.byteLength || await sha256Hex(bytes) !== ref.sha256) return null;
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function buildCacheName(buildId) {
+  return OUTPUT_CACHE_PREFIX + encodeURIComponent(buildId);
+}
+
+function outputCacheRequest(path) {
+  return new Request(new URL(`__igpreview_output__/${encodeURIComponent(path)}`, self.registration.scope));
+}
+
+async function readRenderedCache(buildId, path, output) {
+  try {
+    const cache = await caches.open(buildCacheName(buildId));
+    const response = await cache.match(outputCacheRequest(path));
+    if (!response) return null;
+    const sha256 = response.headers.get('X-Content-Sha256');
+    const declaredLength = Number(response.headers.get('X-Content-Length'));
+    const bytes = await response.arrayBuffer();
+    if (!SHA256.test(sha256 || '') || declaredLength !== bytes.byteLength) return null;
+    if (response.headers.get('Content-Type') !== output.mediaType) return null;
+    return await sha256Hex(bytes) === sha256
+      ? { bytes, ref: { sha256, byteLength: declaredLength, mediaType: output.mediaType } }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeRenderedCache(buildId, path, output, ref, bytes) {
+  try {
+    const cache = await caches.open(buildCacheName(buildId));
+    await cache.put(outputCacheRequest(path), new Response(bytes.slice(0), { headers: {
+      'Content-Type': output.mediaType,
+      'X-Content-Sha256': ref.sha256,
+      'X-Content-Length': String(ref.byteLength),
+    } }));
+  } catch {
+    // OPFS remains authoritative; output-cache publication is best effort.
+  }
+}
+
+async function requestFromEditor(publication, output, type) {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const editors = clients.filter((client) => !new URL(client.url).pathname.startsWith(PREVIEW_ROOT));
+  if (!editors.length) return null;
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (val) => {
+    let pending = editors.length;
+    const finish = (value) => {
       if (settled) return;
       settled = true;
-      resolve(val);
+      clearTimeout(timer);
+      resolve(value);
     };
-    // Timeout so a busy/dead tab can't hang the fetch — fall through to the fallback.
-    const timer = setTimeout(() => finish(null), 8000);
-
-    let pending = editors.length;
+    const timer = setTimeout(() => finish(null), 8_000);
     for (const client of editors) {
       const channel = new MessageChannel();
-      channel.port1.onmessage = (e) => {
-        const d = e.data;
-        pending--;
-        if (d && d.ok && !settled) {
-          clearTimeout(timer);
-          const body = d.isBase64 ? base64ToBytes(d.body) : d.body;
-          finish(
-            new Response(body, {
-              status: 200,
-              headers: {
-                'Content-Type': d.mime || 'text/html; charset=utf-8',
-                'Cache-Control': 'no-store',
-                'X-IGPreview-Source': 'live',
-              },
-            }),
-          );
-        } else if (pending <= 0) {
-          clearTimeout(timer);
-          finish(null);
+      channel.port1.onmessage = async (event) => {
+        const reply = event.data;
+        if (reply?.ok
+          && reply.path === output.path
+          && reply.mediaType === output.mediaType
+          && safeRef(reply.content)
+          && (!output.content
+            || (reply.content.sha256 === output.content.sha256
+              && reply.content.byteLength === output.content.byteLength))
+          && reply.body instanceof ArrayBuffer
+          && reply.body.byteLength === reply.content.byteLength
+          && await sha256Hex(reply.body) === reply.content.sha256) {
+          finish({ ref: reply.content, bytes: reply.body });
+          return;
         }
+        pending--;
+        if (pending <= 0) finish(null);
       };
-      client.postMessage(
-        { type: 'igpreview:render', generator: parsed.generator, path: parsed.path, isPage: parsed.isPage },
-        [channel.port2],
-      );
+      client.postMessage({
+        type,
+        igId: publication.source.igId,
+        handle: publication.source.handle,
+        buildId: publication.source.buildId,
+        path: output.path,
+        ...(output.content ? { content: output.content } : {}),
+      }, [channel.port2]);
     }
   });
 }
 
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
+function outputResponse(bytes, output, parsed, generation, source, content) {
+  let body = bytes;
+  if (output.kind === 'page' && /(?:text\/html|application\/xhtml\+xml)/i.test(output.mediaType)) {
+    const html = new TextDecoder().decode(bytes);
+    body = new TextEncoder().encode(preparePreviewHtml(
+      html,
+      PREVIEW_ROOT,
+      parsed.igId,
+      parsed.path,
+      generation,
+      content.sha256,
+    ));
+  }
+  return new Response(body, { status: 200, headers: {
+    'Content-Type': output.mediaType,
+    'Cache-Control': 'no-store',
+    'X-IGPreview-Source': source,
+    'X-Content-Sha256': content.sha256,
+  } });
 }
 
-// ---- (c) Friendly fallback -----------------------------------------------------
+function unavailableOutput(parsed, output) {
+  if (output?.kind === 'page' || (!output && /(?:\.html|\/$)/i.test(parsed.path))) {
+    return fallbackResponse(parsed, new URL(`${PREVIEW_ROOT}${encodeURIComponent(parsed.igId)}/${parsed.path}`, self.location));
+  }
+  return new Response('output unavailable', { status: 404, headers: {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-IGPreview-Source': 'unavailable',
+  } });
+}
 
 function fallbackResponse(parsed, url) {
-  const isPage = !parsed || parsed.isPage;
-  if (!isPage) {
-    // Missing asset with no editor open: 404 is fine (images/css degrade gracefully).
-    return new Response('asset unavailable — open the editor to render it', {
-      status: 404,
-      headers: { 'Content-Type': 'text/plain' },
-    });
-  }
-  const appUrl = BASE;
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Preview unavailable — reopen the editor</title>
-<meta http-equiv="refresh" content="5">
-<style>
-  body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#0f172a;color:#e2e8f0}
-  .card{max-width:34rem;padding:2.5rem;text-align:center}
-  h1{font-size:1.4rem;margin:0 0 .5rem}
-  p{color:#94a3b8}
-  a.btn{display:inline-block;margin-top:1.25rem;padding:.6rem 1.2rem;background:#38bdf8;color:#0f172a;
-        border-radius:.5rem;text-decoration:none;font-weight:600}
-  code{background:#1e293b;padding:.1rem .35rem;border-radius:.25rem;color:#7dd3fc}
-</style></head><body><div class="card" data-igpreview-fallback>
-  <h1>This preview page isn't rendered yet</h1>
-  <p>The FHIR IG Editor tab that renders this site isn't open (or hasn't rendered
-     <code>${escapeHtml(parsed ? parsed.path : url.pathname)}</code> yet).</p>
-  <p>Reopen the editor and this page will render automatically. Retrying every 5s…</p>
-  <a class="btn" href="${appUrl}">Open the FHIR IG Editor</a>
-</div></body></html>`;
-  return new Response(html, {
-    status: 200,
-    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-IGPreview-Source': 'fallback' },
-  });
+  const requested = escapeHtml(parsed?.path || url.pathname);
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview unavailable</title><style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#0f172a;color:#e2e8f0}.card{max-width:34rem;padding:2.5rem;text-align:center}p{color:#94a3b8}a{color:#7dd3fc}</style></head><body><div class="card" data-igpreview-fallback><h1>Preview output unavailable</h1><p>No verified output can currently serve <code>${requested}</code>.</p><p><a href="${BASE}">Open the FHIR IG Editor</a></p></div></body></html>`;
+  return new Response(html, { status: 200, headers: {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-IGPreview-Source': 'fallback',
+  } });
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+async function pruneLegacyCaches() {
+  const names = await caches.keys();
+  await Promise.all(names
+    .filter((name) => LEGACY_CACHE_PREFIXES.some((prefix) => name.startsWith(prefix)))
+    .map((name) => caches.delete(name)));
 }

@@ -3,15 +3,10 @@
  * recipes, and dependency graphs. Reads always recheck digest and length. */
 
 import { sha256Hex } from '../worker/bundleIntegrity';
+import type { ContentRef } from '../site/contract';
 
 const OPFS_DIR = 'fhir-ig-editor-content-v1';
 const SHA256 = /^[0-9a-f]{64}$/;
-
-export interface ContentRef {
-  sha256: string;
-  byteLength: number;
-  mediaType?: string;
-}
 
 export interface ContentStore {
   get(ref: ContentRef): Promise<ArrayBuffer | null>;
@@ -40,8 +35,16 @@ function viewBytes(source: BufferSource): Uint8Array {
 }
 
 export class OpfsContentStore implements ContentStore {
+  private readonly memory = new Map<string, Uint8Array>();
+
   async get(ref: ContentRef): Promise<ArrayBuffer | null> {
     validateRef(ref);
+    const resident = this.memory.get(ref.sha256);
+    if (resident) {
+      if (resident.byteLength !== ref.byteLength) return null;
+      if (await sha256Hex(resident) !== ref.sha256) return null;
+      return resident.slice().buffer;
+    }
     const dir = await directory();
     if (!dir) return null;
     try {
@@ -49,6 +52,7 @@ export class OpfsContentStore implements ContentStore {
       const bytes = await (await handle.getFile()).arrayBuffer();
       if (bytes.byteLength !== ref.byteLength) return null;
       if (await sha256Hex(bytes) !== ref.sha256) return null;
+      this.memory.set(ref.sha256, new Uint8Array(bytes));
       return bytes;
     } catch {
       return null;
@@ -62,17 +66,22 @@ export class OpfsContentStore implements ContentStore {
       byteLength: bytes.byteLength,
       ...(mediaType ? { mediaType } : {}),
     };
+    this.memory.set(ref.sha256, bytes.slice());
     const dir = await directory();
-    if (!dir) return null;
+    if (!dir) return ref;
     const handle = await dir.getFileHandle(ref.sha256, { create: true });
     const writable = await handle.createWritable();
     await writable.write(bytes);
     await writable.close();
     // Verify publication. If a previous/torn writer produced different bytes,
     // callers see a miss/failure instead of an authorized corrupt object.
-    if (!(await this.get(ref))) throw new Error(`ContentStore failed to publish ${ref.sha256}`);
+    const published = await (await handle.getFile()).arrayBuffer();
+    if (published.byteLength !== ref.byteLength || await sha256Hex(published) !== ref.sha256) {
+      throw new Error(`ContentStore failed to publish ${ref.sha256}`);
+    }
     return ref;
   }
 }
 
 export const contentStore: ContentStore = new OpfsContentStore();
+export type { ContentRef } from '../site/contract';

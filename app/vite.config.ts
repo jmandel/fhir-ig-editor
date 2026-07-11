@@ -54,7 +54,6 @@ const CYCLE_RENDER_RECIPE = (() => {
     }
   };
   walk(CYCLE_SITEGEN, 'vendor/cycle/site-gen');
-  addFile(resolve(HERE, 'src/preview/render.tsx'), 'app/src/preview/render.tsx');
   addFile(resolve(HERE, 'package.json'), 'app/package.json');
   addFile(resolve(HERE, 'bun.lock'), 'app/bun.lock');
   return hash.digest('hex');
@@ -116,8 +115,6 @@ export default defineConfig({
     'process.env.SITE_BRAND_TLD': 'undefined',
     'process.env.SITE_BRAND_MARK': 'undefined',
     'process.env.SITE_BRAND_TAGLINE': 'undefined',
-    'process.env.SITE_GEN_LENIENT': 'undefined',
-    'process.env.SITE_DB': 'undefined',
   },
   worker: {
     format: 'es',

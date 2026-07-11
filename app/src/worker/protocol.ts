@@ -1,6 +1,15 @@
-// Worker protocol (docs/fhir-ig-editor-spec.md §4). The UI thread and the engine
-// worker exchange these message shapes. Kept in one file so both sides stay in
-// lockstep. Every request carries an `id`; the worker replies with the same id.
+// Worker protocol. The UI thread and engine worker share these message shapes;
+// the site subset implements the four-operation contract in ARCHITECTURE.md.
+// Every request carries an `id`; the worker replies with the same id.
+
+import type {
+  GeneratorSpec,
+  OutputCatalog,
+  ProjectInput,
+  PrepareResult,
+  RenderedOutput,
+  SiteOutput,
+} from '../site/contract';
 
 export interface EngineVersion {
   version: string;
@@ -62,7 +71,7 @@ export interface InitResult {
   inputBytes: number;
 }
 
-/** Result of an incremental `mountBundles` call (lazy per-bundle mount). */
+/** Result of an incremental transactional package mount. */
 export interface MountResult {
   /** Total packages mounted in the engine after this call. */
   mounted: number;
@@ -72,12 +81,8 @@ export interface MountResult {
   serializeMs: number;
   wasmMs: number;
   inputBytes: number;
-  /** Raw packages whose binary PreparedPackage was durably published to OPFS. */
-  preparedStored?: string[];
   /** Rust-side phases and allocation/index facts for the prepared mount path. */
   preparedMetrics?: PreparedMountMetrics;
-  /** Exact normalized package artifacts installed by this transaction. */
-  packageIdentities?: Array<{ label: string; cacheKey: string }>;
 }
 
 export interface PreparedMountMetrics {
@@ -159,43 +164,6 @@ export interface ProgressEvent {
   fileCount?: number;
   /** Machine-readable substage measurements for benchmark collection. */
   metrics?: Record<string, number>;
-}
-
-// ---- closed Cycle site-build preview --------------------------------------
-
-/** One page the preview can render, as returned by `listPages`. */
-export interface PagePreviewDescriptor {
-  file: string;
-  title: string;
-  kind: 'narrative' | 'artifacts' | 'profile' | 'valueset' | 'codesystem' | 'example' | 'generic';
-}
-
-/** Result of closing the typed Cycle SiteBuild + enumerating renderable pages. */
-export interface SitePreviewResult {
-  /** Content-derived identity of the closed SiteBuild consumed by Cycle. */
-  buildId: string;
-  pages: PagePreviewDescriptor[];
-  /** Asset names -> mime, so the UI can serve them into the iframe on demand. */
-  assets: { name: string; mime: string }[];
-  buildMs: number;
-  /** True when the verified ClosedSiteBuild came from persistent ContentStore. */
-  fromCache?: boolean;
-}
-
-/** A rendered page's HTML + the assets it may reference (served via blob URLs). */
-export interface RenderPageResult {
-  file: string;
-  html: string;
-  renderMs: number;
-  fromCache?: boolean;
-}
-
-/** Site-content inputs (pagecontent/images/includes), transported as base64 to
- *  the compile/projection boundary. V2 assets become raw CAS artifacts. */
-export interface SiteContentInput {
-  /** project-relative path -> base64 bytes (pagecontent/images/includes). */
-  siteFiles: Record<string, string>;
-  buildEpochSecs: number;
 }
 
 // ---- request messages (UI -> worker) --------------------------------------
@@ -330,118 +298,25 @@ export type PackageMountInput =
   | { kind: 'raw'; spec: BundleSpec; transportIdentity: string }
   | { kind: 'prepared'; pointer: PreparedPackagePointer };
 
-/** Site-tree file value for `mountSite`: UTF-8 text or base64 bytes. */
-export type SiteTreeFile = string | { b64: string };
-
-/** Options for the stock-template render surface (engine `mountSite`). */
-export interface StockSiteOptions {
-  activeTables?: boolean;
-  runUuid?: string;
-  /** Merge into the mounted tree instead of replacing (overlay fast-path). */
-  merge?: boolean;
-  /** Whether a registered include miss may invoke the native fragment resolver.
-   * External/callback-free builders set false; Publisher templates default true. */
-  artifactResolution?: boolean;
-}
-
-/** Opaque, content-derived handle for one frozen stock-template generation.
- * `siteBuild` is the renderer-neutral predecessor manifest; page renders return
- * successor manifests and CAS batches without consulting an ambient last site. */
-export interface StockBuildOpenResult {
-  handle: string;
-  buildId: string;
-  siteBuild: unknown;
-  pages: string[];
-  packageStorage?: PackageStorageMetrics;
-}
-
-export interface StockArtifactTransition {
-  /** Typed Need<ArtifactKey> values discovered while Liquid evaluated. */
-  requested: unknown[];
-  /** Requested generated artifacts whose bytes the page actually consumed. */
-  read: unknown[];
-  /** Exact ArtifactRecords installed by the resolution batch. */
-  resolved: unknown[];
-}
-
-export interface StockPageRenderResult {
-  html: string;
-  /** Affine handle for the immutable successor; the predecessor is retired
-   * after a successful transition, so use this for the next lazy page. */
-  handle: string;
-  predecessorBuildId: string;
-  buildId: string;
-  siteBuild: unknown;
-  /** SHA-256 -> base64 bytes newly introduced by this transition. */
-  objects: Record<string, string>;
-  transition: StockArtifactTransition;
-  nonReadyFragments: number;
-  renderMs: number;
+export interface TemplateResolution {
+  satisfied: boolean;
+  chain: string[];
+  missing?: string;
 }
 
 export interface EngineOps {
-  init: { args: [bundles: BundleSpec[]]; result: InitResult };
-  mountBundles: { args: [bundles: BundleSpec[]]; result: MountResult };
+  init: { args: []; result: InitResult };
   mountPackages: { args: [packages: PackageMountInput[]]; result: MountResult };
   resolveProject: { args: [config: string, versionIndex?: VersionIndex]; result: ResolutionStep };
   expandValueSet: { args: [valueSetJson: string, resourcesJson: string]; result: ExpandResult };
-  compile: {
-    args: [
-      config: string,
-      files: Record<string, string>,
-      predefined: Record<string, unknown>,
-      siteFiles: Record<string, string>,
-    ];
-    result: CompileResult;
-  };
   snapshot: { args: [url: string]; result: SnapshotResult };
-  // Closed Cycle external-builder path (verified semantic view + shared renderer live in the worker).
-  buildSite: {
-    args: [
-      config: string,
-      files: Record<string, string>,
-      predefined: Record<string, unknown>,
-      siteFiles: Record<string, string>,
-      buildEpochSecs: number,
-      /** Exact ProjectRevision + PackageLock digest computed by EngineClient. */
-      projectRevision: string,
-      snapshotSourcesIdentity: string,
-    ];
-    result: SitePreviewResult;
-  };
-  /** Install a previously verified closed Cycle build without snapshot/site
-   * production. A miss is null and has no engine-side mutation. */
-  restoreCycleSite: {
-    args: [projectRevision: string, buildEpochSecs: number, snapshotSourcesIdentity: string];
-    result: SitePreviewResult | null;
-  };
-  renderPage: { args: [file: string]; result: RenderPageResult };
-  assetBytes: { args: [name: string]; result: { name: string; mime: string; base64: string; fromCache?: boolean } | null };
-  // F6 stock-template render surface (engine-side pages/fragments).
-  mountSite: { args: [files: Record<string, SiteTreeFile>, options?: StockSiteOptions]; result: { mounted: number } };
-  // Live template loader (#40): materialize a template `id#ver` chain from the
-  // MOUNTED bundle packages (base-chain walk + union-copy, in Rust) and merge
-  // its tree (includes/*→_includes/*) into the site tree. The host must have
-  // fetched+mounted the whole base chain first (Rust decides which packages via
-  // walk_base_chain; JS fetches them on the SAME resolve→fetch→mount path).
-  mountTemplate: { args: [coord: string]; result: { files: number } };
-  // Source-driven stock site (task #45): synthesize the per-artifact page SHELLS
-  // + the `_data/*` site-data model from the CURRENT compile (compiled + predefined
-  // resources) and the mounted template's `config.json`/`layouts`, merging them
-  // into the engine site tree (shells at the root, `_data/*` under `_data/`). This
-  // replaces the pre-baked `{id}-stock.json` warm-start bundle: mount resources →
-  // mountTemplate → produceStockSite → stage pagecontent → render.
-  produceStockSite: { args: []; result: { pages: number; data: number } };
-  // Freeze the final mounted generation as an explicit SiteBuild predecessor,
-  // then render only through immutable successor handles.
-  openStockBuild: { args: [templateCoord: string]; result: StockBuildOpenResult };
-  renderStockPage: { args: [handle: string, name: string]; result: StockPageRenderResult };
-  listSitePages: { args: []; result: { pages: string[] } };
-  renderSitePage: { args: [name: string]; result: { html: string; renderMs: number } };
-  renderFragment: { args: [ref: string, kind: string]; result: { html: string } };
-  // Generic native content operations. Cycle uses its shared LiquidJS policy.
-  renderLiquid: { args: [source: string, data?: Record<string, unknown>]; result: { html: string } };
-  renderMarkdown: { args: [md: string, opts?: { rougeWrappers?: boolean }]; result: { html: string } };
+  /** Private acquisition handshake; only EngineClient.prepare drives it. */
+  resolveTemplate: { args: [coordinate: string]; result: TemplateResolution };
+  // The complete public site-generation surface.
+  prepare: { args: [project: ProjectInput, spec: GeneratorSpec]; result: PrepareResult };
+  outputs: { args: [handle: string]; result: OutputCatalog };
+  render: { args: [handle: string, path: string]; result: RenderedOutput };
+  finalize: { args: [handle: string]; result: SiteOutput };
 }
 
 export type Op = keyof EngineOps;
@@ -454,4 +329,13 @@ export type WorkerRequest = {
 
 export type WorkerReply =
   | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: string };
+  | {
+      id: number;
+      ok: false;
+      error: string;
+      /** Operation metadata only: lets prepare distinguish a compiler failure
+       * from a later generator failure without adding another domain value. */
+      detail?:
+        | { operation: 'prepare'; stage: 'compile' }
+        | { operation: 'prepare'; stage: 'site'; compiled: CompileResult };
+    };

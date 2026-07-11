@@ -1,19 +1,14 @@
-// Site preview over a SiteGeneratorAdapter (Adapter API v1): the template
-// selector chooses the generator; pages render on demand (selecting a page or
-// recompiling re-renders only the CURRENT page).
-//
-// Asset handling: rendered HTML references design assets + IG images by
-// (relative) name. We rewrite src/href/srcset to blob URLs served by the
-// adapter's assetBytes, and inject the adapter's baseHref (when it has one)
-// for assets it serves from the app's static tree.
+// Site preview over one immutable output catalog. The template selector prepares
+// a successor handle; the current iframe remains mounted until that successor is
+// acknowledged by the preview Service Worker.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PageInfo, SiteGeneratorAdapter } from '../adapters/types';
+import type { OutputDescriptor } from '../site/contract';
 import { CURATED_TEMPLATES, isVerified } from '../adapters/templateCatalog';
 import type { TemplateCatalog } from '../adapters/templateCatalog';
 import { previewUrl, ensurePreviewServiceWorker, PREVIEW_ROOT } from '../preview/previewWindow';
 
-/** The stock adapter's id — the template picker below only shows for it (#40). */
+/** The Publisher generator id — the template picker below only shows for it. */
 const STOCK_ID = 'hl7.fhir.template';
 /** Sentinel family value that reveals the advanced write-your-own input. */
 const ADVANCED = '__advanced__';
@@ -22,13 +17,11 @@ interface Props {
   /** The loaded IG id — the preview URL-scheme key. `preview/<igId>/<path>` is the
    *  SAME URL embedded (iframe src) and external (new tab), so they never diverge. */
   igId: string;
-  adapter: SiteGeneratorAdapter;
+  generatorId: string;
   generators: { id: string; label: string }[];
   onSelectGenerator: (id: string) => void;
-  /** The adapter's page list for the current compile generation. */
-  pages: PageInfo[] | null;
-  /** Bumped on every adapter (re)init — re-renders the visible page. */
-  generation: number;
+  /** Page descriptors from the last successfully published output catalog. */
+  pages: OutputDescriptor[] | null;
   building: boolean;
   error: string | null;
   /** Preview-window (task #37): SW-backed real-tab preview is supported here. */
@@ -46,7 +39,7 @@ interface Props {
   templateCatalogs: Record<string, TemplateCatalog> | null;
 }
 
-export function PreviewPane({ igId, adapter, generators, onSelectGenerator, pages, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
+export function PreviewPane({ igId, generatorId, generators, onSelectGenerator, pages, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
   const [current, setCurrent] = useState<string>('index.html');
   const [loading, setLoading] = useState(false);
   const [swReady, setSwReady] = useState(false);
@@ -72,10 +65,10 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
   // Keep the selected page valid when the page list changes.
   useEffect(() => {
     if (!pages) return;
-    if (!pages.some((p) => p.file === current)) {
+    if (!pages.some((p) => p.path === current)) {
       const fallback =
-        pages.find((p) => p.file === 'index.html' || p.file === 'en/index.html') ?? pages[0];
-      if (fallback) setCurrent(fallback.file);
+        pages.find((p) => p.path === 'index.html' || p.path === 'en/index.html') ?? pages[0];
+      if (fallback) setCurrent(fallback.path);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages]);
@@ -124,7 +117,7 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
   // latest published) — no typing needed. The free-text `id#version` input is
   // DEMOTED to an "advanced / custom template…" family option (still present —
   // driven means driven, any resolvable template loads via the same loader).
-  const isStock = adapter.id === STOCK_ID;
+  const isStock = generatorId === STOCK_ID;
   const [curId, curVer] = splitCoord(currentTemplate);
   const isCurated = CURATED_TEMPLATES.some((t) => t.id === curId);
   // The family <select> value: a curated id, or ADVANCED for custom coords / the
@@ -145,7 +138,7 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
     <span className="preview-generator-controls">
       <label className="preview-generator-select" title="Site generator / template">
         Generator&nbsp;
-        <select value={adapter.id} onChange={(e) => onSelectGenerator(e.target.value)}>
+        <select value={generatorId} onChange={(e) => onSelectGenerator(e.target.value)}>
           {generators.map((g) => (
             <option key={g.id} value={g.id}>{g.label}</option>
           ))}
@@ -237,7 +230,7 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
     </div>
   ) : null;
 
-  if (error) {
+  if (error && !pages) {
     return (
       <div className="preview">
         <div className="preview-bar">{selector}</div>
@@ -259,6 +252,11 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
   return (
     <div className="preview">
       {templateBanner}
+      {error && (
+        <div className="preview-error" role="alert">
+          Site rebuild failed; showing the last successful preview.<pre>{error}</pre>
+        </div>
+      )}
       <div className="preview-bar">
         {selector}
         <label className="preview-page-select">
@@ -267,7 +265,7 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
             {groupPages(pages).map((g) => (
               <optgroup key={g.label} label={g.label}>
                 {g.pages.map((p) => (
-                  <option key={p.file} value={p.file}>{p.title}</option>
+                  <option key={p.path} value={p.path}>{p.title ?? p.path}</option>
                 ))}
               </optgroup>
             ))}
@@ -321,9 +319,31 @@ function splitCoord(coord: string): [string, string] {
   return h < 0 ? [coord, ''] : [coord.slice(0, h), coord.slice(h + 1)];
 }
 
-function groupPages(pages: PageInfo[]) {
-  const order: PageInfo['kind'][] = ['narrative', 'artifacts', 'profile', 'valueset', 'codesystem', 'example', 'generic'];
-  const labels: Record<PageInfo['kind'], string> = {
+type PageGroupKind = 'narrative' | 'artifacts' | 'profile' | 'valueset' | 'codesystem' | 'example' | 'generic';
+
+function pageGroup(page: OutputDescriptor): PageGroupKind {
+  switch (page.pageKind) {
+    case 'artifacts':
+    case 'profile':
+    case 'valueset':
+    case 'codesystem':
+    case 'example':
+    case 'generic':
+      return page.pageKind;
+    case 'profile-companion':
+      return 'profile';
+    case 'narrative':
+    case 'toc':
+    case 'validation':
+      return 'narrative';
+    default:
+      return 'generic';
+  }
+}
+
+function groupPages(pages: OutputDescriptor[]) {
+  const order: PageGroupKind[] = ['narrative', 'artifacts', 'profile', 'valueset', 'codesystem', 'example', 'generic'];
+  const labels: Record<PageGroupKind, string> = {
     narrative: 'Pages',
     artifacts: 'Index',
     profile: 'Profiles',
@@ -333,6 +353,6 @@ function groupPages(pages: PageInfo[]) {
     generic: 'Resources',
   };
   return order
-    .map((kind) => ({ label: labels[kind], pages: pages.filter((p) => p.kind === kind) }))
+    .map((kind) => ({ label: labels[kind], pages: pages.filter((page) => pageGroup(page) === kind) }))
     .filter((g) => g.pages.length);
 }

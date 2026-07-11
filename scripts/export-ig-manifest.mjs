@@ -8,9 +8,9 @@
 //
 // Text files (`files`): sushi-config.yaml, input/fsh/**.fsh,
 // input/resources/**.json, input/pagecontent/**, input/includes/** — the compile
-// input AND the S6 site-content the M2 preview producer reads.
-// Binary files (`binaryFiles`, base64): input/images/** — served into the preview
-// iframe. Together these are the full site.db producer input set (§2b S6).
+// input AND the authored site content semantic preparation reads.
+// Binary files (`binaryFiles`, base64): input/images/**. Base64 is only this
+// catalog archive's JSON transport; preparation publishes ordinary ContentRefs.
 
 import fs from 'node:fs';
 import path from 'node:path';

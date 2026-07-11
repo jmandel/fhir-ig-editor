@@ -10,7 +10,7 @@ import {
 import { obtainLockedPackages, refreshMutableVersionIndex } from '../src/worker/packageResolver';
 
 const step: ResolutionStep = {
-  resolver_schema: 2,
+  resolver_schema: 3,
   compile_set: [
     { package_id: 'hl7.fhir.r4.core', version: '4.0.1' },
     { package_id: 'example.pkg', version: '2.0.0' },
@@ -70,7 +70,7 @@ describe('persistent package-resolution lock', () => {
       ...step,
       compile_set: [...step.compile_set].reverse(),
     }, lock)).toBeFalse();
-    expect(resolutionMatchesLock({ ...step, resolver_schema: 3 }, lock)).toBeFalse();
+    expect(resolutionMatchesLock({ ...step, resolver_schema: 2 }, lock)).toBeFalse();
   });
 
   test('baked mutable candidates can be freshness-validated without registry lookup', async () => {

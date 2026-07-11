@@ -18,35 +18,23 @@ node "$HERE/export-ig-manifest.mjs"
 # app assembly must never silently omit projects visible in the selector.
 find "$REPO/app/public/data" -mindepth 2 -maxdepth 2 \( -name source.tgz -o -name source.json \) -delete 2>/dev/null || true
 node "$HERE/bake-catalog.mjs"
-node "$HERE/copy-site-assets.mjs"
+# Cycle's renderer-owned browser inputs are baked through Cycle's own package
+# builder/canonicalizer. The worker will ingest this authenticated package
+# privately during `prepare`; it is not a public asset API or a second SiteBuild.
+bun "$HERE/bake-cycle-renderer-package.ts"
 
 # Warm-start expansion authority.
 mkdir -p "$REPO/app/public/data/expansions"
 rm -rf "$REPO/app/public/data/expansions"/*
 cp -r "$REPO/expansions/." "$REPO/app/public/data/expansions/" 2>/dev/null || true
 
-# Packed IG sites at the site-bundles root. Template artifacts are a separate
-# namespace staged below.
-mkdir -p "$REPO/app/public/data/sites"
-rm -f "$REPO/app/public/data/sites"/*.json
-for file in "$REPO"/site-bundles/*.json; do
-  [ -e "$file" ] && cp "$file" "$REPO/app/public/data/sites/"
-done
-
-# Loader-produced template warm starts and controlled browser fixtures.
-mkdir -p "$REPO/app/public/data/templates" "$REPO/app/public/data/fixtures"
-rm -rf "$REPO/app/public/data/templates"/* "$REPO/app/public/data/fixtures"/*
-cp -r "$REPO/site-bundles/templates/." "$REPO/app/public/data/templates/" 2>/dev/null || true
+# Controlled browser fixtures exercise arbitrary live template refusal.
+mkdir -p "$REPO/app/public/data/fixtures"
+rm -rf "$REPO/app/public/data/fixtures"/*
 cp -r "$REPO/scripts/fixtures/bad-ant-template/." "$REPO/app/public/data/fixtures/" 2>/dev/null || true
-
-# Versioned Publisher-runtime closure (FHIR icons/fixed joins/backgrounds and
-# pinned runtime CSS/JS/images). The adapter generates dynamically discovered
-# table backgrounds; the pack builder validates every fetched third-party byte
-# against its committed SHA-256.
-node "$HERE/build-publisher-runtime-pack.mjs"
 
 test -f "$REPO/app/public/data/cycle/manifest.json"
 test -f "$REPO/app/public/data/uscore/source.tgz"
 test -f "$REPO/app/public/data/uscore/source.json"
-test -f "$REPO/app/public/data/publisher-runtime/1.0.0.json"
+test -f "$REPO/app/public/data/cycle/renderer-package/manifest.json"
 echo "[assemble-static-data] complete app/public/data assembled"

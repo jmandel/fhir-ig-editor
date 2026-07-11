@@ -70,9 +70,11 @@ It performs exactly two stages:
 1. `scripts/build-wasm.sh` builds `wasm_api`, runs `wasm-bindgen`, optionally
    optimizes it, writes `app/public/pkg/`, and generates the app's expected
    engine-commit constant.
-2. `scripts/assemble-static-data.sh` builds package bundles, Cycle/catalog
-   source manifests, template/site/fixture artifacts, expansion warm starts,
-   and the versioned Publisher-runtime asset pack under `app/public/data/`.
+2. `scripts/assemble-static-data.sh` builds complete normalized package bundles,
+   Cycle/catalog source manifests, Cycle's authenticated renderer package,
+   controlled fixtures, and expansion warm starts under `app/public/data/`.
+   Publisher runtime files are renderer-owned outputs assembled by Rust from
+   the exact core/template inputs; there is no editor runtime-asset pack.
 
 Pages CI invokes the same assembly script after its separately tested WASM
 build. There must not be a second CI-only catalog or asset recipe.
@@ -84,7 +86,7 @@ Run the focused engine contracts from the engine commit that will be pinned:
 ```sh
 cd vendor/sushi-rs
 cargo test -p compiler -p wasm_api -p snapshot_gen --release
-cargo test -p site_build --features site-db-compat --release
+cargo test -p site_build --release
 cargo test -p render_page --release
 cargo test -p fig --release
 cd ../..
@@ -96,7 +98,6 @@ Run Cycle's shared CLI/browser renderer contract:
 cd vendor/cycle
 bun install --frozen-lockfile
 bun run typecheck:renderer
-SITE_GEN_USE_FIXTURE=1 bun site-gen/ingest.ts
 bun test
 cd ../..
 ```
@@ -105,7 +106,7 @@ The Pages job also runs the preferred native path against an archived copy of
 the pinned guide: project-specific example generation, `fig prepare` with the
 explicit package cache, then `SITE_BUILD_DIR=<bundle> bun site-gen/build.tsx`.
 The exact reusable command and its input/output boundary are documented in
-[`vendor/cycle/site-gen/FIG-INTEGRATION.md`](vendor/cycle/site-gen/FIG-INTEGRATION.md).
+[`vendor/cycle/site-gen/README.md`](vendor/cycle/site-gen/README.md).
 
 Run app contracts and build with the actual Pages base:
 
@@ -145,16 +146,14 @@ compatibility behavior, and no unexpected uncaught browser exceptions.
 5. native engine build and resolver-generated package-list drift check;
 6. WASM build and canonical static-data assembly;
 7. native/WASM compiler byte comparison;
-8. live-mounted versus packed-template parity;
-9. local-expansion versus committed-cache consistency machinery;
-10. Cycle shared-renderer tests;
-11. a real Fig `cycle-site/v1` versus `cycle-site/v2` build whose complete
-    ordinary output trees must be byte-identical and whose input-bound receipts
-    must differ;
-12. editor data-contract tests and a production Vite build under
+8. local-expansion versus committed-cache consistency machinery;
+9. Cycle shared-renderer tests;
+10. a real Fig `cycle-site/v2` build whose complete SiteOutput inventory and
+    SiteBuild-bound receipt are verified;
+11. editor data-contract tests and a production Vite build under
     `/<repository>/`;
-13. fresh-profile Chrome certification of the exact artifact; and
-14. Pages artifact upload/deployment.
+12. fresh-profile Chrome certification of the exact artifact; and
+13. Pages artifact upload/deployment.
 
 The eight-IG `snapshot/package-deps-gate.sh` needs a separate corpus/cache and is
 explicitly reported as out of scope in Pages CI. A notice is not a green parity
@@ -227,14 +226,19 @@ unrelated WASM module.
 
 ## Known release limitations
 
-- Templates with custom `ant` hooks are refused; no browser path executes them.
-- Native Fig can promote a captured stock render into a CAS-backed immutable
-  `SiteBuild` successor. The browser stock adapter does not yet publish that
-  successor through its worker/build-handle protocol.
-- Stock adapter/session state is still mutable behind the serial build queue;
-  immutable per-build stock handles remain convergence work.
-- Direct `SITE_DB` still opens an unsealed compatibility database and enables
-  native-only Liquid SQL. It is an explicit legacy fallback; the preferred
-  native Cycle path is the closed `fig prepare` bundle.
+- Templates with unrecognized custom `ant` hooks are refused; no browser path
+  executes Ant. Standard template effects are reproduced in Rust except for the
+  PlantUML derivation boundary below.
+- The catalog/live-GitHub source loaders currently retain a Publisher-oriented
+  allowlist rather than the complete project input tree. In particular,
+  `input/images-source/*.plantuml` and project-local `#template` directories are
+  not captured. Safe references to generator-owned products do not reject an
+  otherwise renderable guide, but the corresponding derived figure can be
+  absent. The coherent fix is complete source capture plus a generator-owned
+  content-addressed derivation (or authenticated precomputed result) bound to
+  exact template/tool/options—not another guessed path allowlist or authored-
+  asset side channel.
+- Publisher and Cycle both use the common immutable four-operation host API;
+  no compatibility database is a supported renderer input.
 - Large catalog guides are sampled by the browser gate rather than exhaustively
   rendering every page on every deployment.
