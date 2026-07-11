@@ -75,6 +75,9 @@ test('preview preparation replaces an old control block instead of stacking list
   expect(profile.match(/<base data-igpreview="base"/g)?.length).toBe(1);
   expect(profile).not.toContain('"path":"en/index.html"');
   expect(profile).toContain('"path":"en/profile.html"');
+  expect(profile).toContain("'igpreview:scroll:'");
+  expect(profile).toContain('sessionStorage.setItem(scrollKey');
+  expect(profile).toContain('scrollTo(pos.x,pos.y)');
   const script = profile.match(/<script data-igpreview="hot-reload">([\s\S]*?)<\/script>/)?.[1];
   expect(script).toBeTruthy();
   expect(() => new Function(script!)).not.toThrow();

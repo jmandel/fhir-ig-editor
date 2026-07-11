@@ -271,6 +271,16 @@ function hotReloadSnippet(generatorId: string, pagePath: string, generation: num
   var controlKey=me.generator+'\\n'+me.path;
   if(window.__igpreviewHotReloadKey===controlKey)return;
   window.__igpreviewHotReloadKey=controlKey;
+  var scrollKey='igpreview:scroll:'+controlKey;
+  // location.reload() does not consistently restore scroll in iframes/mobile
+  // browsers. Consume the position captured by the prior generation and apply
+  // it repeatedly while late layout/images settle.
+  try{var saved=sessionStorage.getItem(scrollKey);if(saved){sessionStorage.removeItem(scrollKey);var pos=JSON.parse(saved);if(Number.isFinite(pos.x)&&Number.isFinite(pos.y)){
+    var oldRestoration=history.scrollRestoration;history.scrollRestoration='manual';
+    var restore=function(){scrollTo(pos.x,pos.y);};
+    restore();requestAnimationFrame(function(){restore();requestAnimationFrame(restore);});
+    setTimeout(restore,250);setTimeout(function(){restore();history.scrollRestoration=oldRestoration;},1000);
+  }}}catch(e){}
   var mine=document.currentScript;
   var root=document.body||document.documentElement;
   var prune=function(){root.querySelectorAll('script[data-igpreview="hot-reload"]').forEach(function(s){if(s!==mine)s.remove();});};
@@ -290,7 +300,9 @@ function hotReloadSnippet(generatorId: string, pagePath: string, generation: num
   var say=function(){try{ch.postMessage({type:'hello',clientId:clientId,generator:me.generator,path:me.path,generation:me.generation});}catch(e){}};
   ch.onmessage=function(ev){var d=ev.data;if(!d)return;
     if(d.type==='reload'&&d.generator===me.generator&&d.generation>=me.generation&&Array.isArray(d.paths)&&d.paths.indexOf(me.path)>=0){
-      // Our page changed in a newer generation -> reload (browser restores scroll).
+      // Our page changed in a newer generation. Persist position explicitly;
+      // browser-native restoration is unreliable for same-URL iframe reloads.
+      try{sessionStorage.setItem(scrollKey,JSON.stringify({x:scrollX,y:scrollY}));}catch(e){}
       location.reload();
     }
     if(d.type==='who')say();

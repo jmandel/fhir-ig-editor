@@ -46,7 +46,7 @@ interface Props {
   templateCatalogs: Record<string, TemplateCatalog> | null;
 }
 
-export function PreviewPane({ igId, adapter, generators, onSelectGenerator, pages, generation, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
+export function PreviewPane({ igId, adapter, generators, onSelectGenerator, pages, building, error, previewCapable, currentTemplate, onSelectTemplate, templateError, templateCatalogs }: Props) {
   const [current, setCurrent] = useState<string>('index.html');
   const [loading, setLoading] = useState(false);
   const [swReady, setSwReady] = useState(false);
@@ -55,6 +55,7 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
   // navigation loop: a selector change drives the iframe; a link click inside the
   // iframe drives the selector — both settle here so neither re-fires the other.
   const shownRef = useRef<string>('');
+  const previewMounted = pages !== null;
 
   // Register the preview SW so the EMBEDDED iframe is served the SAME real
   // `preview/<igId>/<path>` URLs as a new tab. Until it controls the scope we can't
@@ -79,21 +80,25 @@ export function PreviewPane({ igId, adapter, generators, onSelectGenerator, page
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages]);
 
-  // Selector / IG / generation → navigate the iframe to the SW-served preview URL.
-  // A new compile generation refreshes the SAME page (the SW re-renders on demand).
+  // Selector / IG → navigate the iframe to the SW-served preview URL. Compile
+  // generations are handled by the targeted hot-reload channel after the new
+  // page is cached; assigning the same iframe src here would cause a second
+  // unconditional navigation and discard its scroll position. `previewMounted`
+  // covers the distinct case where a template switch temporarily removed and
+  // then recreated the iframe: that new DOM node needs its initial navigation.
   useEffect(() => {
     if (!swReady || !igId) return;
     const fr = iframeRef.current;
     if (!fr) return;
-    // Navigate only when the iframe isn't already on this page (i.e. `current` was
-    // set by the selector, not synced FROM a link click) — or on a recompile.
-    if (shownRef.current !== current || fr.dataset.gen !== String(generation)) {
-      fr.dataset.gen = String(generation);
+    // Navigate only when the iframe isn't already on this page (i.e. `current`
+    // was set by the selector, not synced FROM a link click), or the IG changed.
+    if (shownRef.current !== current || fr.dataset.igId !== igId) {
+      fr.dataset.igId = igId;
       setLoading(true);
       fr.src = previewUrl(igId, current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, igId, swReady, generation]);
+  }, [current, igId, swReady, previewMounted]);
 
   // Sync the selector FROM iframe navigation (link clicks, back/forward): parse the
   // iframe's URL back to a page path. Same-origin (preview/ is under the app origin),

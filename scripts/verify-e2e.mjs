@@ -207,6 +207,12 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
         return match ? JSON.parse(match[1]) : null;
       }))()`);
     }
+    out.hotReloadScrollBefore = await tabEval(preview, `(() => {
+      const max = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+      scrollTo(0, Math.min(640, max));
+      return scrollY;
+    })()`);
+    await sleep(100);
     await tabEval(preview, `window.__stamp = 'IDX'`);
     await editorEval(`(() => {
       window.__e2ePreviewReloadChannel?.close();
@@ -228,6 +234,17 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       await tabWaitFor(preview, `window.__stamp !== 'IDX'`, 25000, 'index tab reloaded');
       out.hotReloadMs = Date.now() - tEdit;
       out.indexHotReloaded = await tabEval(preview, `(async () => { const r = await fetch(location.pathname); const t = await r.text(); return /HOTRELOAD/.test(t); })()`);
+      if (out.hotReloadScrollBefore > 0) {
+        await tabWaitFor(
+          preview,
+          `Math.abs(scrollY - ${JSON.stringify(out.hotReloadScrollBefore)}) <= 2`,
+          3000,
+          'hot-reload scroll restoration',
+        ).catch(() => {});
+      }
+      out.hotReloadScrollAfter = await tabEval(preview, `scrollY`);
+      out.hotReloadScrollPreserved = out.hotReloadScrollBefore > 0
+        && Math.abs(out.hotReloadScrollAfter - out.hotReloadScrollBefore) <= 2;
     } catch (e) {
       out.indexHotReloaded = false;
       out.hotReloadErr = String(e).slice(0, 120);
@@ -1424,6 +1441,10 @@ try {
     if (!pw.backWorked) { console.error('assert: back navigation failed'); ok = false; }
     if (!pw.forwardWorked) { console.error('assert: forward navigation failed'); ok = false; }
     if (!pw.indexHotReloaded) { console.error('assert: edited page did not hot-reload its preview tab'); ok = false; }
+    if (!pw.hotReloadScrollPreserved) {
+      console.error('assert: hot reload did not preserve preview scroll —', pw.hotReloadScrollBefore, pw.hotReloadScrollAfter);
+      ok = false;
+    }
     if (!(pw.hotReloadMs > 0 && pw.hotReloadMs < 4000)) {
       console.error('assert: preview hot reload took', pw.hotReloadMs, 'ms (gate: <4000)'); ok = false;
     }
