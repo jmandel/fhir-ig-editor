@@ -44,7 +44,9 @@ const LABELS = [
   'hl7.fhir.r4.core#4.0.1',
   'hl7.fhir.uv.tools.r4#1.1.2',
   'hl7.terminology.r4#7.2.0',
+  'hl7.terminology.r4#7.1.0',
   'hl7.fhir.uv.extensions.r4#5.3.0',
+  'hl7.fhir.uv.extensions.r4#5.2.0',
   'hl7.fhir.r5.core#5.0.0',
 ];
 const session = new mod.Session();
@@ -53,24 +55,62 @@ const session = new mod.Session();
   if (!env.ok) throw new Error(`session.init failed: ${env.error?.message}`);
 }
 
-function walk(dir, exts) {
+function walk(dir, exts = null) {
   const out = [];
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) out.push(...walk(p, exts));
-    else if (exts.includes(path.extname(e.name).slice(1).toLowerCase())) out.push(p);
+    else if (!exts || exts.includes(path.extname(e.name).slice(1).toLowerCase())) out.push(p);
   }
   return out.sort();
 }
 const config = fs.readFileSync(path.join(CYCLE_DIR, 'sushi-config.yaml'), 'utf8');
+// Compilation consumes the resolver fixpoint captured for these exact config
+// bytes. The mounted CI bundle set is already complete, but mounting alone does
+// not select a project closure.
+const versions = {};
+for (const label of LABELS) {
+  const split = label.lastIndexOf('#');
+  const packageId = label.slice(0, split);
+  (versions[packageId] ??= []).push(label.slice(split + 1));
+}
+const resolveEnv = JSON.parse(session.resolveProject(config, JSON.stringify({ versions })));
+if (!resolveEnv.ok) throw new Error(`session.resolveProject failed: ${resolveEnv.error?.message}`);
+if (!resolveEnv.result?.satisfied) {
+  throw new Error(`session.resolveProject did not reach a fixpoint: ${JSON.stringify(resolveEnv.result)}`);
+}
 const files = {};
 for (const f of walk(path.join(CYCLE_DIR, 'input/fsh'), ['fsh'])) files[path.relative(CYCLE_DIR, f)] = fs.readFileSync(f, 'utf8');
 const predefined = {};
-const resDir = path.join(CYCLE_DIR, 'input/resources');
-if (fs.existsSync(resDir)) for (const f of walk(resDir, ['json'])) predefined[path.relative(CYCLE_DIR, f)] = JSON.parse(fs.readFileSync(f, 'utf8'));
+for (const root of ['input/resources', 'input/examples']) {
+  const dir = path.join(CYCLE_DIR, root);
+  if (fs.existsSync(dir)) {
+    for (const f of walk(dir, ['json'])) {
+      predefined[path.relative(CYCLE_DIR, f)] = JSON.parse(fs.readFileSync(f, 'utf8'));
+    }
+  }
+}
+// `compileProject` is the one complete compiler boundary. Capture every
+// authored input byte except FSH (already supplied as parsed text above), so
+// predefined overlap, page listing, and future authored roles cannot make this
+// parity gate exercise a narrower obsolete API.
+const siteFiles = {};
+const inputDir = path.join(CYCLE_DIR, 'input');
+if (fs.existsSync(inputDir)) {
+  for (const f of walk(inputDir)) {
+    const relative = path.relative(CYCLE_DIR, f);
+    if (relative.startsWith('input/fsh/')) continue;
+    siteFiles[relative] = fs.readFileSync(f).toString('base64');
+  }
+}
 
-const compileEnv = JSON.parse(session.compile(JSON.stringify(files), config, JSON.stringify(predefined)));
-if (!compileEnv.ok) throw new Error(`session.compile failed: ${compileEnv.error?.message}`);
+const compileEnv = JSON.parse(session.compileProject(
+  JSON.stringify(files),
+  config,
+  JSON.stringify(predefined),
+  JSON.stringify(siteFiles),
+));
+if (!compileEnv.ok) throw new Error(`session.compileProject failed: ${compileEnv.error?.message}`);
 const out = compileEnv.result;
 
 let match = 0, diff = 0, miss = 0;
