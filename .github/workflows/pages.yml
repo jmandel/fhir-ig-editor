@@ -213,10 +213,10 @@ jobs:
             --out "$WORK/closed-v2"
           OUT_DIR="$WORK/out-v1" SITE_BUILD_DIR="$WORK/closed-v1" bun site-gen/build.tsx
           OUT_DIR="$WORK/out-v2" SITE_BUILD_DIR="$WORK/closed-v2" bun site-gen/build.tsx
-          V1_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputBuildId)' "$WORK/out-v1/cycle-output-receipt.json")"
-          V2_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputBuildId)' "$WORK/out-v2/cycle-output-receipt.json")"
+          V1_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputId)' "$WORK/out-v1/site-output.json")"
+          V2_RECEIPT="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).outputId)' "$WORK/out-v2/site-output.json")"
           test "$V1_RECEIPT" != "$V2_RECEIPT"
-          rm "$WORK/out-v1/cycle-output-receipt.json" "$WORK/out-v2/cycle-output-receipt.json"
+          rm "$WORK/out-v1/site-output.json" "$WORK/out-v2/site-output.json"
           diff -ru "$WORK/out-v1" "$WORK/out-v2"
 
       - name: App data-contract tests
