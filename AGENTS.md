@@ -134,14 +134,15 @@ Dependency landing receipts for this overhaul:
 
 The first Pages run for editor `818d215` reached the byte-parity gate after all
 earlier build/data gates passed, then failed because `scripts/byte-check.mjs`
-still called the deleted standalone `Session.compile`. The gate now uses the
-complete `resolveProject -> compileProject` boundary, seeds mutable version
-selection from its exact mounted labels, mounts the full multi-version Cycle
-closure, and captures every non-FSH authored input byte. The exact local CI
-reproduction is green: 10/10 WASM resources byte-identical to native, with only
-the expected disk-only ImplementationGuide native output. This correction must
-still be committed, pushed, and observed through Pages before deployment is
-called successful.
+still called the deleted standalone `Session.compile`. Editor correction
+`5f0422e` uses the complete `resolveProject -> compileProject` boundary, seeds
+mutable version selection from its exact mounted labels, mounts the full
+multi-version Cycle closure, and captures every non-FSH authored input byte.
+The exact local reproduction passed 10/10 byte-identical WASM/native resources,
+with only the expected disk-only ImplementationGuide native output. Pages run
+`29161468247` then passed the byte gate, all engine/Cycle/app/browser gates,
+artifact upload, and deploy. The live origin served that deployment with engine
+`86d3457` and the new outcome-oriented welcome screen.
 
 Green static/native evidence:
 
