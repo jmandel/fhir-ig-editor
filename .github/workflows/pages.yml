@@ -111,7 +111,6 @@ jobs:
       - name: Package-list drift gate (resolver-generated)
         env:
           FHIR_CACHE: ${{ github.workspace }}/.fhir-cache
-          RUST_SUSHI_BIN: ${{ github.workspace }}/vendor/sushi-rs/target/release/rust_sushi
         run: CHECK=1 bash scripts/gen-packages-list.sh
 
       # The engine's package-deps shim gate needs its separate eight-IG snapshot

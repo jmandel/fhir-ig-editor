@@ -8,6 +8,14 @@ import sys
 
 def main() -> None:
     d = json.load(sys.stdin)
+    if not d.get("satisfied", False):
+        missing = d.get("missing", [])
+        print(
+            "gen-packages-list: resolver closure is incomplete; "
+            f"populate the exact missing packages first: {json.dumps(missing, separators=(',', ':'))}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     seen = []
 
     def add(p):

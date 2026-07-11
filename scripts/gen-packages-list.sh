@@ -20,21 +20,6 @@ ENGINE="$REPO/vendor/sushi-rs"
 IG_DIR="$REPO/vendor/cycle"
 LIST="$HERE/packages.list"
 CACHE="${FHIR_CACHE:?set FHIR_CACHE to a populated packages dir (scripts/fetch-packages.sh)}"
-if [ -n "${RUST_SUSHI_BIN:-}" ]; then
-  BIN="$RUST_SUSHI_BIN"
-  [ -x "$BIN" ] || {
-    echo "[gen-packages-list] RUST_SUSHI_BIN is not executable: $BIN" >&2
-    exit 2
-  }
-else
-  # A target binary can survive a submodule update and silently generate a
-  # closure using the previous resolver. Always let Cargo validate the default
-  # binary against the current engine sources; incremental no-op builds are
-  # cheap. CI may pass its just-built binary explicitly.
-  echo "[gen-packages-list] ensuring rust_sushi matches the engine checkout"
-  ( cd "$ENGINE" && cargo build --release -p rust_sushi >/dev/null )
-  BIN="$ENGINE/target/release/rust_sushi"
-fi
 
 # The header (documentation) is preserved verbatim; only the label lines are
 # regenerated from the resolver.
@@ -77,7 +62,12 @@ EOF
 )"
 
 # Resolve the project, union compile_set + context_closure, then append r5.core.
-STEP_JSON="$("$BIN" resolve --cache "$CACHE" --project "$IG_DIR")"
+# Resolve through Cargo from the pinned checkout. A target binary can survive a
+# submodule update; executing it by path allowed a schema-2 binary to make a
+# local drift check disagree with schema-3 CI. `cargo run` validates the binary
+# against these sources and is an incremental no-op after CI's native build.
+STEP_JSON="$(cd "$ENGINE" && cargo run --quiet --release -p rust_sushi -- \
+  resolve --cache "$CACHE" --project "$IG_DIR")"
 LABELS="$(printf '%s' "$STEP_JSON" | python3 "$HERE/_union-closure.py")"
 
 # The snapshot-engine special: r5.core, pinned to the cached major.
