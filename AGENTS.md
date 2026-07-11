@@ -41,9 +41,9 @@ asset side channels, host callbacks, or parallel serialized build formats.
 
 Dependency landing receipts for this overhaul:
 
-- `jmandel/sushi-rs` `579cacf4` is pushed to `snapshot-gen` and `main`.
+- `jmandel/sushi-rs` `2de40588` is pushed to `snapshot-gen` and `main`.
 - `jmandel/cycle` `9aba386` is pushed to `main`.
-- The editor pins those commits and rebuilds WASM from `579cacf4`; its local
+- The editor pins those commits and rebuilds WASM from `2de40588`; its local
   gate is necessary but the GitHub Pages workflow remains the deployment
   authority.
 
@@ -78,6 +78,10 @@ Dependency landing receipts for this overhaul:
 - Resolver schema 3 roots context traversal at every compile-set member. Exact
   automatic/transitive package dependencies are acquired without retargeting;
   the mCODE multi-version extensions case is covered.
+- Native Fig preserves every exact coordinate in a multi-version closure and
+  resolves each manifest dependency from its own requested version. The Cycle
+  v2 integration therefore supports simultaneous automatic-latest and exact
+  transitive terminology/extensions versions without by-id retargeting.
 - Publisher preparation now allows source-less navigation only for explicitly
   generated non-Markdown pages. Missing authored Markdown still fails loudly;
   this fixes mCODE's generated `artifacts.html` without a slug special case.
@@ -90,7 +94,7 @@ Dependency landing receipts for this overhaul:
 - The package-list drift recipe resolves through `cargo run` from the pinned
   engine checkout. It accepts no ambient binary override, so a stale target
   executable cannot make a local drift check disagree with CI; the generated
-  exact-version ordering is refreshed from `579cacf4`. The union helper also
+  exact-version ordering is refreshed from `2de40588`. The union helper also
   rejects an unsatisfied resolver result instead of writing a partial list from
   an incomplete cache.
 - Node WASM parity/consistency gates construct isolated `Session` handles; no
