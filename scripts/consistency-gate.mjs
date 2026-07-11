@@ -50,6 +50,7 @@ if (typeof mod.Session !== 'function') {
   console.error('FATAL: wasm module lacks Session (rebuild the wasm)');
   process.exit(2);
 }
+const session = new mod.Session();
 
 /** Recursively flatten an expansion's `contains` into a sorted set of `system|code`. */
 function memberSet(expansion) {
@@ -69,7 +70,7 @@ function memberSet(expansion) {
  *  golden `expansion`, on the shared DOMAIN (the `system|code` set). Returns
  *  { ok, detail }. */
 function compareOnDomain(vs, refs, goldenExpansion) {
-  const env = JSON.parse(mod.Session.global().expandValueSet(JSON.stringify(vs), JSON.stringify(refs ?? [])));
+  const env = JSON.parse(session.expandValueSet(JSON.stringify(vs), JSON.stringify(refs ?? [])));
   if (!env.ok) throw new Error(`expandValueSet transport error: ${env.error?.message}`);
   const raw = env.result; // old-export payload verbatim: {ok, expansion, ...} | {ok:false, notEnumerable}
   if (!raw.ok) {

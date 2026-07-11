@@ -93,6 +93,8 @@ Dependency landing receipts for this overhaul:
   exact-version ordering is refreshed from `579cacf4`. The union helper also
   rejects an unsatisfied resolver result instead of writing a partial list from
   an incomplete cache.
+- Node WASM parity/consistency gates construct isolated `Session` handles; no
+  active editor, script, or workflow calls the deleted `Session.global()`.
 
 ## Current verification
 

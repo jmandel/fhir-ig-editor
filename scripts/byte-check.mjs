@@ -47,7 +47,7 @@ const LABELS = [
   'hl7.fhir.uv.extensions.r4#5.3.0',
   'hl7.fhir.r5.core#5.0.0',
 ];
-const session = mod.Session.global();
+const session = new mod.Session();
 {
   const env = JSON.parse(session.init(JSON.stringify(LABELS.map((label) => ({ label, files: untarGz(path.join(BUNDLE_DIR, `${label}.tgz`)) })))));
   if (!env.ok) throw new Error(`session.init failed: ${env.error?.message}`);
