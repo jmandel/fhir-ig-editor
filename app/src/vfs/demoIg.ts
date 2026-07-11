@@ -1,4 +1,4 @@
-// "Open demo IG" (spec §5, mode 1): hydrate the project store from the baked
+// Tiny-guide entry action (spec §5, mode 1): hydrate the project store from the baked
 // cycle IG manifest. scripts/export-ig-manifest.ts exports the cycle submodule's
 // sushi-config.yaml + input/fsh/** + input/resources/** into
 // public/data/cycle/manifest.json (a single JSON with inlined file text), so one

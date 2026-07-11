@@ -229,15 +229,16 @@ unrelated WASM module.
 - Templates with unrecognized custom `ant` hooks are refused; no browser path
   executes Ant. Standard template effects are reproduced in Rust except for the
   PlantUML derivation boundary below.
-- The catalog/live-GitHub source loaders currently retain a Publisher-oriented
-  allowlist rather than the complete project input tree. In particular,
-  `input/images-source/*.plantuml` and project-local `#template` directories are
-  not captured. Safe references to generator-owned products do not reject an
-  otherwise renderable guide, but the corresponding derived figure can be
-  absent. The coherent fix is complete source capture plus a generator-owned
-  content-addressed derivation (or authenticated precomputed result) bound to
-  exact template/tool/options—not another guessed path allowlist or authored-
-  asset side channel.
+- The catalog/live-GitHub loaders capture the supported Publisher roots
+  (`input/pagecontent`, `input/pages`, `input/intro-notes`,
+  `input/resource-docs`, `input/includes`, `input/data`, `input/resources`,
+  `input/examples`, `input/images`, and `input/images-source`), but still do not
+  capture an arbitrary project-local `#template` tree. PlantUML source is therefore part
+  of PreparedGuide identity even though the browser does not yet execute the
+  PlantUML derivation, so its generated figure can still be absent. The coherent
+  completion is a generator-owned content-addressed result bound to exact
+  source/template/tool/options (or an authenticated precomputed result), not an
+  authored-asset side channel.
 - Publisher and Cycle both use the common immutable four-operation host API;
   no compatibility database is a supported renderer input.
 - Large catalog guides are sampled by the browser gate rather than exhaustively

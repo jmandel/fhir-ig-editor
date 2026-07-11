@@ -317,19 +317,24 @@ export class ProjectStore {
     };
   }
 
-  /** Exact site-source input for compileProject/SiteBuild: pagecontent,
-   * includes, data, resources, and images as `path -> base64`. */
+  /** Exact authored Publisher input for compileProject/PreparedGuide: pages,
+   * resource narratives, includes, data, generator sources, resources, and
+   * images as `path -> base64`. */
   siteFiles(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [p, t] of this.cache) {
       if (
         p.startsWith('input/pagecontent/') ||
+        p.startsWith('input/pages/') ||
         p.startsWith('input/includes/') ||
+        p.startsWith('input/intro-notes/') ||
+        p.startsWith('input/resource-docs/') ||
+        p.startsWith('input/images-source/') ||
         // input/data/* are the IG-authored site.data files the publisher copies
         // into temp/pages/_data/*; Publisher preparation stages them alongside
         // the producer-emitted _data model.
         p.startsWith('input/data/') ||
-        (p.startsWith('input/resources/') && p.endsWith('.json'))
+        ((p.startsWith('input/resources/') || p.startsWith('input/examples/')) && p.endsWith('.json'))
       ) {
         out[p] = utf8ToBase64(t);
       }
@@ -345,11 +350,13 @@ export class ProjectStore {
     return out;
   }
 
-  /** Predefined JSON resources under input/resources/** — the compile input. */
+  /** Authored local FHIR resources under input/{resources,examples}/**.json.
+   * Both roots cross the compiler boundary through this one map; the exact
+   * source path retains SUSHI's folder-specific publication semantics. */
   predefinedResources(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const [p, t] of this.cache) {
-      if (p.startsWith('input/resources/') && p.endsWith('.json')) {
+      if ((p.startsWith('input/resources/') || p.startsWith('input/examples/')) && p.endsWith('.json')) {
         // Fail before compilation rather than silently dropping an authored
         // resource. Rust independently validates the raw site-file copy too.
         out[p] = JSON.parse(t);
@@ -358,8 +365,8 @@ export class ProjectStore {
     return out;
   }
 
-  /** Predefined conformance resources (input/resources/**.json) shaped like the
-   *  compiler's CompiledResource, for the "Compiled resources" panel. A
+  /** Authored local resources (input/{resources,examples}/**.json) shaped like the
+   *  compiler's CompiledResource, for the Definitions workspace. A
    *  predefined-resource IG (0 FSH; e.g. US Core, IPS) authors its profiles as
    *  input/resources JSON, so SUSHI emits nothing — without these the panel is
    *  empty even though the IG is full of conformance resources. These are
@@ -370,10 +377,18 @@ export class ProjectStore {
     resourceType?: string;
     id?: string;
     url?: string;
+    definition: { kind: 'predefined-resource'; path: string; line: number; column: number };
   }> {
-    const out: Array<{ filename: string; text: string; resourceType?: string; id?: string; url?: string }> = [];
+    const out: Array<{
+      filename: string;
+      text: string;
+      resourceType?: string;
+      id?: string;
+      url?: string;
+      definition: { kind: 'predefined-resource'; path: string; line: number; column: number };
+    }> = [];
     for (const [p, t] of this.cache) {
-      if (!(p.startsWith('input/resources/') && p.endsWith('.json'))) continue;
+      if (!((p.startsWith('input/resources/') || p.startsWith('input/examples/')) && p.endsWith('.json'))) continue;
       let body: Record<string, unknown>;
       try {
         body = JSON.parse(t) as Record<string, unknown>;
@@ -386,6 +401,7 @@ export class ProjectStore {
         resourceType: typeof body.resourceType === 'string' ? body.resourceType : undefined,
         id: typeof body.id === 'string' ? body.id : undefined,
         url: typeof body.url === 'string' ? body.url : undefined,
+        definition: { kind: 'predefined-resource', path: p, line: 1, column: 0 },
       });
     }
     out.sort((a, b) => a.filename.localeCompare(b.filename));

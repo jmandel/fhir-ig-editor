@@ -4,13 +4,14 @@
 import Editor from '@monaco-editor/react';
 import { configureMonaco } from '../editor/monacoSetup';
 import type { CompiledResource } from '../worker/protocol';
+import { resourceIdentity } from './artifactSelection';
 
 configureMonaco();
 
 export function ResourceJson({ resource }: { resource: CompiledResource }) {
   return (
     <Editor
-      path={`__view__/${resource.filename}`}
+      path={`__view__/${encodeURIComponent(resourceIdentity(resource))}.json`}
       language="json"
       value={resource.text}
       theme="vs-dark"

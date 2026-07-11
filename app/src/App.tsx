@@ -2,7 +2,7 @@
 // compile/site builds in the worker, publishes only the latest preview
 // generation, and wires Monaco/resource/snapshot/diagnostic views.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { EngineClient, PrepareError } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import { ProjectStore } from './vfs/store';
@@ -27,6 +27,11 @@ const GENERATORS = [
   { id: CYCLE_GENERATOR, label: 'Cycle site generator (LiquidJS)' },
   { id: PUBLISHER_GENERATOR, label: 'FHIR IG Publisher template (Rust)' },
 ] as const;
+const WORKSPACE_MODES: Array<[WorkspaceMode, string]> = [
+  ['author', 'Author'],
+  ['explore', 'Explore'],
+  ['preview', 'Site preview'],
+];
 import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
@@ -35,12 +40,32 @@ import { BuildStatus } from './views/BuildStatus';
 import { PreviewPane } from './views/PreviewPane';
 import { TxSettings } from './views/TxSettings';
 import { PackageSettings } from './views/PackageSettings';
+import { BuildSettings } from './views/BuildSettings';
+import { ArtifactTrail } from './views/ArtifactTrail';
+import {
+  mergeResourcesByIdentity,
+  primaryPageForResource,
+  resourceIdentity,
+  resourceForSubject,
+  soleResourceDeclaredIn,
+} from './views/artifactSelection';
+import {
+  BuildStateBadge,
+  deriveBuildState,
+  ProjectOverview,
+  type WorkspaceMode,
+} from './views/ProjectOverview';
 import type { ProgressEvent } from './worker/protocol';
 
 const DEBOUNCE_MS = 300;
 
 interface ProjectBuildSnapshot extends ProjectInput {
   predefinedDisplay: CompileResult['resources'];
+}
+
+interface BuildOutcome {
+  ok: boolean;
+  error?: string;
 }
 
 function generatorSpec(id: string, templateCoordinate: string): GeneratorSpec {
@@ -67,6 +92,11 @@ function captureProject(st: ProjectStore, projectId: string): ProjectBuildSnapsh
   };
 }
 
+function projectDisplayName(projectId: string): string {
+  if (projectId === 'cycle') return 'Period Tracking Implementation Guide';
+  return CATALOG_IGS.find((guide) => guide.id === projectId)?.name ?? projectId;
+}
+
 /** Machine-readable trace consumed by the persistent-profile benchmark. */
 function recordRuntimeMetric(event: ProgressEvent): void {
   const debug = (window as unknown as {
@@ -91,7 +121,7 @@ export function App() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   // Project-open progress: while a baked project is opening/switching (US Core,
   // demo IG) we surface the SAME staged progress the boot path shows — otherwise
-  // the ~14 MB of bundle fetch + mount + compile + snapshot looks hung (mobile).
+  // the package fetch + mount + compile + site preparation looks hung (mobile).
   // `openingSince` is the start ms so the overlay can show elapsed seconds even on
   // indeterminate stages; null = not opening.
   const [openingSince, setOpeningSince] = useState<number | null>(null);
@@ -108,24 +138,38 @@ export function App() {
   const [revealLine, setRevealLine] = useState<number | undefined>(undefined);
 
   const [compile, setCompile] = useState<CompileResult | null>(null);
-  // Predefined conformance resources (input/resources/**.json) for the resource
-  // panel — a predefined-resource IG (US Core / IPS: 0 FSH) has SUSHI emit
-  // nothing, so without these the panel is empty though the IG is full of
-  // profiles. Captured at compile time (parallel to `compile.resources`, which
-  // stays byte-exact SUSHI output).
+  // Authored local resources (input/{resources,examples}/**.json) for Explore.
+  // SUSHI consumes them without re-emitting them as compiler outputs, so retain
+  // their exact source declarations beside the byte-exact compiled list.
   const [predefinedResources, setPredefinedResources] = useState<CompileResult['resources']>([]);
   const [compiling, setCompiling] = useState(false);
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
+  const [resourceFilter, setResourceFilter] = useState('');
   const [projectLoaded, setProjectLoaded] = useState(false);
+  const [projectName, setProjectName] = useState(() => projectDisplayName(projectIdRef.current));
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(
+    () => projectIdRef.current === 'cycle' ? 'author' : 'explore',
+  );
+  // Expensive surfaces mount on first use, then remain mounted so Monaco state
+  // and preview scroll/history survive mode switches without doing hidden work
+  // during an ordinary published-guide open.
+  const [activatedModes, setActivatedModes] = useState<Set<WorkspaceMode>>(
+    () => new Set([projectIdRef.current === 'cycle' ? 'author' : 'explore']),
+  );
+  const activateWorkspace = useCallback((mode: WorkspaceMode) => {
+    setActivatedModes((current) => current.has(mode) ? current : new Set([...current, mode]));
+    setWorkspaceMode(mode);
+  }, []);
+  const [previewStale, setPreviewStale] = useState(false);
 
   // task #32: packages the runtime resolver could not obtain from any source.
   const [blockedPackages, setBlockedPackages] = useState<BlockedPackage[]>([]);
   // Site preview (immutable BuildHandle-driven).
-  const [inspectTab, setInspectTab] = useState<'resource' | 'preview'>('resource');
   const [generatorId, setGeneratorId] = useState<string>(
     () => localStorage.getItem(GENERATOR_KEY) || 'cycle',
   );
   const [sitePages, setSitePages] = useState<OutputDescriptor[] | null>(null);
+  const [selectedSitePage, setSelectedSitePage] = useState('index.html');
   const [siteIgId, setSiteIgId] = useState(projectIdRef.current);
   // Use a process-epoch seed so a reloaded editor always advances beyond cache
   // generations retained by an older Service Worker session.
@@ -152,7 +196,11 @@ export function App() {
     localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
   );
   // Preview-window (task #37): whether the SW-backed preview is supported here.
-  const [previewCapable, setPreviewCapable] = useState(false);
+  const [previewCapable, setPreviewCapable] = useState<boolean | null>(null);
+  const resources = useMemo(
+    () => compile ? mergeResourcesByIdentity(compile.resources, predefinedResources) : [],
+    [compile, predefinedResources],
+  );
 
   // ---- boot: engine + store ------------------------------------------------
   useEffect(() => {
@@ -193,6 +241,7 @@ export function App() {
       // If OPFS already has a project (reload), compile it immediately.
       if (st.list().length > 0) {
         setProjectLoaded(true);
+        setProjectName(projectDisplayName(projectIdRef.current));
         void runCompile(st, engine);
       }
     })();
@@ -256,14 +305,12 @@ export function App() {
     const showCompiled = (compiled: CompileResult) => {
       if (!lease.isLatest()) return;
       setCompile(compiled);
-      const sushiNames = new Set(compiled.resources.map((resource) => resource.filename));
-      const predef = project.predefinedDisplay.filter((resource) => !sushiNames.has(resource.filename));
-      setPredefinedResources(predef);
-      const allResources = [...compiled.resources, ...predef];
+      setPredefinedResources(project.predefinedDisplay);
+      const allResources = mergeResourcesByIdentity(compiled.resources, project.predefinedDisplay);
       setSelectedResource((current) => {
-        if (current && allResources.some((resource) => resource.filename === current)) return current;
+        if (current && allResources.some((resource) => resourceIdentity(resource) === current)) return current;
         const first = allResources.find((resource) => resource.resourceType === 'StructureDefinition' && resource.url);
-        return first?.filename ?? allResources[0]?.filename ?? null;
+        return first ? resourceIdentity(first) : allResources[0] ? resourceIdentity(allResources[0]) : null;
       });
     };
     try {
@@ -313,10 +360,18 @@ export function App() {
       siteGenerationRef.current = nextGeneration;
       setSiteIgId(project.projectId);
       setSitePages(pages);
+      setSelectedSitePage((current) => {
+        if (pages.some((page) => page.path === current)) return current;
+        return pages.find((page) => page.path === 'en/index.html' || page.path === 'index.html')?.path
+          ?? pages[0]?.path
+          ?? 'index.html';
+      });
+      setPreviewStale(false);
     } catch (e) {
       if (lease.isLatest()) {
         if (e instanceof PrepareError && e.compiled) showCompiled(e.compiled);
         setSiteError(String(e));
+        setPreviewStale(true);
         throw e; // let selectTemplate see the failure so it can fall back
       }
     } finally {
@@ -343,6 +398,7 @@ export function App() {
   const switchGenerator = useCallback((id: string) => {
     localStorage.setItem(GENERATOR_KEY, id);
     setGeneratorId(id);
+    setPreviewStale(true);
     if (storeRef.current && engineRef.current) {
       void enqueueSiteBuild(storeRef.current, engineRef.current, id).catch(() => {});
     }
@@ -358,6 +414,7 @@ export function App() {
     localStorage.setItem(TEMPLATE_KEY, coord);
     setTemplateCoord(coord);
     setTemplateError(null);
+    setPreviewStale(true);
     if (!storeRef.current || !engineRef.current) return;
     void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch((e) => {
       // Revert to the last template that loaded — never leave the preview wedged.
@@ -371,19 +428,21 @@ export function App() {
   }, [enqueueSiteBuild]);
 
   // ---- prepare full project + selected generator in one worker request ------
-  const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient) => {
-    if (!engine.initialized) return;
+  const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient): Promise<BuildOutcome> => {
+    if (!engine.initialized) return { ok: false, error: 'engine is not initialized' };
     // Snapshot before entering the queue: loading another IG or typing while an
     // older wasm operation finishes cannot change this request's inputs midway.
     const project = captureProject(st, projectIdRef.current);
     const genId = localStorage.getItem(GENERATOR_KEY) || 'cycle';
     const selectedTemplate = localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
+    let failure: unknown = null;
     await buildQueueRef.current.enqueue(async (lease) => {
       if (lease.isLatest()) setCompiling(true);
       try {
         await performBuildSite(project, engine, genId, selectedTemplate, lease);
         if (lease.isLatest()) setBlockedPackages([]);
       } catch (e) {
+        failure = e;
         if (lease.isLatest() && e instanceof PrepareError && e.stage === 'compile') {
           setPredefinedResources([]);
           setCompile({
@@ -397,6 +456,7 @@ export function App() {
         setCompiling(false);
       }
     });
+    return failure == null ? { ok: true } : { ok: false, error: String(failure) };
   }, [performBuildSite]);
 
   // ---- debounced compile on edit ------------------------------------------
@@ -417,9 +477,15 @@ export function App() {
     // catalog fetch mutates the shared ProjectStore.
     buildQueueRef.current.invalidate();
     setSiteBuilding(false);
+    setProjectLoaded(false);
+    setCompile(null);
+    setPredefinedResources([]);
+    setSelectedResource(null);
+    setPreviewStale(false);
+    if (siteIgId !== projectId) setSitePages(null);
     // Surface the SAME staged progress the boot path shows for the whole open:
     // manifest fetch → package acquisition (bundle fetch/mount) → compile →
-    // snapshot data mount → site render. Every stage flows through `setProgress`;
+    // site render. Every stage flows through `setProgress`;
     // `openingSince` keeps the overlay mounted (with elapsed seconds) across the
     // inner cb swaps runCompile/runBuildSite make. Without this the open is a bare
     // "Loading …" statusline while ~14 MB streams — indistinguishable from hung.
@@ -439,10 +505,14 @@ export function App() {
     // the preview generator per project so a published IG never opens with the
     // Cycle-specific generator selected.
     const defaultGen = projectId === 'cycle' ? CYCLE_GENERATOR : PUBLISHER_GENERATOR;
+    const initialMode: WorkspaceMode = projectId === 'cycle' ? 'author' : 'explore';
+    setActivatedModes(new Set([initialMode]));
+    setWorkspaceMode(initialMode);
     localStorage.setItem(GENERATOR_KEY, defaultGen);
     setGeneratorId(defaultGen);
     try {
       const meta = await loadProject(store, projectId, emit);
+      setProjectName(meta.name || projectDisplayName(projectId));
       setProjectLoaded(true);
       emit({ stage: 'bundle-mount', message: `Loaded ${meta.name} — ${meta.fileCount} files. Compiling…` });
       // Open the first FSH file (or first pagecontent md for FSH-less projects).
@@ -455,10 +525,13 @@ export function App() {
         setActivePath(first);
         setActiveText(store.read(first) ?? '');
       }
-      // runCompile drives acquisition (bundle fetch/mount), compile, snapshot, and
-      // the site render — all of which report through the engine progress cb we
+      // runCompile drives acquisition (bundle fetch/mount), compile, and the site
+      // render — all of which report through the engine progress cb we
       // set above. Await it so the overlay stays up until the project is usable.
-      if (engine) await runCompile(store, engine);
+      if (engine) {
+        const outcome = await runCompile(store, engine);
+        if (!outcome.ok) throw new Error(outcome.error ?? 'build failed');
+      }
       emit({ stage: 'ready', message: `${meta.name} ready.` });
     } catch (e) {
       // Surface the failure VISIBLY (persistent banner) — a fetch/CORS/HTTP/parse
@@ -470,7 +543,7 @@ export function App() {
       engine?.setProgress(null);
       setOpeningSince(null);
     }
-  }, [store, runCompile]);
+  }, [store, runCompile, siteIgId]);
   const openDemo = useCallback(() => openProject('cycle'), [openProject]);
 
   // ---- edit handling -------------------------------------------------------
@@ -479,6 +552,7 @@ export function App() {
       if (!store || !activePath) return;
       setActiveText(text);
       void store.write(activePath, text);
+      setPreviewStale(true);
       scheduleCompile();
     },
     [store, activePath, scheduleCompile],
@@ -490,8 +564,11 @@ export function App() {
       setActivePath(path);
       setActiveText(store.read(path) ?? '');
       setRevealLine(undefined);
+      const declared = soleResourceDeclaredIn(resources, path);
+      setSelectedResource(declared ? resourceIdentity(declared) : null);
+      activateWorkspace('author');
     },
-    [store],
+    [store, resources, activateWorkspace],
   );
 
   const navigateTo = useCallback(
@@ -515,8 +592,42 @@ export function App() {
     return m;
   }, [diagnostics]);
 
-  const resources = compile ? [...compile.resources, ...predefinedResources] : [];
-  const activeResource = resources.find((r) => r.filename === selectedResource) ?? null;
+  const activeResource = resources.find((resource) => resourceIdentity(resource) === selectedResource) ?? null;
+  const currentProjectPages = siteIgId === projectIdRef.current ? sitePages : null;
+  const selectedResourcePage = primaryPageForResource(currentProjectPages, activeResource);
+  const normalizedResourceFilter = resourceFilter.trim().toLocaleLowerCase();
+  const filteredResources = normalizedResourceFilter
+    ? resources.filter((resource) => `${resource.resourceType ?? ''}/${resource.id ?? ''} ${resource.filename}`.toLocaleLowerCase().includes(normalizedResourceFilter))
+    : resources;
+  const selectResourceBySubject = (subject: OutputDescriptor['subject']) => {
+    const resource = resourceForSubject(resources, subject);
+    if (resource) setSelectedResource(resourceIdentity(resource));
+  };
+  const selectSitePage = (path: string) => {
+    setSelectedSitePage(path);
+    const page = currentProjectPages?.find((candidate) => candidate.path === path);
+    if (page?.subject) selectResourceBySubject(page.subject);
+  };
+  const onWorkspaceTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, mode: WorkspaceMode) => {
+    const current = WORKSPACE_MODES.findIndex(([candidate]) => candidate === mode);
+    let next = current;
+    if (event.key === 'ArrowRight') next = (current + 1) % WORKSPACE_MODES.length;
+    else if (event.key === 'ArrowLeft') next = (current - 1 + WORKSPACE_MODES.length) % WORKSPACE_MODES.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = WORKSPACE_MODES.length - 1;
+    else return;
+    event.preventDefault();
+    const nextMode = WORKSPACE_MODES[next][0];
+    activateWorkspace(nextMode);
+    requestAnimationFrame(() => document.getElementById(`workspace-tab-${nextMode}`)?.focus());
+  };
+  const buildState = deriveBuildState({
+    previewStale,
+    compiling,
+    siteBuilding,
+    hasPublishedPreview: Boolean(currentProjectPages),
+    hasError: Boolean(siteError),
+  });
 
   return (
     <div className="app">
@@ -524,35 +635,43 @@ export function App() {
         <div className="brand">
           <span className="brand-mark">◈</span> FHIR IG Editor
         </div>
-        <BuildStatus
-          version={version}
-          initMs={initMs}
-          buildMs={compile?.buildMs ?? null}
-          resourceCount={compile ? resources.length : null}
-          fileCount={compile?.fileCount ?? null}
-          compiling={compiling}
-        />
+        {projectLoaded && <span className="topbar-project">{projectName}</span>}
         <div className="topbar-actions">
           {store && !store.persistent && (
             <span className="badge-warn" title="OPFS unavailable — project is in-memory only">
               in-memory
             </span>
           )}
-          <PackageSettings
-            onChange={() => {
-              // A registry/proxy/local-package change may unblock packages — allow
-              setSettingsVersion((v) => v + 1);
-            }}
-            onDropTgz={async (bytes) => {
-              const label = (await engineRef.current?.ingestLocalTgz(bytes)) ?? '';
-              if (store && engineRef.current) void runCompile(store, engineRef.current);
-              return label;
-            }}
-          />
-          <TxSettings onChange={() => setSettingsVersion((v) => v + 1)} />
-          <button className="btn" disabled={!engineReady} onClick={openDemo}>
-            Open demo IG
-          </button>
+          {projectLoaded && <BuildStateBadge state={buildState} />}
+          {projectLoaded && (
+            <BuildSettings
+              generatorId={generatorId}
+              generators={[...GENERATORS]}
+              onSelectGenerator={switchGenerator}
+              currentTemplate={templateCoord}
+              onSelectTemplate={selectTemplate}
+              templateCatalogs={templateCatalogs}
+              templateError={templateError}
+            >
+              <BuildStatus
+                version={version}
+                initMs={initMs}
+                buildMs={compile?.buildMs ?? null}
+                resourceCount={compile ? resources.length : null}
+                fileCount={compile?.fileCount ?? null}
+                compiling={compiling}
+              />
+              <PackageSettings
+                onChange={() => setSettingsVersion((value) => value + 1)}
+                onDropTgz={async (bytes) => {
+                  const label = (await engineRef.current?.ingestLocalTgz(bytes)) ?? '';
+                  if (store && engineRef.current) void runCompile(store, engineRef.current);
+                  return label;
+                }}
+              />
+              <TxSettings onChange={() => setSettingsVersion((value) => value + 1)} />
+            </BuildSettings>
+          )}
           <select
             className="btn btn-featured open-ig-select"
             disabled={!engineReady}
@@ -565,8 +684,9 @@ export function App() {
             }}
           >
             <option value="" disabled>
-              Open published IG…
+              Switch guide…
             </option>
+            <option value="cycle">Tiny FSH demo</option>
             {CATALOG_IGS.map((ig) => (
               <option key={ig.id} value={ig.id}>
                 {ig.name}
@@ -578,40 +698,81 @@ export function App() {
 
       <div className="statusline">{status}</div>
 
-      {blockedPackages.length > 0 && (
-        <div className="blocked-banner" role="alert">
-          <strong>
-            {blockedPackages.length} package{blockedPackages.length > 1 ? 's' : ''} could not be
-            loaded:
-          </strong>
-          <ul>
-            {blockedPackages.map((b) => (
-              <li key={`${b.packageId}#${b.version}`}>
-                <code>
-                  {b.packageId}#{b.version}
-                </code>{' '}
-                — {b.why}
-                <div className="blocked-remedies">
-                  Remedies: {b.remedies.join(' · ')}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <div className="status-area">
+        {blockedPackages.length > 0 && (
+          <div className="blocked-banner" role="alert">
+            <strong>
+              {blockedPackages.length} package{blockedPackages.length > 1 ? 's' : ''} could not be
+              loaded:
+            </strong>
+            <ul>
+              {blockedPackages.map((b) => (
+                <li key={`${b.packageId}#${b.version}`}>
+                  <code>
+                    {b.packageId}#{b.version}
+                  </code>{' '}
+                  — {b.why}
+                  <div className="blocked-remedies">
+                    Remedies: {b.remedies.join(' · ')}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {openError && (
+          <div className="open-error" role="alert">
+            <div className="open-error-body">
+              <strong>Couldn't open {openError.projectId}.</strong> {openError.message}
+            </div>
+            <div className="open-error-actions">
+              <button className="btn" onClick={() => void openProject(openError.projectId)}>
+                Retry
+              </button>
+              <button className="btn" onClick={() => setOpenError(null)} aria-label="Dismiss">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+        {openingSince != null && progress && (
+          <OpenProgress progress={progress} since={openingSince} />
+        )}
+        {projectLoaded && progress && !engineReady && openingSince == null && (
+          <div className="lazy-progress" title={progress.message}>{progress.message}</div>
+        )}
+      </div>
 
       {!projectLoaded ? (
         <div className="welcome">
           <div className="welcome-card">
-            <h1>Edit a FHIR IG in your browser</h1>
-            <p>
-              The rust_sushi compiler and the snapshot walk engine run entirely as WebAssembly in a
-              Web Worker — no server. Edit FSH, see live diagnostics, compiled JSON, the differential,
-              and the generated snapshot element tree. Works offline after the first load.
-            </p>
-            <button className="btn btn-primary" disabled={!engineReady} onClick={openDemo}>
-              {engineReady ? 'Open the demo IG (cycle)' : 'Starting engine…'}
-            </button>
+            <div className="welcome-eyebrow">FHIR authoring, compiled and published in your browser</div>
+            <h1>See one guide from source to published page</h1>
+            <p>Make a small FSH change, inspect the definition it creates, and navigate the resulting implementation guide—all without installing a toolchain.</p>
+            <div className="welcome-actions">
+              <section className="welcome-action-card featured">
+                <span className="welcome-step">Start here</span>
+                <h2>Edit a tiny FSH guide</h2>
+                <p>Open a focused example, change a rule, and watch its definition and site update.</p>
+                <button className="btn btn-primary" disabled={!engineReady} onClick={openDemo}>
+                  {engineReady ? 'Edit the tiny guide' : 'Starting engine…'}
+                </button>
+              </section>
+              <section className="welcome-action-card">
+                <span className="welcome-step">Explore</span>
+                <h2>Explore a published guide</h2>
+                <p>Browse the source, profiles, diagnostics, and real site for a guide you know.</p>
+                <select
+                  className="btn landing-ig-select"
+                  disabled={!engineReady}
+                  value=""
+                  onChange={(event) => { if (event.target.value) void openProject(event.target.value); }}
+                >
+                  <option value="" disabled>Choose a guide…</option>
+                  {CATALOG_IGS.map((guide) => <option key={guide.id} value={guide.id}>{guide.name}</option>)}
+                </select>
+              </section>
+            </div>
             {!engineReady && progress && <StartupProgress progress={progress} />}
             {version && (
               <div className="welcome-engine">
@@ -621,131 +782,140 @@ export function App() {
           </div>
         </div>
       ) : (
-        <div className="workbench">
-          <aside className="sidebar">
-            <div className="sidebar-header">Files</div>
-            <FileTree
-              paths={paths}
-              active={activePath}
-              errorCounts={errorCounts}
-              onSelect={selectFile}
-            />
-            {resources.length > 0 && (
-              <>
-                <div className="sidebar-header">Compiled resources</div>
+        <div className="workspace-shell">
+          <ProjectOverview
+            projectId={projectIdRef.current}
+            projectName={projectName}
+            paths={paths}
+            resources={resources}
+            pages={currentProjectPages}
+            diagnostics={diagnostics}
+            buildState={buildState}
+            onOpenMode={activateWorkspace}
+          />
+          <ArtifactTrail
+            resource={activeResource}
+            page={selectedResourcePage}
+            onOpenSource={() => {
+              if (!activeResource?.definition || !store) return;
+              setActivePath(activeResource.definition.path);
+              setActiveText(store.read(activeResource.definition.path) ?? '');
+              setRevealLine(activeResource.definition.line);
+              activateWorkspace('author');
+            }}
+            onOpenDefinition={() => activateWorkspace('explore')}
+            onOpenPreview={() => {
+              if (!selectedResourcePage) return;
+              setSelectedSitePage(selectedResourcePage.path);
+              activateWorkspace('preview');
+            }}
+          />
+          <nav className="inspect-tabs workspace-tabs" role="tablist" aria-label="Workspace mode">
+            {WORKSPACE_MODES.map(([mode, label]) => (
+              <button
+                key={mode}
+                id={`workspace-tab-${mode}`}
+                role="tab"
+                aria-selected={workspaceMode === mode}
+                aria-controls={`workspace-panel-${mode}`}
+                tabIndex={workspaceMode === mode ? 0 : -1}
+                className={`inspect-tab${workspaceMode === mode ? ' active' : ''}`}
+                onClick={() => activateWorkspace(mode)}
+                onKeyDown={(event) => onWorkspaceTabKeyDown(event, mode)}
+              >
+                {label}
+                {mode === 'preview' && siteBuilding && <span className="tab-spinner" />}
+              </button>
+            ))}
+          </nav>
+          <div className="workspace-views" data-mode={workspaceMode}>
+            <section id="workspace-panel-author" role="tabpanel" aria-labelledby="workspace-tab-author" className="workspace-view author-workspace" hidden={workspaceMode !== 'author'}>
+              <aside className="sidebar source-sidebar">
+                <div className="sidebar-header">Source files</div>
+                <FileTree paths={paths} active={activePath} errorCounts={errorCounts} onSelect={selectFile} />
+              </aside>
+              <label className="mobile-picker">
+                Source file
+                <select value={activePath ?? ''} onChange={(event) => selectFile(event.target.value)}>
+                  <option value="" disabled>Select a source file…</option>
+                  {paths.map((path) => <option key={path} value={path}>{path}</option>)}
+                </select>
+              </label>
+              <main className="editor-pane">
+                {activatedModes.has('author') && activePath ? (
+                  <CodeEditor path={activePath} value={activeText} diagnostics={fileDiagnostics} onChange={onEdit} revealLine={revealLine} />
+                ) : <div className="panel-empty">Select a source file to edit.</div>}
+              </main>
+            </section>
+
+            <section id="workspace-panel-explore" role="tabpanel" aria-labelledby="workspace-tab-explore" className="workspace-view explore-workspace" hidden={workspaceMode !== 'explore'}>
+              <aside className="sidebar resource-sidebar">
+                <div className="sidebar-header">Definitions</div>
+                <label className="resource-filter">
+                  <span className="sr-only">Filter definitions</span>
+                  <input
+                    type="search"
+                    placeholder="Filter definitions…"
+                    value={resourceFilter}
+                    onChange={(event) => setResourceFilter(event.target.value)}
+                  />
+                </label>
                 <div className="resource-list">
-                  {resources.map((r) => (
-                    <div
-                      key={r.filename}
-                      className={`res-row${selectedResource === r.filename ? ' active' : ''}`}
-                      onClick={() => setSelectedResource(r.filename)}
-                      title={r.filename}
+                  {filteredResources.map((resource) => (
+                    <button
+                      key={resourceIdentity(resource)}
+                      className={`res-row${selectedResource === resourceIdentity(resource) ? ' active' : ''}`}
+                      onClick={() => { setSelectedResource(resourceIdentity(resource)); activateWorkspace('explore'); }}
+                      title={resource.filename}
                     >
-                      <span className="res-type">{r.resourceType}</span>
-                      <span className="res-id">{r.id}</span>
-                    </div>
+                      <span className="res-type">{resource.resourceType}</span>
+                      <span className="res-id">{resource.id}</span>
+                    </button>
                   ))}
                 </div>
-              </>
-            )}
-          </aside>
+              </aside>
+              <label className="mobile-picker">
+                Definition
+                <select value={selectedResource ?? ''} onChange={(event) => setSelectedResource(event.target.value)}>
+                  <option value="" disabled>Select a definition…</option>
+                  {filteredResources.map((resource) => {
+                    const identity = resourceIdentity(resource);
+                    return <option key={identity} value={identity}>{resource.resourceType}/{resource.id}</option>;
+                  })}
+                </select>
+              </label>
+              <section className="definition-pane">
+                {workspaceMode === 'explore' && !siteBuilding && activeResource && engineRef.current ? (
+                  <ResourceInspector resource={activeResource} allResources={resources} engine={engineRef.current} settingsVersion={settingsVersion} />
+                ) : <div className="panel-empty">Definitions will appear as soon as compilation completes.</div>}
+              </section>
+            </section>
 
-          <main className="editor-pane">
-            {activePath ? (
-              <CodeEditor
-                path={activePath}
-                value={activeText}
-                diagnostics={fileDiagnostics}
-                onChange={onEdit}
-                revealLine={revealLine}
-              />
-            ) : (
-              <div className="panel-empty">Select a file to edit.</div>
-            )}
-          </main>
-
-          <section className="inspect-pane">
-            <div className="inspect-tabs">
-              <button
-                className={`inspect-tab${inspectTab === 'resource' ? ' active' : ''}`}
-                onClick={() => setInspectTab('resource')}
-              >
-                Resource
-              </button>
-              <button
-                className={`inspect-tab${inspectTab === 'preview' ? ' active' : ''}`}
-                onClick={() => setInspectTab('preview')}
-              >
-                Site preview
-                {siteBuilding && <span className="tab-spinner" />}
-              </button>
-            </div>
-            <div className="inspect-body">
-              {inspectTab === 'resource' ? (
-                activeResource && engineRef.current ? (
-                  <ResourceInspector
-                    resource={activeResource}
-                    allResources={resources}
-                    engine={engineRef.current}
-                    settingsVersion={settingsVersion}
-                  />
-                ) : (
-                  <div className="panel-empty">No resource selected.</div>
-                )
-              ) : engineRef.current ? (
+            <section id="workspace-panel-preview" role="tabpanel" aria-labelledby="workspace-tab-preview" className="workspace-view preview-workspace" hidden={workspaceMode !== 'preview'}>
+              {activatedModes.has('preview') && engineRef.current ? (
                 <PreviewPane
                   igId={siteIgId}
-                  generatorId={generatorId}
-                  generators={[...GENERATORS]}
-                  onSelectGenerator={switchGenerator}
-                  pages={sitePages}
+                  pages={currentProjectPages}
                   building={siteBuilding}
                   error={siteError}
                   previewCapable={previewCapable}
-                  currentTemplate={templateCoord}
-                  onSelectTemplate={selectTemplate}
-                  templateError={templateError}
-                  templateCatalogs={templateCatalogs}
+                  currentPage={selectedSitePage}
+                  onSelectPage={selectSitePage}
                 />
-              ) : (
-                <div className="panel-empty">Engine not ready.</div>
-              )}
-            </div>
-          </section>
-        </div>
-      )}
-
-      {openError && (
-        <div className="open-error" role="alert">
-          <div className="open-error-body">
-            <strong>Couldn't open {openError.projectId}.</strong> {openError.message}
-          </div>
-          <div className="open-error-actions">
-            <button className="btn" onClick={() => void openProject(openError.projectId)}>
-              Retry
-            </button>
-            <button className="btn" onClick={() => setOpenError(null)} aria-label="Dismiss">
-              Dismiss
-            </button>
+              ) : <div className="panel-empty">Engine not ready.</div>}
+            </section>
           </div>
         </div>
-      )}
-
-      {openingSince != null && progress && (
-        <OpenProgress progress={progress} since={openingSince} />
-      )}
-      {projectLoaded && progress && !engineReady && openingSince == null && (
-        <div className="lazy-progress" title={progress.message}>{progress.message}</div>
       )}
 
       {projectLoaded && (
-        <footer className="problems">
-          <div className="problems-header">
+        <details className="problems">
+          <summary className="problems-header">
             Problems
             {diagnostics.length > 0 && <span className="problems-count">{diagnostics.length}</span>}
-          </div>
+          </summary>
           <DiagnosticsPanel diagnostics={diagnostics} onNavigate={navigateTo} />
-        </footer>
+        </details>
       )}
     </div>
   );

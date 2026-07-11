@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Export the baked default IG (spec §5, mode 1) from the cycle submodule into
 // app/public/data/cycle/manifest.json — a single JSON with every project file
-// inlined, so "Open demo IG" is one fetch + one OPFS hydrate (offline after first
+// inlined, so opening the tiny guide is one fetch + one OPFS hydrate (offline after first
 // load). Gitignored / regenerated here + in CI.
 //
 //   node scripts/export-ig-manifest.mjs
 //
 // Text files (`files`): sushi-config.yaml, input/fsh/**.fsh,
-// input/resources/**.json, input/pagecontent/**, input/includes/** — the compile
-// input AND the authored site content semantic preparation reads.
+// input/resources/**.json and the complete authored Publisher input roots — the
+// compile input AND the authored site content semantic preparation reads.
 // Binary files (`binaryFiles`, base64): input/images/**. Base64 is only this
 // catalog archive's JSON transport; preparation publishes ordinary ContentRefs.
 
@@ -56,13 +56,18 @@ function addBinary(abs) {
 }
 
 addText(path.join(CYCLE, 'sushi-config.yaml'));
+if (fs.existsSync(path.join(CYCLE, 'ig.ini'))) addText(path.join(CYCLE, 'ig.ini'));
 for (const f of collect(path.join(CYCLE, 'input/fsh'), ['fsh'])) addText(f);
 for (const f of collect(path.join(CYCLE, 'input/resources'), ['json'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/examples'), ['json'])) addText(f);
 // S6 site content: page bodies + any liquid includes (text).
 for (const f of collect(path.join(CYCLE, 'input/pagecontent'), ['md', 'xml'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/pages'), ['md', 'xml', 'html'])) addText(f);
 for (const f of collect(path.join(CYCLE, 'input/includes'), ['md', 'xml', 'xhtml', 'html', 'txt'])) addText(f);
 for (const f of collect(path.join(CYCLE, 'input/intro-notes'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/resource-docs'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
 for (const f of collect(path.join(CYCLE, 'input/data'), ['json', 'yaml', 'yml', 'csv'])) addText(f);
+for (const f of collect(path.join(CYCLE, 'input/images-source'), ['plantuml', 'puml', 'txt'])) addText(f);
 // Images are binary → base64.
 for (const f of collect(path.join(CYCLE, 'input/images'), ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'])) addBinary(f);
 

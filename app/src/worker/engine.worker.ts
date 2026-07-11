@@ -33,6 +33,7 @@ import type {
   OutputDescriptor,
   ProjectInput,
   RenderedOutput,
+  RustPrepareMetrics,
   SiteOutput,
   SiteOutputFile,
 } from '../site/contract';
@@ -140,6 +141,7 @@ interface RustPrepareResult {
   buildId: string;
   generator: 'cycle' | 'publisher';
   siteBuild: ClosedSiteBuild;
+  metrics: RustPrepareMetrics;
 }
 
 interface LoadedCycleRendererPackage {
@@ -222,6 +224,10 @@ function publicCycleDescriptor(
     ...(packaged ? { content: packaged } : {}),
     ...(output.title ? { title: output.title } : {}),
     ...(output.pageKind ? { pageKind: output.pageKind } : {}),
+    ...(output.subject ? {
+      subject: { ...output.subject },
+      subjectPage: output.subjectPage,
+    } : {}),
   };
 }
 
@@ -526,10 +532,13 @@ const handlers: Handlers = {
     }
     try {
       const rustSpec = { ...spec, buildEpochSecs: project.buildEpochSecs };
+      const rustPrepareStarted = performance.now();
       const prepared = unwrap<RustPrepareResult>(s.prepare(JSON.stringify(rustSpec)));
+      const rustPrepareMs = performance.now() - rustPrepareStarted;
       if (prepared.generator !== spec.generator || prepared.handle !== prepared.buildId) {
         throw new Error('prepare: Rust returned an inconsistent immutable build handle');
       }
+      const hostPrepareStarted = performance.now();
       if (prepared.generator === 'cycle') {
         const rendererPackage = await loadCycleRendererPackage();
         const closed = await ClosedBuildHandle.open(prepared.siteBuild, {
@@ -572,6 +581,12 @@ const handlers: Handlers = {
         buildId: prepared.buildId,
         generator: prepared.generator,
         compiled,
+        metrics: {
+          compileProjectMs: compiled.buildMs,
+          rustPrepareMs,
+          hostPrepareMs: performance.now() - hostPrepareStarted,
+          rust: prepared.metrics,
+        },
       };
     } catch (error) {
       throw new PrepareOperationError(String(error), 'site', compiled);
@@ -598,10 +613,7 @@ const handlers: Handlers = {
     if (runtime.kind === 'cycle') return renderCycleOutput(runtime, path);
     const rendered = unwrap<RenderedOutput>(s.render(handle, path));
     await publishRustContent(s, handle, rendered.content);
-    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
-    const descriptor = catalog.outputs.find((output) => output.path === path);
-    if (!descriptor) throw new Error(`render: Rust omitted declared output ${path}`);
-    return { ...rendered, mediaType: descriptor.mediaType };
+    return rendered;
   },
 
   async finalize(handle) {

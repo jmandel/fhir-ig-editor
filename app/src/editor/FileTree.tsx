@@ -62,7 +62,8 @@ function TreeRow({
     <>
       {kids.map((k) =>
         k.isFile ? (
-          <div
+          <button
+            type="button"
             key={k.path}
             className={`tree-row file${active === k.path ? ' active' : ''}`}
             style={{ paddingLeft: 8 + depth * 14 }}
@@ -74,7 +75,7 @@ function TreeRow({
             {errorCounts[k.path] ? (
               <span className="tree-badge">{errorCounts[k.path]}</span>
             ) : null}
-          </div>
+          </button>
         ) : (
           <div key={k.path}>
             <div className="tree-row dir" style={{ paddingLeft: 8 + depth * 14 }}>

@@ -18,6 +18,15 @@ export interface EngineVersion {
 }
 
 /** One compiled FHIR resource, as the wasm `compile()` returns it. */
+export interface DefinitionLocation {
+  kind: 'fsh-declaration' | 'predefined-resource';
+  path: string;
+  /** One-based declaration line. */
+  line: number;
+  /** Zero-based declaration column. */
+  column: number;
+}
+
 export interface CompiledResource {
   filename: string;
   /** Byte-identical SUSHI JSON output. */
@@ -25,6 +34,8 @@ export interface CompiledResource {
   resourceType?: string;
   id?: string;
   url?: string;
+  /** Exact primary authored declaration, when one exists. */
+  definition?: DefinitionLocation;
 }
 
 /** SUSHI-exact diagnostic, threaded from the engine (compiler → wasm_api). */

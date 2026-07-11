@@ -347,8 +347,10 @@ export class EngineClient {
     return res;
   }
 
-  /** Ensure the snapshot-role bundles are fetched + mounted. Called
-   *  before the first snapshot / site build. Idempotent + concurrency-safe: a
+  /** Ensure the snapshot-role bundles are fetched + mounted. Called only
+   *  before the first explicit snapshot inspection. Site preparation resolves
+   *  its exact package closure independently and must not pull the R5 support
+   *  bundle into an ordinary R4 preview. Idempotent + concurrency-safe: a
    *  single shared promise; subsequent calls resolve instantly. */
   async ensureSnapshotBundles(): Promise<void> {
     if (this.snapshotBundles.length === 0) return;
@@ -593,7 +595,6 @@ export class EngineClient {
   async prepare(project: ProjectInput, spec: GeneratorSpec): Promise<PrepareResult> {
     const started = performance.now();
     try {
-      await this.ensureSnapshotBundles();
       await this.acquireForProject(project.config);
       if (spec.generator === 'publisher') {
         await this.ensureTemplatePackages(spec.templateCoordinate);
@@ -606,7 +607,23 @@ export class EngineClient {
         message: `Prepared ${result.generator} SiteBuild ${result.buildId}.`,
         durationMs: performance.now() - started,
         fileCount: result.compiled.fileCount,
-        metrics: { wasmBuildMs: result.compiled.buildMs },
+        metrics: {
+          compileProjectMs: result.metrics.compileProjectMs,
+          rustPrepareMs: result.metrics.rustPrepareMs,
+          hostPrepareMs: result.metrics.hostPrepareMs,
+          rustPrepareTotalMs: result.metrics.rust.totalMs,
+          projectRevisionMs: result.metrics.rust.projectRevisionMs,
+          packageLockMs: result.metrics.rust.packageLockMs,
+          preparedGuideKeyMs: result.metrics.rust.preparedGuideKeyMs,
+          preparedGuideMs: result.metrics.rust.preparedGuideMs,
+          preparedGuideCacheHit: Number(result.metrics.rust.preparedGuideCacheHit),
+          siteBuildCacheHit: Number(result.metrics.rust.siteBuildCacheHit),
+          templateMaterializeMs: result.metrics.rust.templateMaterializeMs,
+          publisherRuntimeMs: result.metrics.rust.publisherRuntimeMs,
+          publisherModelMs: result.metrics.rust.publisherModelMs,
+          renderModelMs: result.metrics.rust.renderModelMs,
+          catalogMs: result.metrics.rust.catalogMs,
+        },
       });
       return result;
     } catch (error) {

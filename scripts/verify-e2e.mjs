@@ -444,7 +444,7 @@ try {
     }
   }
 
-  // 1. Wait for the engine to be ready (the "Open demo IG" button enables).
+  // 1. Wait for the engine to be ready (the tiny-guide action enables).
   await waitFor(
     ws,
     `!!document.querySelector('.welcome-card button:not([disabled])')`,
@@ -483,7 +483,7 @@ try {
   // Capture the engine version shown.
   results.engineLabel = await evalJs(ws, `document.querySelector('.welcome-engine')?.textContent || ''`);
 
-  // 2. Click "Open demo IG".
+  // 2. Open the tiny guide.
   await evalJs(ws, `document.querySelector('.welcome-card button').click()`);
 
   // 3. Wait for compile to finish (build status shows a ms value + resources).
@@ -495,14 +495,21 @@ try {
     `(document.querySelectorAll('.bs-val')[2]?.textContent||'').trim()`,
   );
   results.cleanDiagnostics = await evalJs(ws, `document.querySelectorAll('.diag').length`);
+  results.r5FetchedBeforeInspector = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
-  // 4. Snapshot tree renders for the default-selected profile.
-  await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'snapshot tree');
-  results.snapshotRows = await evalJs(ws, `document.querySelectorAll('.snapshot .sd-table tbody tr').length`);
-  results.snapshotMeta = await evalJs(ws, `document.querySelector('.snapshot-meta')?.textContent || ''`);
-  // The snapshot-phase r5.core bundle should have been fetched LAZILY by now (the
-  // snapshot needs it), i.e. it appeared only after init — the lazy-loading gate.
-  results.r5FetchedLazily = bundleFetches.some((b) => /r5\.core/.test(b.file));
+  // 4. Explore opens the already-compiled differential. Merely entering the
+  //    workspace must not fetch the deferred snapshot/R5 support package.
+  await evalJs(ws, `(() => {
+    const tab = [...document.querySelectorAll('.inspect-tab')]
+      .find((candidate) => candidate.textContent?.trim() === 'Explore');
+    if (!tab) throw new Error('Explore workspace tab is absent');
+    tab.click();
+  })()`);
+  await waitFor(ws, `(() => {
+    const active = document.querySelector('.inspector-tabs .tab-btn.active');
+    return active?.textContent?.trim() === 'Differential' && !!document.querySelector('.inspector-body');
+  })()`, 30000, 'compiled differential inspector');
+  results.r5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
   // ---- ValueSet expansion tab (spec §6 tier 1) ----------------------------
   // Select the cycle IG's menstrual-flow ValueSet, open its Expansion tab, and
@@ -1140,6 +1147,33 @@ try {
     results.usCoreResourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
     console.error('[diag] usCoreResourceCount =', results.usCoreResourceCount);
 
+    // Opening a complete published guide and its Explore workspace uses only
+    // the compiled differential. R5/snapshot support is an explicit tool:
+    // prove it remains absent through US Core prepare, then appears only after
+    // the user presses Generate snapshot.
+    results.usCoreR5FetchedBeforeInspector = bundleFetches.some((b) => /r5\.core/.test(b.file));
+    await evalJs(ws, `(() => {
+      const tab = [...document.querySelectorAll('.inspect-tab')]
+        .find((candidate) => candidate.textContent?.trim() === 'Explore');
+      if (!tab) throw new Error('Explore workspace tab is absent for US Core');
+      tab.click();
+    })()`);
+    await waitFor(ws, `(() => {
+      const active = document.querySelector('.inspector-tabs .tab-btn.active');
+      return active?.textContent?.trim() === 'Differential' && !!document.querySelector('.inspector-body');
+    })()`, 30000, 'US Core compiled differential inspector');
+    results.usCoreR5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
+    await evalJs(ws, `(() => {
+      const button = [...document.querySelectorAll('.inspector-tabs .tab-btn')]
+        .find((candidate) => candidate.textContent?.trim() === 'Generate snapshot');
+      if (!button) throw new Error('Generate snapshot action is absent for US Core');
+      button.click();
+    })()`);
+    await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'US Core snapshot tree');
+    results.snapshotRows = await evalJs(ws, `document.querySelectorAll('.snapshot .sd-table tbody tr').length`);
+    results.snapshotMeta = await evalJs(ws, `document.querySelector('.snapshot-meta')?.textContent || ''`);
+    results.r5FetchedLazily = bundleFetches.some((b) => /r5\.core/.test(b.file));
+
     // ---- US CORE online content gate (predefined-resource IG renders LIVE) ----
     // US Core is a PREDEFINED-resource IG: 0 FSH, every profile lives as
     // input/resources/StructureDefinition-*.json. The engine must route those into
@@ -1358,10 +1392,11 @@ try {
     // and wait for its page list + index render. (Opening catalog IGs switched the
     // project and its default generator.)
     await evalJs(ws, `(() => {
-      const button = [...document.querySelectorAll('.topbar-actions button')]
-        .find((candidate) => /open demo IG/i.test(candidate.textContent || ''));
-      if (!button) return false;
-      button.click();
+      const select = document.querySelector('.open-ig-select');
+      if (!select) throw new Error('Switch guide selector is absent');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'cycle');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
     await waitForStable(ws, `document.querySelectorAll('.res-row').length === ${Number(results.resourceCount)} && !document.querySelector('.open-progress')`, 120000, 'demo IG resources replaced US Core');
@@ -1392,6 +1427,131 @@ try {
         && doc?.readyState === 'complete'
         && doc.body?.textContent.length > 500;
     })()`, 60000, 'stock template index re-rendered after US Core');
+
+    // The selected artifact is one exact subject across Source -> Definition ->
+    // Published page. Exercise the three buttons with keyboard activation; a
+    // filename-derived or mouse-only trail cannot pass this sequence.
+    await waitFor(ws, `document.querySelectorAll('.artifact-trail-step:not(:disabled)').length === 3`, 30000, 'complete artifact trail');
+    const activateTrailStep = async (index, mode) => {
+      await evalJs(ws, `(() => {
+        const step = document.querySelectorAll('.artifact-trail-step')[${index}];
+        if (!step || step.disabled) throw new Error('artifact trail step ${index} unavailable');
+        step.focus();
+        return document.activeElement === step;
+      })()`);
+      // CDP needs the native key code to perform the button's default keyboard
+      // activation consistently; a bare DOM keyDown is observable to handlers
+      // but does not always synthesize the native button click in headless mode.
+      await cdp(ws, 'Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      }, id);
+      await cdp(ws, 'Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      }, id);
+      await waitForStable(ws, `document.querySelector('.workspace-views')?.dataset.mode === ${JSON.stringify(mode)}`, 10000, `artifact trail ${mode}`);
+    };
+    await activateTrailStep(0, 'author');
+    const sourceTrail = await evalJs(ws, `(() => ({
+      file: document.querySelector('.tree-row.file.active')?.getAttribute('title') || '',
+      control: document.querySelector('.tree-row.file.active')?.tagName || '',
+      detail: document.querySelectorAll('.artifact-trail-step')[0]?.textContent || '',
+    }))()`);
+    await evalJs(ws, `document.querySelector('#workspace-tab-author')?.focus()`);
+    await cdp(ws, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowRight', code: 'ArrowRight' }, id);
+    await cdp(ws, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowRight', code: 'ArrowRight' }, id);
+    await waitForStable(ws, `document.querySelector('.workspace-views')?.dataset.mode === 'explore'`, 10000, 'workspace arrow-key navigation');
+    results.workspaceKeyboard = await evalJs(ws, `(() => ({
+      focused: document.activeElement?.id || '',
+      selected: document.querySelector('#workspace-tab-explore')?.getAttribute('aria-selected') || '',
+      controls: document.querySelector('#workspace-tab-explore')?.getAttribute('aria-controls') || '',
+      panelRole: document.querySelector('#workspace-panel-explore')?.getAttribute('role') || '',
+    }))()`);
+    await activateTrailStep(1, 'explore');
+
+    // Filtering is presentation-only and must remain effectively immediate for
+    // a realistic catalog. Measure input -> committed filtered DOM over frames.
+    results.definitionSearch = await evalJs(ws, `(async () => {
+      const input = document.querySelector('.resource-filter input');
+      if (!input) return { error: 'missing filter' };
+      const before = document.querySelectorAll('.res-row').length;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      const started = performance.now();
+      setter.call(input, 'ValueSet');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      for (let frame = 0; frame < 5; frame++) {
+        await new Promise(requestAnimationFrame);
+        const after = document.querySelectorAll('.res-row').length;
+        if (after > 0 && after < before) {
+          setter.call(input, '');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          return { before, after, ms: performance.now() - started };
+        }
+      }
+      return { before, after: document.querySelectorAll('.res-row').length, ms: performance.now() - started };
+    })()`);
+    await activateTrailStep(2, 'preview');
+    await waitForStable(ws, `(() => {
+      const selected = document.querySelector('.preview-page-select select')?.value || '';
+      const frame = document.querySelector('.preview-frame');
+      return selected !== 'en/index.html'
+        && (frame?.contentWindow?.location.pathname || '').endsWith('/' + selected);
+    })()`, 30000, 'artifact resource preview');
+    results.artifactTrail = await evalJs(ws, `(() => ({
+      subject: document.querySelector('.artifact-trail-subject')?.textContent || '',
+      source: ${JSON.stringify(sourceTrail)},
+      page: document.querySelector('.preview-page-select select')?.value || '',
+      mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+    }))()`);
+
+    // Certify the real 390px browser layout, not just CSS source. Author and
+    // Explore must each expose one mobile picker while their desktop sidebars
+    // are absent, and the document itself must not horizontally overflow.
+    await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 3,
+      mobile: true,
+    }, id);
+    await sleep(150);
+    results.mobile390 = await evalJs(ws, `(async () => {
+      const mode = (name) => [...document.querySelectorAll('.inspect-tab')]
+        .find((button) => button.textContent?.trim() === name);
+      mode('Author')?.click();
+      await new Promise(requestAnimationFrame);
+      const author = {
+        sidebar: getComputedStyle(document.querySelector('.source-sidebar')).display,
+        picker: getComputedStyle(document.querySelector('.author-workspace .mobile-picker')).display,
+        height: document.querySelector('.editor-pane')?.getBoundingClientRect().height || 0,
+      };
+      mode('Explore')?.click();
+      await new Promise(requestAnimationFrame);
+      const explore = {
+        sidebar: getComputedStyle(document.querySelector('.resource-sidebar')).display,
+        picker: getComputedStyle(document.querySelector('.explore-workspace .mobile-picker')).display,
+        height: document.querySelector('.definition-pane')?.getBoundingClientRect().height || 0,
+      };
+      mode('Site preview')?.click();
+      await new Promise(requestAnimationFrame);
+      const preview = {
+        height: document.querySelector('.preview-frame')?.getBoundingClientRect().height || 0,
+      };
+      const settings = document.querySelector('.build-settings');
+      if (settings) settings.open = true;
+      document.querySelector('.build-settings-close')?.click();
+      return {
+        width: innerWidth,
+        overflow: document.documentElement.scrollWidth > innerWidth + 1,
+        visibleWorkspaces: [...document.querySelectorAll('.workspace-view')].filter((view) => !view.hidden).length,
+        author,
+        explore,
+        preview,
+        settingsClosed: settings ? !settings.open : false,
+      };
+    })()`);
+    await cdp(ws, 'Emulation.clearDeviceMetricsOverride', {}, id);
+    await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); t?.click(); })()`);
   }
 
   // ---- baked-index seed (resolver) gate ------------------------------------
@@ -1618,6 +1778,45 @@ try {
   // This still catches gross regressions without claiming a sub-second result
   // that the controlled browser does not consistently achieve.
   if (!(results.stockIndexLen > 500)) { console.error('assert: stock template index did not render'); ok = false; }
+  if (!(
+    results.artifactTrail?.subject.includes('/')
+    && /\.fsh:\d+/.test(results.artifactTrail?.source?.detail || '')
+    && results.artifactTrail?.source?.control === 'BUTTON'
+    && results.artifactTrail?.page
+    && results.artifactTrail?.mode === 'preview'
+  )) {
+    console.error('assert: exact keyboard artifact trail failed —', JSON.stringify(results.artifactTrail)); ok = false;
+  }
+  if (!(
+    results.workspaceKeyboard?.focused === 'workspace-tab-explore'
+    && results.workspaceKeyboard?.selected === 'true'
+    && results.workspaceKeyboard?.controls === 'workspace-panel-explore'
+    && results.workspaceKeyboard?.panelRole === 'tabpanel'
+  )) {
+    console.error('assert: workspace keyboard/ARIA tabs failed —', JSON.stringify(results.workspaceKeyboard)); ok = false;
+  }
+  if (!(
+    results.definitionSearch?.after > 0
+    && results.definitionSearch.after < results.definitionSearch.before
+    && results.definitionSearch.ms < 100
+  )) {
+    console.error('assert: definition filtering missed the <100ms gate —', JSON.stringify(results.definitionSearch)); ok = false;
+  }
+  if (!(
+    results.mobile390?.width === 390
+    && !results.mobile390.overflow
+    && results.mobile390.visibleWorkspaces === 1
+    && results.mobile390.author?.sidebar === 'none'
+    && results.mobile390.author?.picker !== 'none'
+    && results.mobile390.author?.height > 100
+    && results.mobile390.explore?.sidebar === 'none'
+    && results.mobile390.explore?.picker !== 'none'
+    && results.mobile390.explore?.height > 100
+    && results.mobile390.preview?.height > 100
+    && results.mobile390.settingsClosed
+  )) {
+    console.error('assert: 390px single-surface layout failed —', JSON.stringify(results.mobile390)); ok = false;
+  }
   if (results.stockEditResult !== 'ok') {
     console.error('assert: stock warm edit was not applied —', results.stockEditResult); ok = false;
   } else if (!(results.stockWarmEditMs < STOCK_WARM_EDIT_BUDGET_MS)) {
@@ -1653,6 +1852,8 @@ try {
     console.error('assert: package bodies were fetched before project resolution:', results.initBundles); ok = false;
   }
   if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init (should be snapshot-phase)'); ok = false; }
+  if (results.r5FetchedBeforeInspector) { console.error('assert: r5.core was fetched before the user opened the snapshot inspector'); ok = false; }
+  if (results.r5FetchedAfterExplore) { console.error('assert: opening Explore fetched r5.core without an explicit snapshot action'); ok = false; }
 
   // ---- project-open progress gate (open-progress) ------------------------
   // Opening US Core must surface staged progress, not a bare "Loading…" line.
@@ -1664,6 +1865,9 @@ try {
     // NOTE: US Core resource count is informational — a full compile needs
     // registry-only packages (external network), so we don't gate on it.
     if (!(results.usCoreResourceCount >= 0)) { console.error('assert: US Core resource count missing (open failed?)'); ok = false; }
+    if (results.usCoreR5FetchedBeforeInspector) { console.error('assert: opening US Core fetched r5.core before inspection'); ok = false; }
+    if (results.usCoreR5FetchedAfterExplore) { console.error('assert: exploring the US Core differential fetched r5.core'); ok = false; }
+    if (!results.r5FetchedLazily) { console.error('assert: explicit US Core snapshot did not lazily fetch r5.core'); ok = false; }
   } else {
     console.error('assert: could not click Open US Core button —', results.usCoreClicked); ok = false;
   }

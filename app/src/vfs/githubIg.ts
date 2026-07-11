@@ -44,10 +44,14 @@ export interface IgManifest {
 const TEXT_DIRS: Array<{ dir: string; exts: string[] }> = [
   { dir: 'input/fsh', exts: ['fsh'] },
   { dir: 'input/resources', exts: ['json'] },
+  { dir: 'input/examples', exts: ['json'] },
   { dir: 'input/pagecontent', exts: ['md', 'xml'] },
+  { dir: 'input/pages', exts: ['md', 'xml', 'html'] },
   { dir: 'input/includes', exts: ['md', 'xml', 'xhtml', 'html', 'txt'] },
   { dir: 'input/intro-notes', exts: ['md', 'xml', 'xhtml', 'html'] },
+  { dir: 'input/resource-docs', exts: ['md', 'xml', 'xhtml', 'html'] },
   { dir: 'input/data', exts: ['json', 'yaml', 'yml', 'csv'] },
+  { dir: 'input/images-source', exts: ['plantuml', 'puml', 'txt'] },
 ];
 const BINARY_DIRS: Array<{ dir: string; exts: string[] }> = [
   { dir: 'input/images', exts: ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'] },

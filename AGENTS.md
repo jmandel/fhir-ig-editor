@@ -39,11 +39,41 @@ asset side channels, host callbacks, or parallel serialized build formats.
 
 ## Implemented state
 
+- The UX/performance round is implemented and locally certified. The app now opens with two outcome-
+  oriented choices, then presents a compact project overview and one focused
+  Author/Explore/Site preview workspace instead of three permanently visible
+  panes. Generator/template/package/terminology controls live in one advanced
+  Build settings disclosure; Problems is a collapsed drawer; 720px and 390px
+  layouts use single-surface selectors. Unit/type/build checks are green. The
+  real browser gate exposed a stale generated-WASM mismatch (the client expected
+  new prepare metrics that the old browser artifact did not emit); rebuilding
+  `app/public/pkg` fixed it and the focused browser shows 16 Cycle resources and
+  a 48-row snapshot. Generated WASM is gitignored, so always rebuild it after a
+  dirty engine wire change before trusting an app/browser result.
+- Hidden UI is not allowed to perform hidden engine work. `ResourceInspector`
+  is now mounted only in Explore, and `prepare` no longer fetches the deferred
+  R5 snapshot bundle. The first explicit snapshot inspection owns that lazy
+  mount. The browser gate records and rejects any R5 fetch before the inspector.
+- The next performance pass has a metrics-only sidecar on the existing
+  `prepare` result. It measures compiler boundary, Rust/host preparation, source
+  manifest/project revision, package lock, PreparedGuide key/build/cache hit,
+  template materialization, Publisher runtime/model, render model, catalog, and
+  total time. It adds no operation, cache, or domain value. Publisher now keeps
+  and consumes that one PreparedGuide through `ProducerInputs::from_prepared`,
+  typed authored-file staging, and a direct per-handle RenderSemantics/
+  RenderState; the same phase names measure the simplified path without
+  restoring the removed reconstruction or ambient render surface.
+- Browser `input/examples/*.json` now enters the same parsed local-resource map
+  as `input/resources`, never a second semantic channel. Compiler-owned stock
+  directory order keeps resources before examples, render-set paths preserve
+  the exact source root (so equal basenames cannot collide), and the generated
+  IG's example metadata carries through PreparedGuide to exact output subjects.
+
 Dependency landing receipts for this overhaul:
 
-- `jmandel/sushi-rs` `2de40588` is pushed to `snapshot-gen` and `main`.
-- `jmandel/cycle` `9aba386` is pushed to `main`.
-- The editor pins those commits and rebuilds WASM from `2de40588`; its local
+- `jmandel/sushi-rs` `86d34573` is pushed to `snapshot-gen` and `main`.
+- `jmandel/cycle` `5883663` is pushed to `main`.
+- The editor pins those commits and rebuilds WASM from `86d34573`; its local
   gate is necessary but the GitHub Pages workflow remains the deployment
   authority.
 
@@ -104,12 +134,12 @@ Dependency landing receipts for this overhaul:
 
 Green static/native evidence:
 
-- Engine: focused compile-reuse 6/6; wasm_api 35 pass/2 ignored; Session 8/8;
+- Engine: compiler 20/20; site_producer 16/16; wasm_api 35 pass/1 ignored; Session 8/8;
   package resolver/store and Publisher facade regressions; workspace check;
   wasm32 check; current browser WASM rebuilt (6.3 MB).
-- Cycle: renderer typecheck and 237/237 tests (641 assertions).
-- App: 43/43 tests (276 assertions), current Pages-base production build green
-  at 1,130 transformed modules. The count includes the deterministic late-layout
+- Cycle: renderer typecheck and 239/239 tests (662 assertions).
+- App: 56/56 tests (345 assertions), current Pages-base production build green
+  at 1,134 transformed modules. The count includes the deterministic late-layout
   scroll-restoration regression; removed standalone compile-helper tests remain
   deleted.
 - Complete browser transport regression proves R4 core resources plus
@@ -137,6 +167,16 @@ and logs are in `/tmp/fhir-full-gate-final3.log`. It proved:
 - stock warm edit 1,234 ms under the unchanged 1,500 ms gate. Two earlier runs
   after compile reuse measured 1,251 and 1,191 ms.
 
+The exact `86d34573`/`5883663` overhaul artifact also passes the expanded gate;
+the complete receipt is `/tmp/fhir-overhaul-final-gate4.log`. In addition to the
+coverage above it proves exact keyboard Source→Definition→Published-page
+navigation, Arrow-key/ARIA tabs, definition filtering in 4.5 ms, no R5 fetch at
+boot/prepare/Explore followed by a lazy fetch only after Generate snapshot, and
+the real 390px layout with no overflow and 323px Author/Explore plus 302px
+Preview work areas. Warm edit was 1,181 ms and hot reload preserved scroll
+640→640 in 1,380 ms. The CarePlan regression remained one html/body/header/footer
+with no nested shell, and mCODE rendered with no fallback or dependency error.
+
 The final deletion-built artifact exposed one intermittent background-tab
 scroll-restoration race in a later run: the saved position was removed before
 layout had actually accepted it, while its remaining animation-frame/timeouts
@@ -150,17 +190,18 @@ upgrade fixture and its complete JSON receipt is
 `/tmp/fhir-full-gate-scroll-fix.log` (`E2E GATE: PASS`). That receipt also proves
 US Core, mCODE, protocol-4 restart/persistence, and a 1,256 ms hot reload.
 
-The exact artifact's US Core benchmark is
-`/tmp/uscore-benchmark-architecture-final.json`: cold 87.982 s (129.1 MB
-package-like network), fresh-worker persistent warm 7.204 s (104 bytes
-package-like HTTP bookkeeping), and same-worker reopen 5.609 s. Warm package
-init/mount is 1.466 s (20.4%); `prepare` is 4.234 s and `outputs` 0.571 s.
-Same-worker `prepare` is 3.901 s and `outputs` 0.165 s. Transport is no longer
-the main floor, but this is slower than the prior 5.13-5.34 s fresh-worker
-PreparedPackage-only checkpoint because the coherent Publisher facade now
-prepares and publishes the complete 908-output/runtime catalog. Do not present
-7.2 s as instant; the next performance work belongs inside compile/Publisher
-preparation/catalog reuse, not another transport or preview layer.
+The exact artifact's current US Core benchmark is
+`/tmp/uscore-overhaul-final.json`: cold 79.972 s (112.7 MB package-like
+network), fresh-worker persistent warm 7.102 s (104 bytes package-like HTTP
+bookkeeping), and same-worker reopen 5.348 s. Warm package init/mount is 1.346 s
+(18.9%); `prepare` is 4.138 s and `outputs` 0.623 s. Same-worker `prepare` is
+3.797 s and `outputs` 0.169 s. The new phase metrics locate same-worker prepare
+at compileProject 1.689 s plus Rust prepare 2.056 s: PreparedGuide 0.896 s,
+template materialization 0.313 s, render model 0.379 s, catalog 0.107 s, and
+the smaller remaining phases. Transport is no longer the floor. Do not present
+7.1 s as instant; the next performance work belongs in exact compile/
+PreparedGuide/SiteBuild reuse and canonical SiteOutput scheduling, not another
+transport or preview representation.
 
 Pre-optimization warm-edit profiling was 1,799-1,848 ms: ~300 ms debounce,
 672-688 ms unnecessary compile, ~444-504 ms Publisher preparation/catalog,
@@ -168,15 +209,17 @@ Pre-optimization warm-edit profiling was 1,799-1,848 ms: ~300 ms debounce,
 prose-only compile reuse removed the compiler component without lowering the
 budget or debounce.
 
-Known fidelity boundary discovered by the real mCODE gate: current catalog and
-live-GitHub allowlists omit `input/images-source/*.plantuml` and project-local
-`#template` directories. mCODE's stock Publisher generates
+Known fidelity boundary discovered by the real mCODE gate: catalog and
+live-GitHub inputs now capture `input/images-source/*.plantuml` into the typed
+PreparedGuide boundary, but project-local `#template` directories remain
+outside the supported source set and PlantUML execution is not implemented.
+mCODE's stock Publisher generates
 `patients-with-cancer-condition.svg` from such a source; this browser preview
 does not generate that figure. Safe unresolved generator/template products no
-longer reject unrelated pages, but the coherent future fix is complete source
-capture plus a generator-owned generated-asset artifact bound to source,
-template/tool bytes, and options (or an authenticated precomputed result). Do
-not add another guessed path allowlist or masquerade the result as authored.
+longer reject unrelated pages; the coherent future fix is a generator-owned
+generated-asset artifact bound to captured source, template/tool bytes, and
+options (or an authenticated precomputed result). Do not masquerade the result
+as authored.
 
 ## Remaining work
 

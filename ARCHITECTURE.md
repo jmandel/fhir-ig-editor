@@ -75,13 +75,13 @@ renders through the one shared LiquidJS/React implementation used by browser
 and CLI. `cycle-site/v1`, `site.db`, row projections, SQL capabilities, and
 dual v1/v2 dispatch are removed.
 
-Publisher templates render with the Rust Liquid implementation. A template may
-discover a typed generated-fragment requirement while evaluating an output.
-The Rust driver resolves that requirement from the captured `PreparedGuide`,
-applies the result to an immutable `SiteBuild`, and retries internally. Neither
-the editor nor the template calls the compiler or an ambient session. A
-successful `render` exposes only the resulting output reference; need and
-resolution types are not host API layers.
+Publisher templates render with the Rust Liquid implementation. Registered
+generated-fragment names resolve synchronously through the immutable typed
+artifact resolver captured during preparation; a missing value is a typed
+terminal observation for that handle. Neither the editor nor the template calls
+the compiler or an ambient session, and there is no callback/retry or affine
+successor-handle protocol. A successful `render` exposes only the resulting
+output reference; fragment observations are not host API layers.
 
 Post-render compatibility transforms, generated table backgrounds, and runtime
 assets are renderer work with explicit recipe identity. They may not be patched

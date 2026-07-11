@@ -9,6 +9,10 @@ Live site: <https://joshuamandel.com/fhir-ig-editor/>
 
 ## What works
 
+- Two direct entry paths—edit a tiny FSH guide or explore a published guide—
+  followed by one focused Author, Explore, or Site preview surface. An exact
+  renderer/compiler-owned artifact trail connects an authored declaration to
+  its compiled FHIR definition and published page without filename guessing.
 - Monaco editing for multi-file FSH and IG source, with exact diagnostic spans.
 - In-browser FSH compilation, snapshot generation, resource JSON/differential/
   snapshot views, and tier-1 local ValueSet expansion.

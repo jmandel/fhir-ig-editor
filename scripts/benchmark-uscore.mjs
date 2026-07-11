@@ -600,13 +600,9 @@ async function main() {
 
     progress('preparing same-worker comparison via Cycle');
     target.phase = 'preparation';
-    await target.evaluate(`(() => {
-      const button = [...document.querySelectorAll('button')]
-        .find((candidate) => candidate.textContent.includes('Open demo IG'));
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
+    if (!(await selectCatalogProject(target, 'cycle'))) {
+      throw new Error('Cycle is absent from .open-ig-select');
+    }
     await target.waitFor(
       `localStorage.getItem('igEditor.project') === 'cycle'`,
       'Cycle selection',

@@ -37,15 +37,49 @@ export type GeneratorSpec =
       runUuid?: string;
     };
 
-/** `compiled` is presentation metadata produced by the same prepare call. */
+/** Rust-internal phases of the existing prepare operation. This is diagnostic
+ * metadata only: it does not participate in SiteBuild identity or caching. */
+export interface RustPrepareMetrics {
+  totalMs: number;
+  projectRevisionMs: number;
+  packageLockMs: number;
+  preparedGuideKeyMs: number;
+  preparedGuideMs: number;
+  preparedGuideCacheHit: boolean;
+  siteBuildCacheHit: boolean;
+  templateMaterializeMs: number;
+  publisherRuntimeMs: number;
+  publisherModelMs: number;
+  renderModelMs: number;
+  catalogMs: number;
+}
+
+/** Measurements across the worker's one prepare request. `rustPrepareMs`
+ * includes the envelope boundary around the detailed Rust phases;
+ * `hostPrepareMs` is target-specific worker work after Rust returns. */
+export interface PrepareMetrics {
+  compileProjectMs: number;
+  rustPrepareMs: number;
+  hostPrepareMs: number;
+  rust: RustPrepareMetrics;
+}
+
+/** `compiled` and `metrics` are presentation metadata produced by the same
+ * prepare call, not additional domain handoffs. */
 export interface PrepareResult {
   handle: BuildHandle;
   buildId: string;
   generator: GeneratorSpec['generator'];
   compiled: CompileResult;
+  metrics: PrepareMetrics;
 }
 
 export type OutputKind = 'page' | 'asset' | 'auxiliary';
+
+export interface ResourceSubject {
+  resourceType: string;
+  id: string;
+}
 
 export interface OutputDescriptor {
   path: string;
@@ -53,6 +87,9 @@ export interface OutputDescriptor {
   mediaType: string;
   content?: ContentRef;
   title?: string;
+  /** Exact resource represented by a renderer-declared resource page. */
+  subject?: ResourceSubject;
+  subjectPage?: 'primary' | 'companion';
   pageKind?:
     | 'narrative'
     | 'artifacts'
