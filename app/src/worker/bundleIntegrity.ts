@@ -25,6 +25,16 @@ export class BakedBundleIntegrityError extends Error {
   }
 }
 
+/** The authenticated same-origin artifact could not be transported. This is
+ * the only baked-package failure for which retrying or using another transport
+ * can be correct; integrity and decode failures must remain fatal. */
+export class BakedBundleTransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'BakedBundleTransportError';
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -129,8 +139,20 @@ export async function readVerifiedBundleBytes(
   onProgress?: (bytes: number, totalBytes?: number) => void,
   onVerify?: () => void,
 ): Promise<ArrayBuffer> {
-  if (!response.ok) throw new Error(`fetch baked package ${entry.label} -> ${response.status}`);
-  const bytes = await readResponseBytes(response, onProgress, entry.bytes);
+  if (!response.ok) {
+    throw new BakedBundleTransportError(
+      `fetch baked package ${entry.label} -> ${response.status}`,
+    );
+  }
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await readResponseBytes(response, onProgress, entry.bytes);
+  } catch (error) {
+    throw new BakedBundleTransportError(
+      `read baked package ${entry.label}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
   if (entry.bytes !== undefined && bytes.byteLength !== entry.bytes) {
     throw new BakedBundleIntegrityError(
       `baked package ${entry.label} byte length mismatch: expected ${entry.bytes}, got ${bytes.byteLength}`,

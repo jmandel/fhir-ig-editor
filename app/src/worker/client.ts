@@ -39,7 +39,11 @@ import type {
 } from '../site/contract';
 import type { ResolveOutcome } from './packageResolver';
 import { assertCompatibleEngineCommit } from './engineVersion';
-import { parseBakedBundleManifest, readVerifiedBundleBytes } from './bundleIntegrity';
+import {
+  BakedBundleTransportError,
+  parseBakedBundleManifest,
+  readVerifiedBundleBytes,
+} from './bundleIntegrity';
 import type { BakedBundleEntry, BakedBundleManifest } from './bundleIntegrity';
 import { ResolutionCache } from './resolutionCache';
 import { getPackageProxy, getRegistries } from '../vfs/packageSettings';
@@ -230,8 +234,15 @@ export class EngineClient {
     // Bundle filenames contain '#' (e.g. hl7.fhir.r4.core#4.0.1.tgz); a raw '#'
     // in a URL is a fragment delimiter, so encode it (the P0 gotcha).
     const url = `${BASE}data/bundles/${encodeURIComponent(entry.tgz)}`;
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`fetch ${url} -> ${resp.status}`);
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (error) {
+      throw new BakedBundleTransportError(
+        `fetch baked package ${entry.label}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
     // Baked bundles are deployment inputs: authenticate the compressed bytes
     // before the inflater or engine can observe any package content.
     const transportStage = stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch';

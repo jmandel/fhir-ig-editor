@@ -25,7 +25,7 @@ import type {
   ResolutionStep,
   VersionIndex,
 } from './protocol';
-import { BakedBundleIntegrityError } from './bundleIntegrity';
+import { BakedBundleTransportError } from './bundleIntegrity';
 import type { BakedBundleEntry } from './bundleIntegrity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
 import {
@@ -57,7 +57,7 @@ export interface ResolveOutcome {
 
 /** How the loop reports progress (reuses the worker ProgressEvent stages). */
 export type ResolveProgress = (ev: {
-  stage: 'resolve' | 'registry-fetch' | 'bundle-cache-hit' | 'bundle-unpack' | 'package-blocked';
+  stage: 'resolve' | 'registry-fetch' | 'bundle-fetch' | 'bundle-cache-hit' | 'bundle-unpack' | 'package-blocked';
   label?: string;
   bytes?: number;
   totalBytes?: number;
@@ -298,8 +298,27 @@ async function obtainPackage(
     try {
       return await host.fetchBaked(baked);
     } catch (error) {
-      if (error instanceof BakedBundleIntegrityError) throw error;
-      /* fall through to local/registry transport */
+      // A mobile connection can drop a large same-origin response midway. Give
+      // the exact immutable artifact one immediate retry before considering a
+      // local or registry transport. Any integrity, inflate, or programming
+      // failure is deterministic and must not be hidden behind a slow download.
+      if (!(error instanceof BakedBundleTransportError)) throw error;
+      onProgress({
+        stage: 'bundle-fetch',
+        label,
+        message: `Retrying ${label} from this app after a transport interruption…`,
+      });
+      try {
+        return await host.fetchBaked(baked);
+      } catch (retryError) {
+        if (!(retryError instanceof BakedBundleTransportError)) throw retryError;
+        onProgress({
+          stage: 'bundle-fetch',
+          label,
+          message: `This app's copy of ${label} is unreachable; trying another source…`,
+        });
+        /* fall through to local/registry transport */
+      }
     }
   }
   const { findPreparedPackage, UNPINNED_TRANSPORT_IDENTITY } = await import('./preparedPackageCache');

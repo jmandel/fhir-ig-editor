@@ -39,7 +39,7 @@ asset side channels, host callbacks, or parallel serialized build formats.
 
 ## Active performance/UX certification (2026-07-12)
 
-**MOBILE PROGRESS STABILITY FOLLOW-UP (UNCOMMITTED 2026-07-12):** the project-open
+**MOBILE PROGRESS STABILITY FOLLOW-UP (`36a20f1`, PUSHED 2026-07-12):** the project-open
 banner now reserves its progress bar and byte-counter slots before the first
 response chunk, uses fixed grid areas, ellipsizes package detail, and gives
 mobile a stable phase/detail/bytes layout. The deferred snapshot-package copy is
@@ -56,7 +56,29 @@ GATE: PASS`); it observes the pending-definition state during real package
 fetching, and its 390px regression
 measures 63/63/63/63px for empty, short, growing, and long byte labels (0px
 range, no overflow), while US Core/mCODE/scroll/restart/mobile gates remain
-green. This follow-up is not committed or deployed; do not claim it is live.
+green. Editor `36a20f1` is pushed to `main`; Pages run `29206515712` passed the
+complete engine/native/package/Cycle/app/build gates, fresh-profile Chromium,
+artifact upload, and deploy. The live origin was separately verified serving
+app `assets/index-DMW22hhF.js`, CSS `assets/index-BclA8Kk1.css`, worker
+`assets/engine.worker-D8QfEkFa.js`, preview protocol 5, the new progress/Explore
+copy, and the exact 11,747,189-byte baked R4 core artifact.
+
+**BAKED TRANSPORT RETRY FOLLOW-UP (UNCOMMITTED 2026-07-12):** investigation of
+the mobile screenshot that unexpectedly downloaded baked R4 core from the
+registry found that `obtainPackage` silently swallowed every generic
+same-origin load failure. The active patch classifies only HTTP/network/body
+read failures as `BakedBundleTransportError`, retries the same authenticated
+immutable artifact once, and allows local/registry fallback only after a second
+transport interruption. Integrity, inflate/decode, and programming failures
+stay fatal instead of being hidden behind a second large download. Focused
+tests prove transient retry, HTTP/body classification, digest fail-closed,
+decode fail-closed, and fallback to an explicit local package only after two
+transport interruptions. The full app is green at 100/100 tests (505 assertions),
+TypeScript, and a 1,135-module Pages-base production build. The exact full
+Pages-subpath browser receipt is `/tmp/fhir-baked-retry-full.log` (`E2E GATE:
+PASS`): Tiny/Cycle, US Core 1,535/1,535 images and one-shell CarePlan, real
+mCODE, persistence/restart/scroll, 63px-stable mobile progress, and a 922 ms
+warm edit all remain green.
 
 The audit patch is landed and Pages run `29195715737` passed. The active
 uncommitted round keeps the four-operation architecture and makes the persistent

@@ -2,11 +2,13 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   BakedBundleIntegrityError,
+  BakedBundleTransportError,
   parseBakedBundleManifest,
   readResponseBytes,
   readVerifiedBundleBytes,
 } from '../src/worker/bundleIntegrity';
 import { obtainAndMountPackage } from '../src/worker/packageResolver';
+import { addLocalPackage } from '../src/worker/localPackages';
 
 const ABC_SHA256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
 
@@ -51,6 +53,25 @@ describe('baked package transport integrity', () => {
       new Response('abc'),
       { ...entry, bytes: 4 },
     )).rejects.toThrow('byte length mismatch');
+  });
+
+  test('HTTP and interrupted-body failures are classified as transport failures', async () => {
+    const entry = { label: 'example.pkg#1.0.0', sha256: ABC_SHA256, bytes: 3 };
+    await expect(readVerifiedBundleBytes(
+      new Response('missing', { status: 503 }),
+      entry,
+    )).rejects.toBeInstanceOf(BakedBundleTransportError);
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('a'));
+        controller.error(new Error('connection reset'));
+      },
+    });
+    await expect(readVerifiedBundleBytes(
+      new Response(body),
+      entry,
+    )).rejects.toBeInstanceOf(BakedBundleTransportError);
   });
 
   test('stream progress starts at zero and counts consumed response bytes', async () => {
@@ -99,5 +120,92 @@ describe('baked package transport integrity', () => {
       },
     }, baked.label, () => {})).rejects.toThrow('digest mismatch');
     expect(mounted).toBe(false);
+  });
+
+  test('a transient baked transport interruption retries the exact artifact', async () => {
+    let attempts = 0;
+    let mounted = false;
+    const progress: string[] = [];
+    const baked = {
+      label: 'example.pkg#1.0.0',
+      tgz: 'example.pkg#1.0.0.tgz',
+      sha256: ABC_SHA256,
+      loadPhase: 'compile' as const,
+    };
+    const result = await obtainAndMountPackage({
+      resolveStep: async () => { throw new Error('unused'); },
+      mount: async ([input]) => {
+        mounted = input.kind === 'raw' && input.spec.label === baked.label;
+      },
+      bakedBundle: () => baked,
+      fetchBaked: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new BakedBundleTransportError('connection reset');
+        return {
+          kind: 'raw',
+          spec: { label: baked.label, files: {} },
+          transportIdentity: `tgz-${baked.sha256}`,
+        };
+      },
+    }, baked.label, (event) => progress.push(event.message));
+    expect(result).toBe(true);
+    expect(attempts).toBe(2);
+    expect(mounted).toBe(true);
+    expect(progress).toContain(
+      `Retrying ${baked.label} from this app after a transport interruption…`,
+    );
+  });
+
+  test('a baked decode failure is fatal and is not retried or downgraded', async () => {
+    let attempts = 0;
+    const baked = {
+      label: 'example.pkg#1.0.0',
+      tgz: 'example.pkg#1.0.0.tgz',
+      sha256: ABC_SHA256,
+      loadPhase: 'compile' as const,
+    };
+    await expect(obtainAndMountPackage({
+      resolveStep: async () => { throw new Error('unused'); },
+      mount: async () => { throw new Error('must not mount'); },
+      bakedBundle: () => baked,
+      fetchBaked: async () => {
+        attempts += 1;
+        throw new Error('invalid gzip stream');
+      },
+    }, baked.label, () => {})).rejects.toThrow('invalid gzip stream');
+    expect(attempts).toBe(1);
+  });
+
+  test('two baked transport interruptions retain the local-package fallback', async () => {
+    const label = 'transport-fallback.pkg#1.0.0';
+    addLocalPackage(label, { 'package.json': 'e30=' });
+    let attempts = 0;
+    let mountedFromLocal = false;
+    const progress: string[] = [];
+    const baked = {
+      label,
+      tgz: `${label}.tgz`,
+      sha256: ABC_SHA256,
+      loadPhase: 'compile' as const,
+    };
+    const result = await obtainAndMountPackage({
+      resolveStep: async () => { throw new Error('unused'); },
+      mount: async ([input]) => {
+        mountedFromLocal = input.kind === 'raw'
+          && input.transportIdentity === 'unpinned'
+          && input.spec.label === label;
+      },
+      bakedBundle: () => baked,
+      fetchBaked: async () => {
+        attempts += 1;
+        throw new BakedBundleTransportError('offline');
+      },
+    }, label, (event) => progress.push(event.message));
+    expect(result).toBe(true);
+    expect(attempts).toBe(2);
+    expect(mountedFromLocal).toBe(true);
+    expect(progress).toContain(
+      `This app's copy of ${label} is unreachable; trying another source…`,
+    );
   });
 });

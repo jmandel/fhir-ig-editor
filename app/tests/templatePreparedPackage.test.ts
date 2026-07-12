@@ -13,7 +13,7 @@ describe('template PreparedPackage transport', () => {
     expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true)');
 
     const warmLookup = SOURCE.indexOf('findPreparedPackage(entry.label, transportIdentity)');
-    const networkFetch = SOURCE.indexOf('const resp = await fetch(url)');
+    const networkFetch = SOURCE.indexOf('resp = await fetch(url)');
     expect(warmLookup).toBeGreaterThan(-1);
     expect(networkFetch).toBeGreaterThan(warmLookup);
     expect(SOURCE).not.toContain('readCachedBundle');
