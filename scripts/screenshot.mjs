@@ -1,4 +1,4 @@
-// Capture a screenshot of the running app (after opening the demo IG) via CDP.
+// Capture a screenshot of the running app after opening the tiny guide via CDP.
 const base = process.argv[2] || 'http://localhost:4173/';
 const out = process.argv[3] || 'screenshot.png';
 import fs from 'node:fs';

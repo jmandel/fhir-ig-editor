@@ -137,14 +137,16 @@ export interface PreparedMountMetrics {
 // ---- cold-start progress (spec §1 / §11: measure first load) --------------
 
 /** A staged progress event surfaced during cold/warm start. `stage` names the
- *  phase; `bundle`/`bytes`/`totalBytes` are present during per-bundle fetch so
- *  the UI can show "inflating hl7.fhir.r4.core (3.8 MB)". `fromCache` marks a
- *  warm-start OPFS hit (no network). */
+ * phase. During a transport, `bytes` is the number of response-body bytes read
+ * so far and `totalBytes` is the expected response size when known. A declared
+ * total must never be reported as bytes already downloaded. `fromCache` marks
+ * a warm-start OPFS hit (no network). */
 export interface ProgressEvent {
   stage:
     | 'wasm'
     | 'manifest'
     | 'project-cache-hit'
+    | 'project-verify'
     | 'project-unpack'
     | 'project-store'
     | 'compile'
@@ -154,14 +156,17 @@ export interface ProgressEvent {
     | 'resolve'
     | 'bundle-fetch'
     | 'bundle-cache-hit'
+    | 'bundle-unpack'
     | 'bundle-mount'
     | 'registry-fetch'
     | 'package-blocked'
     | 'ready'
     | 'lazy-fetch';
   label?: string;
-  /** Bytes fetched/inflated for the current bundle (compressed tgz size). */
+  /** Response-body bytes downloaded so far for the current transport. */
   bytes?: number;
+  /** Expected response-body bytes for the current transport, when known. */
+  totalBytes?: number;
   /** Human message for the status line (kept for back-compat with setStatus). */
   message: string;
   /** 0..1 overall progress across a bounded operation, when computable. */

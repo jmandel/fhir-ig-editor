@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   BakedBundleIntegrityError,
   parseBakedBundleManifest,
+  readResponseBytes,
   readVerifiedBundleBytes,
 } from '../src/worker/bundleIntegrity';
 import { obtainAndMountPackage } from '../src/worker/packageResolver';
@@ -50,6 +51,35 @@ describe('baked package transport integrity', () => {
       new Response('abc'),
       { ...entry, bytes: 4 },
     )).rejects.toThrow('byte length mismatch');
+  });
+
+  test('stream progress starts at zero and counts consumed response bytes', async () => {
+    const updates: Array<[number, number | undefined]> = [];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('ab'));
+        controller.enqueue(new TextEncoder().encode('c'));
+        controller.close();
+      },
+    });
+    const bytes = await readResponseBytes(
+      new Response(body),
+      (read, total) => updates.push([read, total]),
+      3,
+    );
+    expect(new TextDecoder().decode(bytes)).toBe('abc');
+    expect(updates).toEqual([[0, 3], [3, 3]]);
+  });
+
+  test('announces verification only after the complete transport is consumed', async () => {
+    const events: string[] = [];
+    await expect(readVerifiedBundleBytes(
+      new Response('abd'),
+      { label: 'example.pkg#1.0.0', sha256: ABC_SHA256, bytes: 3 },
+      (read) => events.push(`read:${read}`),
+      () => events.push('verify'),
+    )).rejects.toBeInstanceOf(BakedBundleIntegrityError);
+    expect(events).toEqual(['read:0', 'read:3', 'verify']);
   });
 
   test('a baked digest failure cannot downgrade to an unpinned registry source', async () => {

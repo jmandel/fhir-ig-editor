@@ -15,16 +15,51 @@ async function gunzip(buf: ArrayBuffer): Promise<Uint8Array> {
  *  large package tarballs (r5.core is ~65 MB) than buffering then re-streaming —
  *  the round-trip form intermittently fails ("Failed to fetch") on big blobs in
  *  headless Chromium. */
-async function gunzipStream(body: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function gunzipStream(
+  body: ReadableStream<Uint8Array>,
+  onCompressedBytes?: (bytes: number) => void,
+  onCompressedComplete?: () => void,
+): Promise<Uint8Array> {
+  let compressedBytes = 0;
+  let reportedBytes = 0;
+  let reportedAt = performance.now();
+  const counted = onCompressedBytes || onCompressedComplete
+    ? body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        compressedBytes += chunk.byteLength;
+        const now = performance.now();
+        if (now - reportedAt >= 100) {
+          onCompressedBytes?.(compressedBytes);
+          reportedBytes = compressedBytes;
+          reportedAt = now;
+        }
+        controller.enqueue(chunk);
+      },
+      flush() {
+        if (reportedBytes !== compressedBytes) onCompressedBytes?.(compressedBytes);
+        onCompressedComplete?.();
+      },
+    }))
+    : body;
   const ds = new DecompressionStream('gzip');
-  const out = body.pipeThrough(ds);
-  return new Uint8Array(await new Response(out).arrayBuffer());
+  const out = counted.pipeThrough(ds);
+  const result = new Uint8Array(await new Response(out).arrayBuffer());
+  return result;
 }
 
 /** Inflate a `.tgz` straight from a fetch Response (streaming). */
-export async function inflateBundleResponse(resp: Response): Promise<Record<string, string>> {
-  if (!resp.body) return untarPackage(await gunzip(await resp.arrayBuffer()));
-  return untarPackage(await gunzipStream(resp.body));
+export async function inflateBundleResponse(
+  resp: Response,
+  onCompressedBytes?: (bytes: number) => void,
+  onCompressedComplete?: () => void,
+): Promise<Record<string, string>> {
+  if (!resp.body) {
+    const compressed = await resp.arrayBuffer();
+    onCompressedBytes?.(compressed.byteLength);
+    onCompressedComplete?.();
+    return untarPackage(await gunzip(compressed));
+  }
+  return untarPackage(await gunzipStream(resp.body, onCompressedBytes, onCompressedComplete));
 }
 
 function base64(bytes: Uint8Array): string {

@@ -1,0 +1,22 @@
+id: example.fhir.ig-editor-demo
+canonical: https://example.org/fhir-ig-editor-demo
+name: FhirIgEditorDemo
+title: The Guide That Describes Its Editor
+description: >-
+  A deliberately tiny FHIR R4 implementation guide that lets a new author
+  follow one FSH rule into its compiled definition and published page.
+status: draft
+version: 0.1.0
+fhirVersion: 4.0.1
+copyrightYear: 2026+
+releaseLabel: ci-build
+license: CC0-1.0
+publisher:
+  name: FHIR IG Editor demo
+  url: https://joshuamandel.com/fhir-ig-editor/
+template: hl7.fhir.template#1.0.0
+parameters:
+  show-inherited-invariants: false
+menu:
+  Home: index.html
+  Artifacts: artifacts.html

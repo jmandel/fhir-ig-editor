@@ -1,15 +1,15 @@
 # Committed expansion cache (spec §6 tier 3)
 
-This directory holds the **tx.fhir.org-sourced expansion cache** for the default
-IG — warm-start data AND the AUTHORITY the in-engine tier-1 evaluator is gated
+This directory holds the **tx.fhir.org-sourced expansion cache** — deliberate
+warm-start data AND the AUTHORITY the in-engine tier-1 evaluator is gated
 against (`scripts/consistency-gate.mjs`).
 
-**This cycle's cache is empty.** The demo IG (cycle) has no ValueSet whose
-compose needs an external terminology server: every ValueSet is tier-1 enumerable
+**The committed cache is currently empty.** The Cycle external-builder fixture
+has no ValueSet whose compose needs an external terminology server: every ValueSet is tier-1 enumerable
 (local CodeSystem codes + authored SNOMED code/display lists), so nothing here
 requires a committed `$expand` answer. The consistency gate is therefore
 **trivially green over the committed set** — but it is fully WIRED (and proven by
-a fixture-based self-test), so the moment a maintainer commits a real entry, the
+a fixture-based self-test), so the moment a maintainer commits an entry, the
 gate begins asserting `expand_enumerable` agrees with it on the shared domain.
 
 ## Discipline

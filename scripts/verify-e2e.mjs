@@ -76,6 +76,116 @@ async function waitForStable(ws, expr, timeoutMs = 60000, label = expr, samples 
   throw new Error(`TIMEOUT waiting for stable state: ${label}`);
 }
 
+async function measureMobileLayout(ws, includeGeometry = false) {
+  await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    // A short phone viewport catches the failure where the project dashboard,
+    // status and Problems rows leave only a sliver for the selected surface.
+    height: 667,
+    deviceScaleFactor: 3,
+    mobile: true,
+  }, id);
+  await sleep(150);
+  const result = await evalJs(ws, `(async () => {
+    const mode = (name) => document.getElementById('workspace-tab-' + name);
+    const selectMode = async (name) => {
+      const button = mode(name);
+      if (!button) throw new Error('missing workspace tab ' + name);
+      button.click();
+      for (let frame = 0; frame < 10; frame++) {
+        await new Promise(requestAnimationFrame);
+        if (button.getAttribute('aria-selected') === 'true') return;
+      }
+      throw new Error('workspace tab did not activate: ' + name);
+    };
+    const geometry = () => Object.fromEntries([
+      '.app', '.topbar', '.workspace-shell', '.project-overview',
+      '.artifact-trail', '.workspace-tabs', '.workspace-views',
+      '.workspace-view:not([hidden])', '.mobile-picker', '.editor-pane',
+      '.definition-pane', '.preview', '.preview-frame', '.problems',
+    ].map((selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return [selector, null];
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return [selector, {
+        top: rect.top,
+        bottom: rect.bottom,
+        height: rect.height,
+        display: style.display,
+        position: style.position,
+        gridRows: style.gridTemplateRows,
+      }];
+    }));
+    await selectMode('author');
+    const author = {
+      sidebar: getComputedStyle(document.querySelector('.source-sidebar')).display,
+      picker: getComputedStyle(document.querySelector('.author-workspace .mobile-picker')).display,
+      height: document.querySelector('.editor-pane')?.getBoundingClientRect().height || 0,
+      ${includeGeometry ? 'geometry: geometry(),' : ''}
+    };
+    await selectMode('explore');
+    const explore = {
+      sidebar: getComputedStyle(document.querySelector('.resource-sidebar')).display,
+      picker: getComputedStyle(document.querySelector('.explore-workspace .mobile-picker')).display,
+      height: document.querySelector('.definition-pane')?.getBoundingClientRect().height || 0,
+      ${includeGeometry ? 'geometry: geometry(),' : ''}
+    };
+    await selectMode('preview');
+    const previewFrame = document.querySelector('.preview-frame');
+    const previewBeforeProblems = previewFrame?.getBoundingClientRect().height || 0;
+    const problems = document.querySelector('.problems');
+    const statusline = document.querySelector('.statusline');
+    const surfaceBottom = previewFrame?.getBoundingClientRect().bottom || 0;
+    const closedProblemsTop = problems?.getBoundingClientRect().top ?? innerHeight;
+    if (problems) problems.open = true;
+    await new Promise(requestAnimationFrame);
+    const preview = {
+      height: previewBeforeProblems,
+      heightWithProblems: previewFrame?.getBoundingClientRect().height || 0,
+      problemsPosition: problems ? getComputedStyle(problems).position : '',
+      closedHandleOccludes: surfaceBottom > closedProblemsTop + 1,
+      statusVisible: !!statusline && statusline.getBoundingClientRect().height > 0
+        && getComputedStyle(statusline).visibility !== 'hidden',
+      ${includeGeometry ? 'geometry: geometry(),' : ''}
+    };
+    if (problems) problems.open = false;
+    const settings = document.querySelector('.build-settings');
+    if (settings) settings.open = true;
+    document.querySelector('.build-settings-close')?.click();
+    return {
+      width: innerWidth,
+      mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+      overflow: document.documentElement.scrollWidth > innerWidth + 1,
+      visibleWorkspaces: [...document.querySelectorAll('.workspace-view')].filter((view) => !view.hidden).length,
+      author,
+      explore,
+      preview,
+      settingsClosed: settings ? !settings.open : false,
+    };
+  })()`);
+  await cdp(ws, 'Emulation.clearDeviceMetricsOverride', {}, id);
+  return result;
+}
+
+function mobileLayoutPass(result) {
+  return result?.width === 390
+    && !result.overflow
+    && result.visibleWorkspaces === 1
+    && result.author?.sidebar === 'none'
+    && result.author?.picker !== 'none'
+    && result.author?.height > 100
+    && result.explore?.sidebar === 'none'
+    && result.explore?.picker !== 'none'
+    && result.explore?.height > 100
+    && result.preview?.height > 240
+    && Math.abs(result.preview.heightWithProblems - result.preview.height) < 2
+    && result.preview?.problemsPosition === 'fixed'
+    && !result.preview?.closedHandleOccludes
+    && !result.preview?.statusVisible
+    && result.settingsClosed;
+}
+
 // ---- preview-window gate (task #37) ---------------------------------------
 // Drives extra browser tabs (the SW-served preview) over CDP. Uses the DevTools
 // HTTP endpoint to open/close tabs and a per-tab WebSocket for evaluation.
@@ -418,9 +528,9 @@ try {
   const t0 = Date.now();
   await cdp(ws, 'Page.navigate', { url: base }, id);
 
-  // 0. Cold-start progress must be VISIBLE during startup (spec §1 gate). Poll
-  //    for the startup progress bar + a staged message before the engine is
-  //    ready. (On a very fast warm start this may be brief; we poll tightly.)
+  // 0. Cold-start progress must be VISIBLE during startup (spec §1 gate). Work
+  //    phases intentionally have no fake/indefinite bar; only a measured byte
+  //    transport gets one. Poll for the single staged status and nonempty text.
   results.progressSeen = false;
   {
     const deadline = Date.now() + 90000 * timeoutScale;
@@ -430,14 +540,16 @@ try {
         `(() => {
           const p = document.querySelector('.startup-progress');
           const ready = !!document.querySelector('.welcome-card button:not([disabled])');
-          return { bar: !!(p && p.querySelector('.startup-bar-fill')),
-                   msg: (p && p.querySelector('.startup-msg')?.textContent) || '',
+          return { visible: !!p,
+                   bar: !!(p && p.querySelector('.startup-bar-fill')),
+                   msg: (p && p.querySelector('.startup-msg')?.textContent.trim()) || '',
                    ready };
         })()`,
       );
-      if (seen.bar) {
+      if (seen.visible && seen.msg) {
         results.progressSeen = true;
         results.progressMsg = seen.msg;
+        results.progressMeasuredBarSeen ||= seen.bar;
       }
       if (seen.ready) break;
       await sleep(120);
@@ -484,6 +596,8 @@ try {
   results.engineLabel = await evalJs(ws, `document.querySelector('.welcome-engine')?.textContent || ''`);
 
   // 2. Open the tiny guide.
+  // A different valid Publisher preference must survive the Tiny-only pin.
+  await evalJs(ws, `localStorage.setItem('igEditor.templateCoord', 'hl7.fhir.template#0.10.1')`);
   await evalJs(ws, `document.querySelector('.welcome-card button').click()`);
 
   // 3. Wait for compile to finish (build status shows a ms value + resources).
@@ -509,6 +623,110 @@ try {
     const active = document.querySelector('.inspector-tabs .tab-btn.active');
     return active?.textContent?.trim() === 'Differential' && !!document.querySelector('.inspector-body');
   })()`, 30000, 'compiled differential inspector');
+  results.r5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
+
+  // Certify the purpose-built first-run story before switching to the larger
+  // Cycle compatibility fixture: one exact FSH declaration -> its compiled
+  // StructureDefinition -> its standard-HL7-template profile page.
+  results.tinyResourceCount = results.resourceCount;
+  results.tinyCleanDiagnostics = results.cleanDiagnostics;
+  results.tinyGuide = await evalJs(ws, `(() => ({
+    project: localStorage.getItem('igEditor.project'),
+    generator: document.querySelector('.preview-generator-select select')?.value || '',
+    template: (document.querySelector('.preview-template-select select')?.value || '')
+      + '#' + (document.querySelector('.preview-template-version select')?.value || ''),
+    subject: document.querySelector('.artifact-trail-subject')?.textContent?.trim() || '',
+    source: document.querySelectorAll('.artifact-trail-step')[0]?.textContent?.trim() || '',
+  }))()`);
+  await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[0]?.click()`);
+  await waitFor(ws, `document.querySelector('#workspace-tab-author')?.getAttribute('aria-selected') === 'true'`, 10000, 'tiny source trail');
+  results.tinyGuide.sourceMode = true;
+  await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[1]?.click()`);
+  await waitFor(ws, `document.querySelector('#workspace-tab-explore')?.getAttribute('aria-selected') === 'true'`, 10000, 'tiny definition trail');
+  results.tinyGuide.definitionMode = true;
+  await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[2]?.click()`);
+  await waitFor(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    return /StructureDefinition-editor-user\.html$/.test(frame?.contentWindow?.location.pathname || '')
+      && /IG Editor User/.test(doc?.body?.textContent || '');
+  })()`, 30000, 'tiny published profile trail');
+  Object.assign(results.tinyGuide, await evalJs(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    return {
+      profilePath: frame?.contentWindow?.location.pathname || '',
+      profileTitle: doc?.title || '',
+      profileTextLength: doc?.body?.textContent?.length || 0,
+    };
+  })()`));
+  await waitFor(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    return !!select && Array.from(select.options).some(candidate => /(?:^|\\/)index\\.html$/.test(candidate.value));
+  })()`, 10000, 'tiny index page option');
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    if (!select) throw new Error('tiny page selector is absent');
+    const option = Array.from(select.options).find(candidate => /(?:^|\\/)index\\.html$/.test(candidate.value));
+    if (!option) throw new Error('tiny index page is absent');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    return /The guide that describes its editor/i.test(doc?.body?.textContent || '')
+      && /Follow one rule all the way through/i.test(doc?.body?.textContent || '');
+  })()`, 30000, 'tiny authored narrative');
+  results.tinyGuide.narrative = true;
+  results.tinyGuide.templatePreferencePreserved = await evalJs(ws,
+    `localStorage.getItem('igEditor.templateCoord') === 'hl7.fhir.template#0.10.1'`,
+  );
+
+  if (process.env.E2E_MOBILE_LAYOUT_ONLY === '1') {
+    await cdp(ws, 'Page.reload', {}, id);
+    await waitFor(ws, `(() => localStorage.getItem('igEditor.project') === 'tiny'
+      && document.querySelector('.preview-template-select select')?.value === 'hl7.fhir.template'
+      && document.querySelector('.preview-template-version select')?.value === '1.0.0'
+      && document.querySelectorAll('.res-row').length === 4)()`, 60000, 'persisted Tiny template after reload');
+    results.tinyReload = await evalJs(ws, `(() => ({
+      preference: localStorage.getItem('igEditor.templateCoord'),
+      family: document.querySelector('.preview-template-select select')?.value || '',
+      version: document.querySelector('.preview-template-version select')?.value || '',
+    }))()`);
+    if (results.tinyReload.preference !== 'hl7.fhir.template#0.10.1'
+      || results.tinyReload.family !== 'hl7.fhir.template'
+      || results.tinyReload.version !== '1.0.0') {
+      throw new Error('persisted Tiny template diverged after reload');
+    }
+    await evalJs(ws, `document.querySelector('#workspace-tab-preview')?.click()`);
+    await waitFor(ws, `!!document.querySelector('.preview-frame')`, 30000, 'persisted Tiny preview after reload');
+    results.mobile390 = await measureMobileLayout(ws, true);
+    console.log(JSON.stringify({ tinyReload: results.tinyReload, mobile390: results.mobile390 }, null, 2));
+    if (!mobileLayoutPass(results.mobile390)) throw new Error('390px single-surface layout failed');
+    console.log('\nMOBILE LAYOUT GATE: PASS');
+    ws.close();
+    process.exit(0);
+  }
+
+  await evalJs(ws, `localStorage.setItem('igEditor.templateCoord', 'hl7.fhir.template#1.0.0')`);
+
+  // Preserve the pre-existing Cycle renderer, terminology, edit, and direct-
+  // output coverage by switching to its explicitly labelled project now.
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.open-ig-select');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(select, 'cycle');
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(ws, `(() => localStorage.getItem('igEditor.project') === 'cycle'
+    && document.querySelector('.preview-generator-select select')?.value === 'cycle'
+    && [...document.querySelectorAll('.res-row')].some(row => /ValueSet/.test(row.querySelector('.res-type')?.textContent || ''))
+    && !document.querySelector('.open-progress'))()`, 90000, 'Cycle project after tiny guide');
+  await evalJs(ws, `document.querySelector('#workspace-tab-explore')?.click()`);
+  await waitFor(ws, `document.querySelector('#workspace-tab-explore')?.getAttribute('aria-selected') === 'true'`, 10000, 'Cycle explore workspace');
+  results.resourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
+  results.cleanDiagnostics = await evalJs(ws, `document.querySelectorAll('.diag').length`);
   results.r5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
   // ---- ValueSet expansion tab (spec §6 tier 1) ----------------------------
@@ -874,8 +1092,8 @@ try {
   // tables, class="hierarchy"). With the registry ALLOWED (normal online use), a
   // compiled profile page MUST carry that real table markup — not just its title.
   // This is the exact surface that can regress to title-only; assert on the markup
-  // (and resourceCount>0) so it can't silently come back. Runs on the default demo
-  // IG (cycle: FSH-authored → real compiled resources). NOTE: registry is NOT
+  // (and resourceCount>0) so it can't silently come back. Runs on the Cycle
+  // fixture (FSH-authored → real compiled resources). NOTE: registry is NOT
   // blocked here — offline full-render is explicitly out of scope.
   {
     const target = await evalJs(ws, `(() => {
@@ -1100,8 +1318,12 @@ try {
   // the preview-window gate — that gate CLOSES the editor tab as its final test,
   // which would kill the shared CDP socket for any step placed after it — so we
   // restore the stock-template project state at the end of this block.
+  const openProgressMetricStart = await evalJs(ws, `window.__igDebug?.metrics?.length || 0`);
   await evalJs(ws, `(() => {
-    window.__openProgress = { stages: [], appeared: false, cleared: false, lastMsgs: [] };
+    window.__openProgress = {
+      stages: [], appeared: false, cleared: false, lastMsgs: [], byteLabels: [],
+      duplicateStatus: false, indefiniteAnimation: false
+    };
     const tick = () => {
       const el = document.querySelector('.open-progress');
       if (el) {
@@ -1112,11 +1334,20 @@ try {
         if (s && op.stages[op.stages.length - 1] !== s && !op.stages.includes(s)) op.stages.push(s);
         const msg = el.querySelector('.open-progress-msg')?.textContent || '';
         if (msg && op.lastMsgs[op.lastMsgs.length - 1] !== msg && op.lastMsgs.length < 30) op.lastMsgs.push(msg);
+        const bytes = el.querySelector('.progress-bytes')?.textContent?.trim() || '';
+        if (bytes && op.byteLabels[op.byteLabels.length - 1] !== bytes && op.byteLabels.length < 30) op.byteLabels.push(bytes);
+        const status = document.querySelector('.statusline');
+        if (status && (status.textContent.trim() || status.getBoundingClientRect().height > 1)) op.duplicateStatus = true;
+        if (el.querySelector('.open-progress-spinner, .indeterminate, .tab-spinner')) op.indefiniteAnimation = true;
       } else if (window.__openProgress.appeared) {
         window.__openProgress.cleared = true;
       }
     };
     window.__openProgressTimer = setInterval(tick, 25);
+    window.__openProgressObserver = new MutationObserver(tick);
+    window.__openProgressObserver.observe(document.documentElement, {
+      subtree: true, childList: true, characterData: true, attributes: true
+    });
     return true;
   })()`);
   const clickedUsCore = await evalJs(ws, `(() => {
@@ -1139,11 +1370,24 @@ try {
     // network — the open-PROGRESS gate asserts the staged UI (appears, ≥3 stages,
     // clears), NOT that US Core produces resources (a separate network concern).
     await waitFor(ws, `window.__openProgress.cleared`, 150000, 'US Core open overlay cleared');
-    const prog = await evalJs(ws, `(() => { clearInterval(window.__openProgressTimer); return window.__openProgress; })()`);
+    const prog = await evalJs(ws, `(() => {
+      clearInterval(window.__openProgressTimer);
+      window.__openProgressObserver?.disconnect();
+      return window.__openProgress;
+    })()`);
     results.openProgressAppeared = prog.appeared;
     results.openProgressStages = prog.stages;
     results.openProgressMsgs = prog.lastMsgs;
+    results.openProgressByteLabels = prog.byteLabels;
+    results.openProgressDuplicateStatus = prog.duplicateStatus;
+    results.openProgressIndefiniteAnimation = prog.indefiniteAnimation;
     results.openProgressCleared = prog.cleared && await evalJs(ws, `!document.querySelector('.open-progress')`);
+    results.openProgressByteMetrics = await evalJs(ws, `
+      (window.__igDebug?.metrics || []).slice(${JSON.stringify(openProgressMetricStart)})
+        .map(x => x.event)
+        .filter(e => e.bytes != null)
+        .map(e => ({ stage: e.stage, bytes: e.bytes, totalBytes: e.totalBytes }))
+    `);
     results.usCoreResourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
     console.error('[diag] usCoreResourceCount =', results.usCoreResourceCount);
 
@@ -1388,7 +1632,7 @@ try {
     }
 
     // Restore the exact stock-template project state the preview-window gate needs:
-    // re-open the demo IG, switch the preview generator back to the stock template,
+    // re-open the Cycle fixture, switch its preview generator to the stock template,
     // and wait for its page list + index render. (Opening catalog IGs switched the
     // project and its default generator.)
     await evalJs(ws, `(() => {
@@ -1399,11 +1643,11 @@ try {
       select.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    await waitForStable(ws, `document.querySelectorAll('.res-row').length === ${Number(results.resourceCount)} && !document.querySelector('.open-progress')`, 120000, 'demo IG resources replaced US Core');
+    await waitForStable(ws, `document.querySelectorAll('.res-row').length === ${Number(results.resourceCount)} && !document.querySelector('.open-progress')`, 120000, 'Cycle resources replaced US Core');
     // Ensure we're on the Site preview tab, then re-select the stock-template generator.
     await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
     await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'preview generator select present');
-    await waitForStable(ws, `document.querySelector('.preview-generator-select select')?.value === 'cycle'`, 30000, 'demo IG reset to Cycle generator');
+    await waitForStable(ws, `document.querySelector('.preview-generator-select select')?.value === 'cycle'`, 30000, 'Cycle fixture reset to Cycle generator');
     await evalJs(ws, `(() => {
       const sel = document.querySelector('.preview-generator-select select');
       const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
@@ -1508,49 +1752,7 @@ try {
     // Certify the real 390px browser layout, not just CSS source. Author and
     // Explore must each expose one mobile picker while their desktop sidebars
     // are absent, and the document itself must not horizontally overflow.
-    await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
-      width: 390,
-      height: 844,
-      deviceScaleFactor: 3,
-      mobile: true,
-    }, id);
-    await sleep(150);
-    results.mobile390 = await evalJs(ws, `(async () => {
-      const mode = (name) => [...document.querySelectorAll('.inspect-tab')]
-        .find((button) => button.textContent?.trim() === name);
-      mode('Author')?.click();
-      await new Promise(requestAnimationFrame);
-      const author = {
-        sidebar: getComputedStyle(document.querySelector('.source-sidebar')).display,
-        picker: getComputedStyle(document.querySelector('.author-workspace .mobile-picker')).display,
-        height: document.querySelector('.editor-pane')?.getBoundingClientRect().height || 0,
-      };
-      mode('Explore')?.click();
-      await new Promise(requestAnimationFrame);
-      const explore = {
-        sidebar: getComputedStyle(document.querySelector('.resource-sidebar')).display,
-        picker: getComputedStyle(document.querySelector('.explore-workspace .mobile-picker')).display,
-        height: document.querySelector('.definition-pane')?.getBoundingClientRect().height || 0,
-      };
-      mode('Site preview')?.click();
-      await new Promise(requestAnimationFrame);
-      const preview = {
-        height: document.querySelector('.preview-frame')?.getBoundingClientRect().height || 0,
-      };
-      const settings = document.querySelector('.build-settings');
-      if (settings) settings.open = true;
-      document.querySelector('.build-settings-close')?.click();
-      return {
-        width: innerWidth,
-        overflow: document.documentElement.scrollWidth > innerWidth + 1,
-        visibleWorkspaces: [...document.querySelectorAll('.workspace-view')].filter((view) => !view.hidden).length,
-        author,
-        explore,
-        preview,
-        settingsClosed: settings ? !settings.open : false,
-      };
-    })()`);
-    await cdp(ws, 'Emulation.clearDeviceMetricsOverride', {}, id);
+    results.mobile390 = await measureMobileLayout(ws);
     await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); t?.click(); })()`);
   }
 
@@ -1614,6 +1816,27 @@ try {
 
   // assertions
   let ok = true;
+  const tiny = results.tinyGuide || {};
+  if (!(
+    tiny.project === 'tiny'
+    && tiny.generator === 'hl7.fhir.template'
+    && tiny.template === 'hl7.fhir.template#1.0.0'
+    && tiny.subject === 'StructureDefinition/editor-user'
+    && /input\/fsh\/00-EditorUser\.fsh:/.test(tiny.source || '')
+    && tiny.sourceMode
+    && tiny.definitionMode
+    && /StructureDefinition-editor-user\.html$/.test(tiny.profilePath || '')
+    && /IG Editor User/.test(tiny.profileTitle || '')
+    && tiny.profileTextLength > 500
+    && tiny.narrative
+    && tiny.templatePreferencePreserved
+    // compileProject exposes the four authored FSH products; the generated
+    // ImplementationGuide is deliberately a disk/native-only SUSHI output.
+    && results.tinyResourceCount === 4
+    && results.tinyCleanDiagnostics === 0
+  )) {
+    console.error('assert: tiny Source -> Definition -> standard Publisher page story failed —', JSON.stringify(tiny)); ok = false;
+  }
   if (results.resourceCount < 5) { console.error('assert: too few resources'); ok = false; }
   // ONLINE fragment-content gate: a compiled profile page must render real table
   // markup in its body, not just a title ("titles, no content" regression guard).
@@ -1802,19 +2025,7 @@ try {
   )) {
     console.error('assert: definition filtering missed the <100ms gate —', JSON.stringify(results.definitionSearch)); ok = false;
   }
-  if (!(
-    results.mobile390?.width === 390
-    && !results.mobile390.overflow
-    && results.mobile390.visibleWorkspaces === 1
-    && results.mobile390.author?.sidebar === 'none'
-    && results.mobile390.author?.picker !== 'none'
-    && results.mobile390.author?.height > 100
-    && results.mobile390.explore?.sidebar === 'none'
-    && results.mobile390.explore?.picker !== 'none'
-    && results.mobile390.explore?.height > 100
-    && results.mobile390.preview?.height > 100
-    && results.mobile390.settingsClosed
-  )) {
+  if (!mobileLayoutPass(results.mobile390)) {
     console.error('assert: 390px single-surface layout failed —', JSON.stringify(results.mobile390)); ok = false;
   }
   if (results.stockEditResult !== 'ok') {
@@ -1862,6 +2073,16 @@ try {
     const stages = results.openProgressStages || [];
     if (!(stages.length >= 3)) { console.error('assert: <3 distinct open-progress stages observed:', JSON.stringify(stages)); ok = false; }
     if (!results.openProgressCleared) { console.error('assert: open-progress overlay did not clear after US Core open'); ok = false; }
+    if (results.openProgressDuplicateStatus) { console.error('assert: statusline duplicated the project-open signal'); ok = false; }
+    if (results.openProgressIndefiniteAnimation) { console.error('assert: project-open UI showed an indefinite spinner/bar'); ok = false; }
+    const byteMetrics = results.openProgressByteMetrics || [];
+    if (!byteMetrics.some((event) => event.bytes > 0)) {
+      console.error('assert: project download emitted no consumed-byte progress:', JSON.stringify(byteMetrics)); ok = false;
+    }
+    if (byteMetrics.some((event) => event.bytes > 0)
+        && !(results.openProgressByteLabels || []).some((label) => /\bMB\b/.test(label))) {
+      console.error('assert: byte download showed no visible MB counter:', JSON.stringify(results.openProgressByteLabels)); ok = false;
+    }
     // NOTE: US Core resource count is informational — a full compile needs
     // registry-only packages (external network), so we don't gate on it.
     if (!(results.usCoreResourceCount >= 0)) { console.error('assert: US Core resource count missing (open failed?)'); ok = false; }

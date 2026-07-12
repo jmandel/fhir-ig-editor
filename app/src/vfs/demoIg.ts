@@ -1,14 +1,12 @@
-// Tiny-guide entry action (spec §5, mode 1): hydrate the project store from the baked
-// cycle IG manifest. scripts/export-ig-manifest.ts exports the cycle submodule's
-// sushi-config.yaml + input/fsh/** + input/resources/** into
-// public/data/cycle/manifest.json (a single JSON with inlined file text), so one
-// fetch + one loadAll gives an offline-capable working project.
+// Baked-project loader. The first-run authoring guide and the Cycle external-
+// builder fixture are exported to data/<id>/manifest.json; catalog IGs use the
+// authenticated source.tgz path below. Every route hydrates the same ProjectStore.
 
 import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
 import type { ProgressEvent } from '../worker/protocol';
 import { loadGithubIg, type GithubIgSpec } from './githubIg';
 import igCatalog from '../igCatalog.json';
-import { sha256Hex } from '../worker/bundleIntegrity';
+import { readResponseBytes, sha256Hex } from '../worker/bundleIntegrity';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
@@ -113,30 +111,41 @@ async function loadTgzProject(
     return { name: ig.name, fileCount: descriptor.files };
   }
 
-  onProgress?.({ stage: 'manifest', label: ig.id, message: `Loading ${ig.name}…` });
-  const fetchStarted = performance.now();
+  onProgress?.({
+    stage: 'manifest',
+    label: ig.id,
+    bytes: 0,
+    totalBytes: descriptor.bytes,
+    message: `Downloading ${ig.name} source…`,
+  });
   const resp = await fetch(`${BASE}data/${ig.id}/source.tgz`);
   if (!resp.ok) throw new Error(`fetch ${ig.id} source.tgz -> ${resp.status}`);
-  const compressed = await resp.arrayBuffer();
+  const compressed = await readResponseBytes(resp, (bytes, totalBytes) => {
+    onProgress?.({
+      stage: 'manifest',
+      label: ig.id,
+      bytes,
+      totalBytes,
+      message: `Downloading ${ig.name} source…`,
+    });
+  }, descriptor.bytes);
   if (compressed.byteLength !== descriptor.bytes) {
     throw new Error(`${ig.id} source.tgz byte length mismatch: expected ${descriptor.bytes}, got ${compressed.byteLength}`);
   }
+  onProgress?.({
+    stage: 'project-verify',
+    label: ig.id,
+    message: `Verifying ${ig.name} source archive…`,
+    inputBytes: compressed.byteLength,
+  });
   const actualSha256 = await sha256Hex(compressed);
   if (actualSha256 !== descriptor.sha256) {
     throw new Error(`${ig.id} source.tgz SHA-256 mismatch: expected ${descriptor.sha256}, got ${actualSha256}`);
   }
-  onProgress?.({
-    stage: 'manifest',
-    label: ig.id,
-    message: `Loaded ${ig.name} source archive.`,
-    durationMs: performance.now() - fetchStarted,
-    inputBytes: compressed.byteLength,
-  });
-
   const unpackStarted = performance.now();
+  onProgress?.({ stage: 'project-unpack', label: ig.id, message: `Unpacking ${ig.name}…` });
   const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
   const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
-  onProgress?.({ stage: 'project-unpack', label: ig.id, message: `Unpacking ${ig.name}…` });
 
   const files: ProjectFile[] = [];
   const binary: BinaryProjectFile[] = [];
@@ -182,12 +191,6 @@ async function loadTgzProject(
 // arbitrary GitHub-hosted IG that isn't pre-baked.
 export const GITHUB_PROJECTS: Record<string, GithubIgSpec> = {};
 
-function fmtBytes(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
-}
-
 interface IgManifest {
   name: string;
   /** path → text, project-relative. */
@@ -201,10 +204,6 @@ export interface DemoIgMeta {
   fileCount: number;
 }
 
-export async function loadDemoIg(store: ProjectStore): Promise<DemoIgMeta> {
-  return loadProject(store, 'cycle');
-}
-
 /** Load a baked project by id (`data/<id>/manifest.json`). The optional
  *  `onProgress` surfaces the manifest fetch (with byte count when the response
  *  carries Content-Length) so the project-open overlay reads as alive. */
@@ -216,7 +215,7 @@ export async function loadProject(
   // Dispatch: a catalog IG loads from its CI-baked same-origin source.tgz; a
   // GITHUB_PROJECTS entry loads live from GitHub (generic fallback for anything
   // not pre-baked); everything else is a baked data/<id>/manifest.json fetch
-  // (the cycle demo).
+  // (the tiny guide and Cycle fixture).
   const cat = CATALOG_BY_ID[projectId];
   if (cat) return loadTgzProject(store, cat, onProgress);
   const gh = GITHUB_PROJECTS[projectId];
@@ -228,10 +227,20 @@ export async function loadProject(
   onProgress?.({
     stage: 'manifest',
     label: projectId,
-    bytes: len || undefined,
-    message: `Loading ${projectId} project files${len ? ` (${fmtBytes(len)})` : ''}…`,
+    bytes: 0,
+    totalBytes: len || undefined,
+    message: `Downloading ${projectId} project files…`,
   });
-  const manifest: IgManifest = await resp.json();
+  const manifestBytes = await readResponseBytes(resp, (bytes, totalBytes) => {
+    onProgress?.({
+      stage: 'manifest',
+      label: projectId,
+      bytes,
+      totalBytes,
+      message: `Downloading ${projectId} project files…`,
+    });
+  }, len || undefined);
+  const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as IgManifest;
   const files: ProjectFile[] = Object.entries(manifest.files).map(([path, text]) => ({
     path,
     text,

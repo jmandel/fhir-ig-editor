@@ -26,7 +26,9 @@ cleanup() {
   [ -z "$chrome_pid" ] || kill "$chrome_pid" 2>/dev/null || true
   [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true
   wait "$chrome_pid" "$server_pid" 2>/dev/null || true
-  rm -rf "$WORK"
+  # Chromium can release profile files a moment after its parent exits. A
+  # cleanup race must not turn an otherwise successful product gate red.
+  rm -rf "$WORK" 2>/dev/null || true
 }
 on_error() {
   echo "[browser-gates] static server log:" >&2

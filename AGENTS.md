@@ -37,6 +37,50 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Current UX round
+
+The user asked to replace the odd Cycle first-run experience, make the mobile
+preview usable, and replace simultaneous indefinite loaders with truthful
+transport progress. That round is implemented and locally certified.
+
+- `demo/tiny-guide` is now the purpose-built first-run project, titled “The
+  Guide That Describes Its Editor.” It is a four-resource R4 FSH guide rendered
+  with exactly `hl7.fhir.template#1.0.0`. Its intended teaching path is
+  `00-EditorUser.fsh -> StructureDefinition/editor-user ->
+  StructureDefinition-editor-user.html`; the example already satisfies the
+  suggested `name.given 1..* -> 2..*` edit. Cycle remains available and is
+  clearly labelled as the external-builder fixture.
+- One `ProgressEvent` semantic now flows end to end: `bytes` means response-body
+  bytes actually consumed and `totalBytes` is an expected transport size. Only
+  known-total downloads show a determinate bar; unknown-total downloads show a
+  byte counter; verify/unpack/compile/mount/build are text-only work phases.
+  The duplicate status line, tab spinner, and indefinite project-open bar are
+  removed. Baked packages, registry packages, catalog archives, baked project
+  manifests, and live GitHub files report real streaming progress.
+- The 390px layout keeps Author/Explore as single surfaces, makes Problems a
+  fixed overlay with reserved closed-handle space, and removes redundant
+  overview/trail chrome in Preview. Do not
+  use `display:none` for the opened-project status-line grid item: the app has
+  explicitly placed grid rows, and removing that node shifts the workspace out
+  of its `1fr` row. It must remain in flow at zero height.
+- The exact reviewed Pages-subpath fresh-profile receipt is
+  `/tmp/fhir-tiny-progress-mobile-reviewed-final3.log` (`E2E GATE: PASS`). At
+  390x667 it measured Author 329px, Explore 329px, Preview 490px, no overflow,
+  no closed Problems-handle overlap, and no preview shrink when Problems opened.
+  The same run proved the tiny guide's causal source/definition/page path and
+  exact active template while preserving a different global user preference,
+  no duplicate or indefinite loaders, measured MB labels, explicit unpack
+  phases, US Core 212 resources plus 1,535/1,535 images and 85/85 assets,
+  one-shell CarePlan, real mCODE, lazy R5, protocol-4 restart, and scroll 640 ->
+  640 after hot reload. Stock warm edit was 1,189 ms.
+- App tests are 65/65 (369 assertions); the Pages-base TypeScript/Vite build is
+  green at 1,135 modules; the native tiny guide build is green; package-list
+  resolver drift and `git diff --check` are green. The focused mobile gate now
+  asserts instead of merely printing; its receipt is
+  `/tmp/fhir-mobile-layout-reload-final2.log` (`MOBILE LAYOUT GATE: PASS`); it
+  additionally proves a persisted Tiny reload displays/builds 1.0.0 while
+  preserving a different global template preference.
+
 ## Implemented state
 
 - The UX/performance round is implemented and locally certified. The app now opens with two outcome-

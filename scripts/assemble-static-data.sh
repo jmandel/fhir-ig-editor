@@ -12,6 +12,9 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 bash "$HERE/bundle-packages.sh"
 node "$HERE/export-ig-manifest.mjs"
+# Cycle remains an explicit external-generator example and a compatibility
+# fixture, but it is no longer presented as the tiny first-authoring guide.
+node "$HERE/export-ig-manifest.mjs" --src "$REPO/vendor/cycle" --out cycle
 
 # Catalog projects are pinned in igCatalog.json and baked as same-origin source
 # archives. Passing IDs to this script is intentionally unsupported: a complete
@@ -34,6 +37,7 @@ rm -rf "$REPO/app/public/data/fixtures"/*
 cp -r "$REPO/scripts/fixtures/bad-ant-template/." "$REPO/app/public/data/fixtures/" 2>/dev/null || true
 
 test -f "$REPO/app/public/data/cycle/manifest.json"
+test -f "$REPO/app/public/data/tiny/manifest.json"
 test -f "$REPO/app/public/data/uscore/source.tgz"
 test -f "$REPO/app/public/data/uscore/source.json"
 test -f "$REPO/app/public/data/cycle/renderer-package/manifest.json"

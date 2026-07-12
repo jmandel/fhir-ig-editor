@@ -1,9 +1,9 @@
 # Build the static FHIR IG Editor and deploy to GitHub Pages.
 #
-# The engine that ships is EXACTLY the pinned vendor/sushi-rs commit; the default
-# IG is EXACTLY the pinned vendor/cycle commit. Bumping a submodule is the upgrade
-# event. CI runs the engine's own fast gates before deploying — the demo never
-# ships an engine that fails its own tests.
+# The engine and external-builder fixture that ship are exactly the pinned
+# vendor/sushi-rs and vendor/cycle commits. The first-run guide is the checked-in
+# demo/tiny-guide project. CI runs the engine's own fast gates before deploying —
+# the demo never ships an engine that fails its own tests.
 #
 # Package acquisition: CI downloads the pinned closure (scripts/packages.list)
 # from the FHIR package registry into .fhir-cache, wrapped in actions/cache keyed
@@ -165,7 +165,7 @@ jobs:
 
       # --- Consistency gate: the in-engine tier-1 expander (expand_enumerable)
       # must agree with the committed expansion cache on the shared domain.
-      # This cycle's committed cache is EMPTY, so the gate is
+      # The committed cache is EMPTY, so the gate is
       # trivially green over it — but it is WIRED and proven by a fixture-based
       # self-test (an agreeing case AND a deliberately-wrong case the gate must
       # reject), so a green result means the machinery genuinely compares. CI
@@ -248,6 +248,7 @@ jobs:
         run: |
           # public/ (pkg + data) is copied into dist by Vite; ensure it is present.
           test -f app/dist/pkg/wasm_api_bg.wasm
+          test -f app/dist/data/tiny/manifest.json
           test -f app/dist/data/cycle/manifest.json
 
       - name: Upload Pages artifact

@@ -1,14 +1,14 @@
 // Consistency gate (editor spec §6 tier 3): the in-engine tier-1 expander
 // (`expand_enumerable`) MUST agree, ON THE SHARED DOMAIN, with every committed
-// expansion-cache entry for the default IG. The committed cache is the tx-sourced
+// expansion-cache entry. The committed cache is the tx-sourced
 // AUTHORITY (refreshed deliberately by a maintainer, never by CI). Two expanders
 // are tolerable only while provably agreeing; on mismatch the cached tx answer
 // wins and the evaluator is fixed.
 //
 //   node scripts/consistency-gate.mjs <wasm-nodejs-dir> [<cache-dir>]
 //
-// This CYCLE's committed cache is EMPTY (no external-system ValueSet needs a
-// server for the demo IG), so over the real cache the gate is trivially green.
+// The committed cache is currently EMPTY, so over the real cache the gate is
+// trivially green.
 // To prove the PLUMBING is real (not vacuously passing), the script ALSO runs a
 // bundled fixture-based SELF-TEST: a known ValueSet + a committed-shape cache
 // entry whose code set it must match, plus a deliberately-wrong entry it must

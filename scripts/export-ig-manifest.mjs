@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Export the baked default IG (spec §5, mode 1) from the cycle submodule into
-// app/public/data/cycle/manifest.json — a single JSON with every project file
+// Export the baked tiny authoring guide (spec §5, mode 1) into
+// app/public/data/tiny/manifest.json — a single JSON with every project file
 // inlined, so opening the tiny guide is one fetch + one OPFS hydrate (offline after first
 // load). Gitignored / regenerated here + in CI.
 //
@@ -18,17 +18,16 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
-// Default: the cycle submodule -> data/cycle. `--src DIR --out NAME` exports
-// any publisher-shaped project dir (sushi-config.yaml + input/**) instead —
-// used for the US Core demo project (node scripts/export-ig-manifest.mjs
-// --src <us-core dir> --out uscore).
+// Default: demo/tiny-guide -> data/tiny. `--src DIR --out NAME` exports
+// any publisher-shaped project dir (sushi-config.yaml + input/**) instead; the
+// static-data assembly uses that explicit form for the Cycle fixture.
 const argv = process.argv.slice(2);
 const argOf = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
-const CYCLE = argOf('--src') ? path.resolve(argOf('--src')) : path.join(REPO, 'vendor/cycle');
-const OUT_DIR = path.join(REPO, 'app/public/data', argOf('--out') || 'cycle');
+const PROJECT = argOf('--src') ? path.resolve(argOf('--src')) : path.join(REPO, 'demo/tiny-guide');
+const OUT_DIR = path.join(REPO, 'app/public/data', argOf('--out') || 'tiny');
 
-if (!fs.existsSync(path.join(CYCLE, 'sushi-config.yaml'))) {
-  console.error(`FATAL: no sushi-config.yaml under ${CYCLE}`);
+if (!fs.existsSync(path.join(PROJECT, 'sushi-config.yaml'))) {
+  console.error(`FATAL: no sushi-config.yaml under ${PROJECT}`);
   process.exit(2);
 }
 
@@ -47,34 +46,34 @@ function collect(dir, exts) {
 const files = {};
 const binaryFiles = {};
 function addText(abs) {
-  const rel = path.relative(CYCLE, abs).split(path.sep).join('/');
+  const rel = path.relative(PROJECT, abs).split(path.sep).join('/');
   files[rel] = fs.readFileSync(abs, 'utf8');
 }
 function addBinary(abs) {
-  const rel = path.relative(CYCLE, abs).split(path.sep).join('/');
+  const rel = path.relative(PROJECT, abs).split(path.sep).join('/');
   binaryFiles[rel] = fs.readFileSync(abs).toString('base64');
 }
 
-addText(path.join(CYCLE, 'sushi-config.yaml'));
-if (fs.existsSync(path.join(CYCLE, 'ig.ini'))) addText(path.join(CYCLE, 'ig.ini'));
-for (const f of collect(path.join(CYCLE, 'input/fsh'), ['fsh'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/resources'), ['json'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/examples'), ['json'])) addText(f);
+addText(path.join(PROJECT, 'sushi-config.yaml'));
+if (fs.existsSync(path.join(PROJECT, 'ig.ini'))) addText(path.join(PROJECT, 'ig.ini'));
+for (const f of collect(path.join(PROJECT, 'input/fsh'), ['fsh'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/resources'), ['json'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/examples'), ['json'])) addText(f);
 // S6 site content: page bodies + any liquid includes (text).
-for (const f of collect(path.join(CYCLE, 'input/pagecontent'), ['md', 'xml'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/pages'), ['md', 'xml', 'html'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/includes'), ['md', 'xml', 'xhtml', 'html', 'txt'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/intro-notes'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/resource-docs'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/data'), ['json', 'yaml', 'yml', 'csv'])) addText(f);
-for (const f of collect(path.join(CYCLE, 'input/images-source'), ['plantuml', 'puml', 'txt'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/pagecontent'), ['md', 'xml'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/pages'), ['md', 'xml', 'html'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/includes'), ['md', 'xml', 'xhtml', 'html', 'txt'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/intro-notes'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/resource-docs'), ['md', 'xml', 'xhtml', 'html'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/data'), ['json', 'yaml', 'yml', 'csv'])) addText(f);
+for (const f of collect(path.join(PROJECT, 'input/images-source'), ['plantuml', 'puml', 'txt'])) addText(f);
 // Images are binary → base64.
-for (const f of collect(path.join(CYCLE, 'input/images'), ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'])) addBinary(f);
+for (const f of collect(path.join(PROJECT, 'input/images'), ['png', 'svg', 'jpg', 'jpeg', 'gif', 'webp'])) addBinary(f);
 
 // Read the IG name from sushi-config (best-effort; no YAML dep).
 const cfg = files['sushi-config.yaml'] ?? '';
 const nameMatch = cfg.match(/^title:\s*(.+)$/m) || cfg.match(/^name:\s*(.+)$/m);
-const name = (nameMatch ? nameMatch[1] : 'cycle IG').trim().replace(/^["']|["']$/g, '');
+const name = (nameMatch ? nameMatch[1] : 'FHIR implementation guide').trim().replace(/^["']|["']$/g, '');
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const fileCount = Object.keys(files).length + Object.keys(binaryFiles).length;

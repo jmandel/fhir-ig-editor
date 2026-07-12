@@ -17,6 +17,7 @@
 import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
 import type { ProgressEvent } from '../worker/protocol';
 import type { DemoIgMeta } from './demoIg';
+import { readResponseBytes } from '../worker/bundleIntegrity';
 
 /** A GitHub-hosted IG source: repo @ ref, optionally rooted in a subdir. */
 export interface GithubIgSpec {
@@ -172,17 +173,30 @@ export async function fetchGithubIgManifest(
   const binaryFiles: Record<string, string> = {};
   const total = textPaths.length + binaryPaths.length;
   let done = 0;
+  let downloaded = 0;
+  const downloadedByPath = new Map<string, number>();
   const rawUrl = (r: string) =>
     `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${rootPrefix}${r
       .split('/')
       .map(encodeURIComponent)
       .join('/')}`;
+  const reportBytes = (r: string, bytes: number) => {
+    downloaded += bytes - (downloadedByPath.get(r) ?? 0);
+    downloadedByPath.set(r, bytes);
+    onProgress?.({
+      stage: 'manifest',
+      label,
+      bytes: downloaded,
+      message: `Downloading ${label} source files (${r})…`,
+    });
+  };
   const bump = (r: string) => {
     done++;
     if (done % 10 === 0 || done === total) {
       onProgress?.({
         stage: 'manifest',
         label,
+        bytes: downloaded,
         fraction: total ? done / total : undefined,
         message: `Fetching ${label} — ${done}/${total} files (${r})`,
       });
@@ -194,7 +208,8 @@ export async function fetchGithubIgManifest(
       throw new Error(`Fetching ${r} from ${label} failed: ${String(e)} (network/CORS).`);
     });
     if (!resp.ok) throw new Error(`Fetching ${r} from ${label} failed: HTTP ${resp.status}.`);
-    files[r] = await resp.text();
+    const bytes = await readResponseBytes(resp, (read) => reportBytes(r, read));
+    files[r] = new TextDecoder().decode(bytes);
     bump(r);
   });
   await mapPool(binaryPaths, 8, async (r) => {
@@ -202,7 +217,8 @@ export async function fetchGithubIgManifest(
       throw new Error(`Fetching ${r} from ${label} failed: ${String(e)} (network/CORS).`);
     });
     if (!resp.ok) throw new Error(`Fetching ${r} from ${label} failed: HTTP ${resp.status}.`);
-    binaryFiles[r] = await arrayBufferToBase64(await resp.arrayBuffer());
+    const bytes = await readResponseBytes(resp, (read) => reportBytes(r, read));
+    binaryFiles[r] = await arrayBufferToBase64(bytes);
     bump(r);
   });
 

@@ -73,20 +73,70 @@ export async function sha256Hex(bytes: BufferSource): Promise<string> {
   return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+/** Read a response body while reporting the bytes actually consumed. This is
+ * deliberately transport-only: authentication and decompression remain at
+ * their existing boundaries. */
+export async function readResponseBytes(
+  response: Response,
+  onProgress?: (bytes: number, totalBytes?: number) => void,
+  expectedBytes?: number,
+): Promise<ArrayBuffer> {
+  const contentLength = response.headers.get('content-length');
+  const headerBytes = contentLength == null ? Number.NaN : Number(contentLength);
+  const totalBytes = expectedBytes ?? (
+    Number.isSafeInteger(headerBytes) && headerBytes >= 0 ? headerBytes : undefined
+  );
+  onProgress?.(0, totalBytes);
+  if (!response.body) {
+    const bytes = await response.arrayBuffer();
+    onProgress?.(bytes.byteLength, totalBytes);
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  let reportedLength = 0;
+  let reportedAt = performance.now();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.byteLength) continue;
+    chunks.push(value);
+    length += value.byteLength;
+    const now = performance.now();
+    if (length === totalBytes || now - reportedAt >= 100) {
+      onProgress?.(length, totalBytes);
+      reportedLength = length;
+      reportedAt = now;
+    }
+  }
+  if (reportedLength !== length) onProgress?.(length, totalBytes);
+  const joined = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return joined.buffer;
+}
+
 /** Read and authenticate a compressed baked bundle before any inflater or engine
  * can observe its contents. The optional byte count is checked as an additional
  * truncation/configuration diagnostic; SHA-256 remains authoritative. */
 export async function readVerifiedBundleBytes(
   response: Response,
   entry: Pick<BakedBundleEntry, 'label' | 'sha256' | 'bytes'>,
+  onProgress?: (bytes: number, totalBytes?: number) => void,
+  onVerify?: () => void,
 ): Promise<ArrayBuffer> {
   if (!response.ok) throw new Error(`fetch baked package ${entry.label} -> ${response.status}`);
-  const bytes = await response.arrayBuffer();
+  const bytes = await readResponseBytes(response, onProgress, entry.bytes);
   if (entry.bytes !== undefined && bytes.byteLength !== entry.bytes) {
     throw new BakedBundleIntegrityError(
       `baked package ${entry.label} byte length mismatch: expected ${entry.bytes}, got ${bytes.byteLength}`,
     );
   }
+  onVerify?.();
   const actual = await sha256Hex(bytes);
   if (actual !== entry.sha256) {
     throw new BakedBundleIntegrityError(

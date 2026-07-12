@@ -2,7 +2,7 @@
 # GENERATE scripts/packages.list from the baked IG's config, using the native Rust
 # resolver (task #32 gate v: lockfile un-handing). The closure is no longer
 # hand-maintained — it is the UNION of the engine's compile_set + context_closure
-# for the demo IG (vendor/cycle), PLUS the ONE snapshot-engine special (r5.core for
+# for the Cycle external-builder fixture, PLUS the ONE snapshot-engine special (r5.core for
 # an R4 IG: the walk engine is R5-internal, so R4 profile bases resolve against
 # r5.core during snapshot generation — not derivable from package.json deps).
 #
@@ -28,15 +28,15 @@ HEADER="$(cat <<'EOF'
 #   FHIR_CACHE=<packages-dir> scripts/gen-packages-list.sh
 # A CI drift gate (CHECK=1) fails if this file diverges from the resolver output.
 #
-# The demo IG's package closure = the native resolver's compile_set ∪
-# context_closure for vendor/cycle, PLUS the snapshot-engine special r5.core.
+# The Cycle external-builder fixture's package closure = the native resolver's
+# compile_set ∪ context_closure, PLUS the snapshot-engine special r5.core.
 # Consumed by fetch-packages.sh (download) and bundle-packages.sh (bundle).
 #
 # Why each package:
-#   hl7.fhir.r4.core        — cycle is an R4 IG; the compile fishes R4 bases.
-#   hl7.fhir.uv.tools.r4    — cycle automatic dependency (R4).
-#   hl7.terminology.r4      — cycle automatic dependency (R4).
-#   hl7.fhir.uv.extensions.r4 — cycle automatic dependency (R4).
+#   hl7.fhir.r4.core        — the fixture and tiny guide are R4 IGs.
+#   hl7.fhir.uv.tools.r4    — automatic R4 tooling dependency.
+#   hl7.terminology.r4      — automatic R4 terminology dependency.
+#   hl7.fhir.uv.extensions.r4 — automatic R4 extension dependency.
 #   hl7.fhir.r5.core        — SNAPSHOT-ENGINE SPECIAL (not a package.json dep):
 #                             the walk engine is R5-internal, so R4 profile bases
 #                             resolve against r5.core during snapshot generation.

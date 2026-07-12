@@ -57,8 +57,10 @@ export interface ResolveOutcome {
 
 /** How the loop reports progress (reuses the worker ProgressEvent stages). */
 export type ResolveProgress = (ev: {
-  stage: 'resolve' | 'registry-fetch' | 'bundle-cache-hit' | 'package-blocked';
+  stage: 'resolve' | 'registry-fetch' | 'bundle-cache-hit' | 'bundle-unpack' | 'package-blocked';
   label?: string;
+  bytes?: number;
+  totalBytes?: number;
   message: string;
 }) => void;
 
@@ -389,8 +391,35 @@ async function fetchFromRegistry(
       // strips that prefix, and the engine derives the `.derived-index.json`
       // sidecar in-memory (verified byte-parity vs repacked bundles), so a plain
       // registry tarball mounts identically to a baked bundle.
+      const contentLength = resp.headers.get('content-length');
+      const total = contentLength == null ? Number.NaN : Number(contentLength);
+      const totalBytes = Number.isSafeInteger(total) && total > 0 ? total : undefined;
+      onProgress({
+        stage: 'registry-fetch',
+        label,
+        bytes: 0,
+        totalBytes,
+        message: `Downloading ${label} from ${registry}…`,
+      });
       const { inflateBundleResponse } = await import('./inflate');
-      const files = await inflateBundleResponse(resp);
+      const files = await inflateBundleResponse(
+        resp,
+        (bytes) => {
+          onProgress({
+            stage: 'registry-fetch',
+            label,
+            bytes,
+            totalBytes,
+            message: `Downloading ${label} from ${registry}…`,
+          });
+        },
+        () => onProgress({
+          stage: 'bundle-unpack',
+          label,
+          message: `Unpacking ${label}…`,
+        }),
+      );
+      onProgress({ stage: 'bundle-unpack', label, message: `Unpacked ${label}.` });
       return { label, files };
     } catch {
       /* try the next registry */

@@ -68,9 +68,10 @@ app/                     React/Vite application
   src/site/              four-operation site contract and catalog invariants
   src/preview/           ContentStore-backed Service Worker publication
 scripts/                 WASM, package, catalog, renderer-package, and gate recipes
+demo/tiny-guide/         self-referential first-run FSH + Publisher guide
 expansions/              deliberately refreshed terminology warm-start data
 vendor/sushi-rs/         pinned engine submodule
-vendor/cycle/            pinned default IG and external renderer submodule
+vendor/cycle/            pinned external-builder fixture and renderer submodule
 .github/workflows/       Pages build, certification, and deployment
 ```
 

@@ -154,8 +154,9 @@ export class EngineClient {
     this.progressCb?.({
       stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
       label: entry.label,
-      bytes: entry.bytes,
-      message: `${stageLabel} ${entry.label}${entry.bytes ? ` (${fmtBytes(entry.bytes)})` : ''}…`,
+      bytes: 0,
+      totalBytes: entry.bytes,
+      message: `${stageLabel} ${entry.label}…`,
     });
     // Bundle filenames contain '#' (e.g. hl7.fhir.r4.core#4.0.1.tgz); a raw '#'
     // in a URL is a fragment delimiter, so encode it (the P0 gotcha).
@@ -164,14 +165,32 @@ export class EngineClient {
     if (!resp.ok) throw new Error(`fetch ${url} -> ${resp.status}`);
     // Baked bundles are deployment inputs: authenticate the compressed bytes
     // before the inflater or engine can observe any package content.
-    const compressed = await readVerifiedBundleBytes(resp, entry);
+    const transportStage = stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch';
+    const compressed = await readVerifiedBundleBytes(
+      resp,
+      entry,
+      (bytes, totalBytes) => {
+        this.progressCb?.({
+          stage: transportStage,
+          label: entry.label,
+          bytes,
+          totalBytes,
+          message: `${stageLabel} ${entry.label}…`,
+        });
+      },
+      () => this.progressCb?.({
+        stage: 'bundle-unpack',
+        label: entry.label,
+        message: `Verifying and unpacking ${entry.label}…`,
+        inputBytes: entry.bytes,
+      }),
+    );
     const { inflateBundle } = await import('./inflate');
     const files = await inflateBundle(compressed);
     const spec: BundleSpec = { label: entry.label, files };
     this.progressCb?.({
-      stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
+      stage: 'bundle-unpack',
       label: entry.label,
-      bytes: compressed.byteLength,
       message: `${stageLabel} ${entry.label} loaded and inflated.`,
       durationMs: performance.now() - started,
       inputBytes: compressed.byteLength,
@@ -460,7 +479,7 @@ export class EngineClient {
       validatedIndex = await refreshMutableVersionIndex(
         lock.mutableRequests,
         seedIndex,
-        (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+        (ev) => this.progressCb?.({ ...ev }),
       );
       const freshnessMs = performance.now() - freshnessStarted;
       if (validatedIndex) {
@@ -470,7 +489,7 @@ export class EngineClient {
         const exact = await obtainLockedPackages(
           host,
           needed,
-          (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+          (ev) => this.progressCb?.({ ...ev }),
         );
         const acquireMs = performance.now() - acquireStarted;
         if (exact.blocked.length === 0 && exact.packages.length === needed.length) {
@@ -528,7 +547,7 @@ export class EngineClient {
     const outcome = await acquireForProject(
       host,
       config,
-      (ev) => this.progressCb?.({ stage: ev.stage, label: ev.label, message: ev.message }),
+      (ev) => this.progressCb?.({ ...ev }),
       validatedIndex ?? seedIndex,
     );
     // The loop's final resolve happened after its final mount, so a satisfied
@@ -659,7 +678,7 @@ export class EngineClient {
       if (step.satisfied) return;
       if (!step.missing) throw new Error(`Template ${coordinate} is unresolved without a missing coordinate`);
       const mounted = await obtainAndMountPackage(host, step.missing, (event) => {
-        this.progressCb?.({ stage: event.stage, label: event.label, message: event.message });
+        this.progressCb?.({ ...event });
       });
       if (!mounted) throw new Error(`Template ${coordinate} requires unavailable ${step.missing}`);
     }
@@ -669,10 +688,4 @@ export class EngineClient {
   get initialized() {
     return this.inited;
   }
-}
-
-function fmtBytes(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
 }

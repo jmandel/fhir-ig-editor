@@ -21,6 +21,7 @@ const GENERATOR_KEY = 'igEditor.siteGenerator';
 const PROJECT_KEY = 'igEditor.project';
 const TEMPLATE_KEY = 'igEditor.templateCoord';
 const DEFAULT_TEMPLATE = 'hl7.fhir.template#1.0.0';
+const TINY_PROJECT_ID = 'tiny';
 const CYCLE_GENERATOR = 'cycle';
 const PUBLISHER_GENERATOR = 'hl7.fhir.template';
 const GENERATORS = [
@@ -56,6 +57,7 @@ import {
   type WorkspaceMode,
 } from './views/ProjectOverview';
 import type { ProgressEvent } from './worker/protocol';
+import { presentProgress } from './progressPresentation';
 
 const DEBOUNCE_MS = 300;
 
@@ -93,8 +95,17 @@ function captureProject(st: ProjectStore, projectId: string): ProjectBuildSnapsh
 }
 
 function projectDisplayName(projectId: string): string {
+  if (projectId === TINY_PROJECT_ID) return 'The Guide That Describes Its Editor';
   if (projectId === 'cycle') return 'Period Tracking Implementation Guide';
   return CATALOG_IGS.find((guide) => guide.id === projectId)?.name ?? projectId;
+}
+
+function defaultGeneratorFor(projectId: string): string {
+  return projectId === 'cycle' ? CYCLE_GENERATOR : PUBLISHER_GENERATOR;
+}
+
+function initialWorkspaceFor(projectId: string): WorkspaceMode {
+  return projectId === TINY_PROJECT_ID || projectId === 'cycle' ? 'author' : 'explore';
 }
 
 /** Machine-readable trace consumed by the persistent-profile benchmark. */
@@ -112,7 +123,7 @@ export function App() {
   const buildQueueRef = useRef(new LatestTaskQueue());
   const [store, setStore] = useState<ProjectStore | null>(null);
   const storeRef = useRef<ProjectStore | null>(null);
-  const projectIdRef = useRef<string>(localStorage.getItem(PROJECT_KEY) || 'cycle');
+  const projectIdRef = useRef<string>(localStorage.getItem(PROJECT_KEY) || TINY_PROJECT_ID);
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
@@ -120,10 +131,10 @@ export function App() {
   // Cold-start progress (spec §1): staged phase + per-bundle progress.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   // Project-open progress: while a baked project is opening/switching (US Core,
-  // demo IG) we surface the SAME staged progress the boot path shows — otherwise
+  // tiny guide) we surface the SAME staged progress the boot path shows — otherwise
   // the package fetch + mount + compile + site preparation looks hung (mobile).
   // `openingSince` is the start ms so the overlay can show elapsed seconds even on
-  // indeterminate stages; null = not opening.
+  // staged work; null = not opening.
   const [openingSince, setOpeningSince] = useState<number | null>(null);
   // A project-open FAILURE (manifest/network/CORS/parse). Kept as a persistent,
   // dismissible banner — the open overlay clears on error, so without this the
@@ -148,13 +159,13 @@ export function App() {
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [projectName, setProjectName] = useState(() => projectDisplayName(projectIdRef.current));
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(
-    () => projectIdRef.current === 'cycle' ? 'author' : 'explore',
+    () => initialWorkspaceFor(projectIdRef.current),
   );
   // Expensive surfaces mount on first use, then remain mounted so Monaco state
   // and preview scroll/history survive mode switches without doing hidden work
   // during an ordinary published-guide open.
   const [activatedModes, setActivatedModes] = useState<Set<WorkspaceMode>>(
-    () => new Set([projectIdRef.current === 'cycle' ? 'author' : 'explore']),
+    () => new Set([initialWorkspaceFor(projectIdRef.current)]),
   );
   const activateWorkspace = useCallback((mode: WorkspaceMode) => {
     setActivatedModes((current) => current.has(mode) ? current : new Set([...current, mode]));
@@ -166,7 +177,7 @@ export function App() {
   const [blockedPackages, setBlockedPackages] = useState<BlockedPackage[]>([]);
   // Site preview (immutable BuildHandle-driven).
   const [generatorId, setGeneratorId] = useState<string>(
-    () => localStorage.getItem(GENERATOR_KEY) || 'cycle',
+    () => localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(projectIdRef.current),
   );
   const [sitePages, setSitePages] = useState<OutputDescriptor[] | null>(null);
   const [selectedSitePage, setSelectedSitePage] = useState('index.html');
@@ -179,8 +190,14 @@ export function App() {
   // Live template loader (#40): the selected Publisher template#version + the last
   // load error (custom-ant refusal etc.). The coord persists across reloads.
   const [templateCoord, setTemplateCoord] = useState<string>(
-    () => localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
+    () => projectIdRef.current === TINY_PROJECT_ID
+      ? DEFAULT_TEMPLATE
+      : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE,
   );
+  // Tiny starts from the exact teaching template without destroying the user's
+  // remembered template for larger guides. An explicit Tiny-only experiment is
+  // kept separately for the lifetime of the open project.
+  const tinyTemplateRef = useRef(DEFAULT_TEMPLATE);
   const [templateError, setTemplateError] = useState<string | null>(null);
   // Curated templates' live version catalogs (#40 default UX): fetched from the
   // registry (OPFS-cached, TTL, last-known-good, pinned fallback) so the selector
@@ -262,7 +279,7 @@ export function App() {
       const cats = await getCuratedCatalogs();
       if (cancelled) return;
       setTemplateCatalogs(cats);
-      if (!userPickedTemplateRef.current) {
+      if (!userPickedTemplateRef.current && projectIdRef.current !== TINY_PROJECT_ID) {
         // Default to the DEFAULT_TEMPLATE family's latest published version.
         const hash = DEFAULT_TEMPLATE.lastIndexOf('#');
         const defId = hash < 0 ? DEFAULT_TEMPLATE : DEFAULT_TEMPLATE.slice(0, hash);
@@ -309,6 +326,13 @@ export function App() {
       const allResources = mergeResourcesByIdentity(compiled.resources, project.predefinedDisplay);
       setSelectedResource((current) => {
         if (current && allResources.some((resource) => resourceIdentity(resource) === current)) return current;
+        // Prefer the exact artifact declared by the first authored FSH file.
+        // The tiny guide keeps its one teaching profile in 00-EditorUser.fsh,
+        // making the initial Source -> Definition -> Published-page trail
+        // causal instead of whichever StructureDefinition sorts first.
+        const firstFsh = Object.keys(project.files).filter((path) => path.endsWith('.fsh')).sort()[0];
+        const firstDeclared = firstFsh ? soleResourceDeclaredIn(allResources, firstFsh) : null;
+        if (firstDeclared) return resourceIdentity(firstDeclared);
         const first = allResources.find((resource) => resource.resourceType === 'StructureDefinition' && resource.url);
         return first ? resourceIdentity(first) : allResources[0] ? resourceIdentity(allResources[0]) : null;
       });
@@ -333,7 +357,7 @@ export function App() {
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
       if (genId === PUBLISHER_GENERATOR) {
-        lastGoodTemplateRef.current = selectedTemplate;
+        if (project.projectId !== TINY_PROJECT_ID) lastGoodTemplateRef.current = selectedTemplate;
         setTemplateError(null);
       }
       const nextGeneration = siteGenerationRef.current + 1;
@@ -388,7 +412,9 @@ export function App() {
     genId: string,
   ) => {
     const project = captureProject(st, projectIdRef.current);
-    const selectedTemplate = localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
+    const selectedTemplate = project.projectId === TINY_PROJECT_ID
+      ? tinyTemplateRef.current
+      : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     await buildQueueRef.current.enqueue((lease) =>
       performBuildSite(project, engine, genId, selectedTemplate, lease),
     );
@@ -409,9 +435,14 @@ export function App() {
   // unfetchable) surface the message and FALL BACK to the previous good template
   // so the selector never wedges.
   const selectTemplate = useCallback((coord: string) => {
-    const previous = lastGoodTemplateRef.current;
-    userPickedTemplateRef.current = true; // an explicit choice — persist + honor it.
-    localStorage.setItem(TEMPLATE_KEY, coord);
+    const tiny = projectIdRef.current === TINY_PROJECT_ID;
+    const previous = tiny ? tinyTemplateRef.current : lastGoodTemplateRef.current;
+    if (tiny) {
+      tinyTemplateRef.current = coord;
+    } else {
+      userPickedTemplateRef.current = true; // an explicit choice — persist + honor it.
+      localStorage.setItem(TEMPLATE_KEY, coord);
+    }
     setTemplateCoord(coord);
     setTemplateError(null);
     setPreviewStale(true);
@@ -419,7 +450,8 @@ export function App() {
     void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch((e) => {
       // Revert to the last template that loaded — never leave the preview wedged.
       setTemplateError(String(e).replace(/^Error:\s*/, ''));
-      localStorage.setItem(TEMPLATE_KEY, previous);
+      if (tiny) tinyTemplateRef.current = previous;
+      else localStorage.setItem(TEMPLATE_KEY, previous);
       setTemplateCoord(previous);
       if (previous !== coord && storeRef.current && engineRef.current) {
         void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch(() => {});
@@ -433,8 +465,10 @@ export function App() {
     // Snapshot before entering the queue: loading another IG or typing while an
     // older wasm operation finishes cannot change this request's inputs midway.
     const project = captureProject(st, projectIdRef.current);
-    const genId = localStorage.getItem(GENERATOR_KEY) || 'cycle';
-    const selectedTemplate = localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
+    const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(projectIdRef.current);
+    const selectedTemplate = project.projectId === TINY_PROJECT_ID
+      ? tinyTemplateRef.current
+      : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     let failure: unknown = null;
     await buildQueueRef.current.enqueue(async (lease) => {
       if (lease.isLatest()) setCompiling(true);
@@ -500,12 +534,21 @@ export function App() {
     engine?.setProgress(emit);
     localStorage.setItem(PROJECT_KEY, projectId);
     projectIdRef.current = projectId;
-    // The `cycle` generator is bespoke to the cycle demo IG; every other IG (the
+    // The teaching guide starts from one exact standard-HL7 template without
+    // overwriting the user's remembered template preference for other guides.
+    if (projectId === TINY_PROJECT_ID) {
+      tinyTemplateRef.current = DEFAULT_TEMPLATE;
+      setTemplateCoord(DEFAULT_TEMPLATE);
+      setTemplateError(null);
+    } else {
+      setTemplateCoord(localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE);
+    }
+    // The `cycle` generator is bespoke to its external-builder fixture; every other IG (the
     // catalog / published IGs) renders with the Publisher generator. Default
     // the preview generator per project so a published IG never opens with the
     // Cycle-specific generator selected.
-    const defaultGen = projectId === 'cycle' ? CYCLE_GENERATOR : PUBLISHER_GENERATOR;
-    const initialMode: WorkspaceMode = projectId === 'cycle' ? 'author' : 'explore';
+    const defaultGen = defaultGeneratorFor(projectId);
+    const initialMode = initialWorkspaceFor(projectId);
     setActivatedModes(new Set([initialMode]));
     setWorkspaceMode(initialMode);
     localStorage.setItem(GENERATOR_KEY, defaultGen);
@@ -544,7 +587,7 @@ export function App() {
       setOpeningSince(null);
     }
   }, [store, runCompile, siteIgId]);
-  const openDemo = useCallback(() => openProject('cycle'), [openProject]);
+  const openDemo = useCallback(() => openProject(TINY_PROJECT_ID), [openProject]);
 
   // ---- edit handling -------------------------------------------------------
   const onEdit = useCallback(
@@ -686,7 +729,8 @@ export function App() {
             <option value="" disabled>
               Switch guide…
             </option>
-            <option value="cycle">Tiny FSH demo</option>
+            <option value={TINY_PROJECT_ID}>Tiny FSH demo (HL7 Publisher)</option>
+            <option value="cycle">Period Tracking IG (Cycle external builder)</option>
             {CATALOG_IGS.map((ig) => (
               <option key={ig.id} value={ig.id}>
                 {ig.name}
@@ -696,7 +740,9 @@ export function App() {
         </div>
       </header>
 
-      <div className="statusline">{status}</div>
+      <div className={`statusline${openingSince != null ? ' suppressed' : ''}`}>
+        {openingSince == null ? status : null}
+      </div>
 
       <div className="status-area">
         {blockedPackages.length > 0 && (
@@ -824,7 +870,7 @@ export function App() {
                 onKeyDown={(event) => onWorkspaceTabKeyDown(event, mode)}
               >
                 {label}
-                {mode === 'preview' && siteBuilding && <span className="tab-spinner" />}
+                {mode === 'preview' && siteBuilding && <span className="tab-busy">Building</span>}
               </button>
             ))}
           </nav>
@@ -921,18 +967,22 @@ export function App() {
   );
 }
 
-/** Cold-start progress: the current stage + a bar across a bounded operation,
- *  with the per-bundle byte size when fetching (spec §1). */
+/** Cold-start progress uses the same honest transport presentation as project
+ * opening: work is a status, while byte downloads get a measured counter/bar. */
 function StartupProgress({ progress }: { progress: ProgressEvent }) {
-  const pct = progress.fraction != null ? Math.round(progress.fraction * 100) : null;
+  const presentation = presentProgress(progress);
+  const pct = presentation.fraction != null ? Math.round(presentation.fraction * 100) : null;
   return (
     <div className="startup-progress" data-stage={progress.stage}>
-      <div className="startup-bar">
-        <div className="startup-bar-fill" style={{ width: pct != null ? `${pct}%` : '35%' }} />
-      </div>
+      {pct != null && (
+        <div className="startup-bar" role="progressbar" aria-label="Download progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+          <div className="startup-bar-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
       <div className="startup-msg">
         {progress.fromCache && <span className="startup-cache">⚡ cached</span>}
         {progress.message}
+        {presentation.byteLabel && <span className="progress-bytes">{presentation.byteLabel}</span>}
       </div>
     </div>
   );
@@ -943,8 +993,9 @@ function StartupProgress({ progress }: { progress: ProgressEvent }) {
  *  narrow screen still reads what's happening. */
 const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   wasm: 'Starting engine',
-  manifest: 'Loading project',
+  manifest: 'Downloading project',
   'project-cache-hit': 'Reusing project',
+  'project-verify': 'Verifying project',
   'project-unpack': 'Unpacking project',
   'project-store': 'Storing project',
   compile: 'Compiling project',
@@ -954,6 +1005,7 @@ const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   resolve: 'Resolving packages',
   'bundle-fetch': 'Fetching packages',
   'bundle-cache-hit': 'Loading packages',
+  'bundle-unpack': 'Unpacking packages',
   'bundle-mount': 'Mounting packages',
   'registry-fetch': 'Fetching from registry',
   'package-blocked': 'Package unavailable',
@@ -961,10 +1013,9 @@ const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   ready: 'Ready',
 };
 
-/** Project-open progress (US Core / demo IG): a mobile-safe banner under the
- *  status line. Reuses the same staged `ProgressEvent` the boot path emits, adds
- *  a determinate-or-animated bar, a distinct cache marker, and a ticking elapsed
- *  counter so nothing ever looks hung. Wraps on narrow widths — never overflows. */
+/** Project-open progress is deliberately a single signal. Download stages show
+ * measured MB (and a bar only when total bytes are known); compile/build stages
+ * show their named work phase without a competing indefinite animation. */
 function OpenProgress({ progress, since }: { progress: ProgressEvent; since: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -972,22 +1023,20 @@ function OpenProgress({ progress, since }: { progress: ProgressEvent; since: num
     return () => clearInterval(t);
   }, []);
   const elapsed = Math.max(0, Math.round((now - since) / 1000));
-  const pct = progress.fraction != null ? Math.round(progress.fraction * 100) : null;
-  const determinate = pct != null;
-  const done = progress.stage === 'ready';
+  const presentation = presentProgress(progress);
+  const pct = presentation.fraction != null ? Math.round(presentation.fraction * 100) : null;
   return (
     <div className="open-progress" data-stage={progress.stage} role="status" aria-live="polite">
-      <div className="open-progress-bar">
-        <div
-          className={`open-progress-fill${determinate ? '' : ' indeterminate'}`}
-          style={determinate ? { width: `${pct}%` } : undefined}
-        />
-      </div>
+      {pct != null && (
+        <div className="open-progress-bar" role="progressbar" aria-label="Download progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+          <div className="open-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
       <div className="open-progress-line">
-        {!done && <span className="open-progress-spinner" aria-hidden="true" />}
         <span className="open-progress-stage">{OPEN_STAGE_LABEL[progress.stage]}</span>
         {progress.fromCache && <span className="open-progress-cache">⚡ from cache</span>}
         <span className="open-progress-msg">{progress.message}</span>
+        {presentation.byteLabel && <span className="progress-bytes">{presentation.byteLabel}</span>}
         <span className="open-progress-elapsed">{elapsed}s</span>
       </div>
     </div>
