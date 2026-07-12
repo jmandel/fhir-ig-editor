@@ -20,6 +20,29 @@ interface Props {
   onSelectPage?: (path: string) => void;
 }
 
+export function summarizeSiteError(error: string): string {
+  const withoutPrefixes = error.replace(/^(?:Error:\s*)+/i, '').trim();
+  const inlineStack = withoutPrefixes.search(/\s+at\s+(?:async\s+)?[\w$<>.]+\s*\(/);
+  const first = withoutPrefixes
+    .slice(0, inlineStack >= 0 ? inlineStack : undefined)
+    .split(/\r?\n/, 1)[0]
+    .trim();
+  return first || 'The site renderer did not complete.';
+}
+
+function PreviewBuildError({ error, previous }: { error: string; previous: boolean }) {
+  return (
+    <div className="preview-error" role="alert">
+      <strong>{previous ? 'Site rebuild failed; showing the last successful preview.' : 'Site build failed.'}</strong>
+      <span>{summarizeSiteError(error)}</span>
+      <details>
+        <summary>Technical details</summary>
+        <pre>{error}</pre>
+      </details>
+    </div>
+  );
+}
+
 export function PreviewPane({ igId, pages, building, error, previewCapable, currentPage, onSelectPage }: Props) {
   const [localCurrent, setLocalCurrent] = useState<string>('index.html');
   const current = currentPage ?? localCurrent;
@@ -101,7 +124,7 @@ export function PreviewPane({ igId, pages, building, error, previewCapable, curr
   if (error && !pages) {
     return (
       <div className="preview">
-        <div className="preview-error">Site build failed:<pre>{error}</pre></div>
+        <PreviewBuildError error={error} previous={false} />
       </div>
     );
   }
@@ -116,9 +139,7 @@ export function PreviewPane({ igId, pages, building, error, previewCapable, curr
   return (
     <div className="preview">
       {error && (
-        <div className="preview-error" role="alert">
-          Site rebuild failed; showing the last successful preview.<pre>{error}</pre>
-        </div>
+        <PreviewBuildError error={error} previous />
       )}
       <div className="preview-bar">
         <label className="preview-page-select">

@@ -19,6 +19,23 @@ export interface TaskOutcome<T> {
   value: T;
 }
 
+export const SEMANTIC_EDIT_DEBOUNCE_MS = 300;
+export const SITE_EDIT_DEBOUNCE_MS = 120;
+
+/** Semantic inputs can trigger a full compile and benefit from a longer typing
+ * pause. Authored prose/template inputs reuse the same compiled semantics and
+ * should feel immediate; both paths still enter the identical latest-wins
+ * immutable build queue. */
+export function editDebounceMs(path: string): number {
+  const normalized = path.replace(/^\/+/, '');
+  return normalized === 'sushi-config.yaml'
+    || normalized.startsWith('input/fsh/')
+    || normalized.startsWith('input/resources/')
+    || normalized.startsWith('input/examples/')
+    ? SEMANTIC_EDIT_DEBOUNCE_MS
+    : SITE_EDIT_DEBOUNCE_MS;
+}
+
 export class LatestTaskQueue {
   private latestRequestId = 0;
   private tail: Promise<void> = Promise.resolve();

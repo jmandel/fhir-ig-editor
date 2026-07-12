@@ -12,10 +12,10 @@ export type { PreparedPackagePointer } from './protocol';
 import { contentStore } from '../storage/contentStore';
 
 const CACHE_DIR = 'fhir-ig-editor-prepared-packages';
-const CACHE_SCHEMA = 2;
+const CACHE_SCHEMA = 3;
 const SHA256 = /^[0-9a-f]{64}$/;
-const CACHE_KEY = /^pp2-sha256-[0-9a-f]{64}-n[0-9]+-d[0-9]+-a[0-9]+$/;
-const MEDIA_TYPE = 'application/vnd.fhir.package.prepared.v2';
+const CACHE_KEY = /^pp3-sha256-[0-9a-f]{64}-n1-d1-a1$/;
+export const PREPARED_PACKAGE_MEDIA_TYPE = 'application/vnd.fhir.package.prepared.v3';
 
 function safe(value: string): string {
   return encodeURIComponent(value).replaceAll('%', '_');
@@ -25,16 +25,22 @@ function pointerName(label: string, transportIdentity: string): string {
   return `pointer__${safe(label)}__${safe(transportIdentity)}.json`;
 }
 
-function validPointer(value: unknown, label?: string, transportIdentity?: string): value is PreparedPackagePointer {
+export function validPreparedPackagePointer(
+  value: unknown,
+  label?: string,
+  transportIdentity?: string,
+): value is PreparedPackagePointer {
   const pointer = value as Partial<PreparedPackagePointer> | null;
+  const cacheKey = typeof pointer?.cacheKey === 'string'
+    ? CACHE_KEY.exec(pointer.cacheKey)
+    : null;
   return !!pointer
     && pointer.schema === CACHE_SCHEMA
     && typeof pointer.label === 'string'
     && (label === undefined || pointer.label === label)
     && typeof pointer.transportIdentity === 'string'
     && (transportIdentity === undefined || pointer.transportIdentity === transportIdentity)
-    && typeof pointer.cacheKey === 'string'
-    && CACHE_KEY.test(pointer.cacheKey)
+    && !!cacheKey
     && typeof pointer.artifactSha256 === 'string'
     && SHA256.test(pointer.artifactSha256)
     && Number.isSafeInteger(pointer.bytes)
@@ -60,24 +66,25 @@ export async function findPreparedPackage(
   try {
     const handle = await directory.getFileHandle(pointerName(label, transportIdentity));
     const pointer = JSON.parse(await (await handle.getFile()).text()) as unknown;
-    return validPointer(pointer, label, transportIdentity) ? pointer : null;
+    return validPreparedPackagePointer(pointer, label, transportIdentity) ? pointer : null;
   } catch {
     return null;
   }
 }
 
-/** Worker-side authenticated binary read. Rust independently checks the selected
- * key, outer checksum, and canonical label/dependency/member/chunk metadata;
+/** Worker-side authenticated binary read. ContentStore verifies the exact
+ * carrier SHA-256; Rust checks the selected key and canonical
+ * label/dependency/member/chunk metadata;
  * member bodies are digest-checked when lazily materialized. Package identity
  * and the derived index were established by the shared preparation boundary. */
 export async function readPreparedPackage(
   pointer: PreparedPackagePointer,
 ): Promise<ArrayBuffer | null> {
-  if (!validPointer(pointer)) return null;
+  if (!validPreparedPackagePointer(pointer)) return null;
   return contentStore.get({
     sha256: pointer.artifactSha256,
     byteLength: pointer.bytes,
-    mediaType: MEDIA_TYPE,
+    mediaType: PREPARED_PACKAGE_MEDIA_TYPE,
   });
 }
 
@@ -88,11 +95,11 @@ export async function writePreparedPackage(
   bytes: Uint8Array,
 ): Promise<boolean> {
   const label = pointer.label;
-  if (!validPointer(pointer as unknown)) throw new Error(`invalid prepared-package pointer for ${label}`);
+  if (!validPreparedPackagePointer(pointer as unknown)) throw new Error(`invalid prepared-package pointer for ${label}`);
   if (bytes.byteLength !== pointer.bytes) throw new Error(`prepared-package byte length mismatch for ${pointer.label}`);
   const digest = await sha256Hex(bytes);
   if (digest !== pointer.artifactSha256) throw new Error(`prepared-package SHA-256 mismatch for ${pointer.label}`);
-  const stored = await contentStore.put(bytes, MEDIA_TYPE);
+  const stored = await contentStore.put(bytes, PREPARED_PACKAGE_MEDIA_TYPE);
   if (!stored) return false;
   if (stored.sha256 !== pointer.artifactSha256 || stored.byteLength !== pointer.bytes) {
     throw new Error(`prepared-package ContentStore identity mismatch for ${pointer.label}`);

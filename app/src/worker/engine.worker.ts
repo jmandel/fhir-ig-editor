@@ -188,6 +188,18 @@ async function storeExactContent(bytes: Uint8Array, expected: ContentRef): Promi
   }
 }
 
+// A Worker owns one ContentStore instance for its lifetime. Once an exact
+// reference has been read back or successfully published, immutable CAS bytes
+// cannot change underneath it. Remember that verification so a prose-only
+// successor does not re-read and re-hash every unchanged runtime asset merely
+// because `outputs` returned the same ContentRefs again. Worker recycling drops
+// this observation and therefore re-verifies persistent OPFS state.
+const publishedRustContent = new Set<string>();
+
+function publishedRustContentKey(content: ContentRef): string {
+  return `${content.sha256}\u0000${content.byteLength}\u0000${content.mediaType ?? ''}`;
+}
+
 async function loadCycleRendererPackage(): Promise<LoadedCycleRendererPackage> {
   if (cycleRendererPackagePromise) return cycleRendererPackagePromise;
   const pending = (async () => {
@@ -232,8 +244,14 @@ async function publishRustContent(
   handle: string,
   content: ContentRef,
 ): Promise<void> {
-  if (await contentStore.get(content)) return;
+  const key = publishedRustContentKey(content);
+  if (publishedRustContent.has(key)) return;
+  if (await contentStore.get(content)) {
+    publishedRustContent.add(key);
+    return;
+  }
   await storeExactContent(session.readContent(handle, content.sha256), content);
+  publishedRustContent.add(key);
 }
 
 function publicCycleDescriptor(
@@ -373,7 +391,14 @@ const handlers: Handlers = {
           if (!artifact) throw new Error(`prepared-package cache miss: ${pointer.label}`);
           inputBytes += artifact.byteLength;
           maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, artifact.byteLength);
-          unwrap(s.stagePreparedMount(new Uint8Array(artifact), pointer.cacheKey));
+          const staged = unwrap<{ label: string }>(
+            s.stagePreparedMount(new Uint8Array(artifact), pointer.cacheKey),
+          );
+          if (staged.label !== pointer.label) {
+            throw new Error(
+              `prepared-package pointer label ${pointer.label} selected artifact ${staged.label}`,
+            );
+          }
         }
         result = unwrap(s.commitPreparedMount());
         committed = true;
@@ -488,7 +513,7 @@ const handlers: Handlers = {
           const bytes = s.takePrepared(artifact.label);
           maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
           await cache.writePreparedPackage({
-            schema: 2,
+            schema: 3,
             label: artifact.label,
             transportIdentity,
             cacheKey: artifact.cacheKey,

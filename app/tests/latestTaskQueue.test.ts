@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import { LatestTaskQueue } from '../src/build/latestTaskQueue';
+import {
+  LatestTaskQueue,
+  SEMANTIC_EDIT_DEBOUNCE_MS,
+  SITE_EDIT_DEBOUNCE_MS,
+  editDebounceMs,
+} from '../src/build/latestTaskQueue';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -13,6 +18,16 @@ function deferred<T = void>() {
 }
 
 describe('LatestTaskQueue', () => {
+  test('gives prose edits a shorter pause without weakening semantic coalescing', () => {
+    expect(editDebounceMs('input/fsh/Profile.fsh')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
+    expect(editDebounceMs('sushi-config.yaml')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
+    expect(editDebounceMs('input/resources/Patient-p.json')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
+    expect(editDebounceMs('input/examples/Patient-p.json')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
+    expect(editDebounceMs('input/pagecontent/index.md')).toBe(SITE_EDIT_DEBOUNCE_MS);
+    expect(editDebounceMs('input/images/diagram.svg')).toBe(SITE_EDIT_DEBOUNCE_MS);
+    expect(SITE_EDIT_DEBOUNCE_MS).toBeLessThan(SEMANTIC_EDIT_DEBOUNCE_MS);
+  });
+
   test('serializes mutable engine operations and only the newest lease may publish', async () => {
     const queue = new LatestTaskQueue();
     const firstGate = deferred();

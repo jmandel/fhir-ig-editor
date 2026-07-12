@@ -350,7 +350,7 @@ export async function obtainRawPackageByLabel(label: string): Promise<PackageMou
 
 /** Obtain and mount one exact coordinate requested by Rust's private template
  * resolution handshake. Templates use the ordinary OPFS/local/baked/registry
- * transport ladder, including complete PreparedPackage v2 artifacts. Returns
+ * transport ladder, including complete PreparedPackage v3 artifacts. Returns
  * only success; no package files cross back to the host. */
 export async function obtainAndMountPackage(
   host: ResolverHost,

@@ -386,6 +386,41 @@ async function resolveRef(build: PreviewSource, path: string): Promise<ContentRe
   return rendered.content;
 }
 
+/** Resolve only the pages that are already open before publishing a successor.
+ * The complete catalog remains authoritative for arbitrary later navigation;
+ * enriching these existing descriptors simply lets the Service Worker reload
+ * changed open pages from ContentStore without a second renderer round-trip. */
+export async function resolvePreviewOutputRefs(
+  build: PreviewSource,
+  paths: readonly string[],
+  render: RenderOutput,
+  mayContinue: () => boolean = () => true,
+): Promise<PreviewSource | null> {
+  const outputs = [...build.catalog.outputs];
+  let changed = false;
+  for (const path of new Set(paths)) {
+    if (!mayContinue()) return null;
+    const index = outputs.findIndex((output) => output.path === path);
+    if (index < 0 || outputs[index].content) continue;
+    const output = outputs[index];
+    const rendered = await render(build.handle, path);
+    if (!mayContinue()) return null;
+    if (rendered.path !== path
+      || rendered.mediaType !== output.mediaType
+      || !validContentRef(rendered.content)) {
+      throw new Error(`renderer returned an invalid output for ${path}`);
+    }
+    outputs[index] = { ...output, content: rendered.content };
+    resolvedRefs.set(resolvedKey(build, path), rendered.content);
+    changed = true;
+  }
+  if (!changed) return build;
+  return {
+    ...build,
+    catalog: { ...build.catalog, outputs },
+  };
+}
+
 export function wirePreviewResponder(render: RenderOutput): void {
   renderOutput = render;
   if (responderWired) return;
@@ -500,7 +535,17 @@ export async function publishPreviewSource(
   generation: number,
   mayCommit: () => boolean = () => true,
 ): Promise<boolean> {
-  const published = validatePreviewSource(next);
+  const candidate = validatePreviewSource(next);
+  const resolved = renderOutput
+    ? await resolvePreviewOutputRefs(
+      candidate,
+      registeredPreviewPaths(openPreviews, candidate.igId),
+      renderOutput,
+      mayCommit,
+    )
+    : candidate;
+  if (!resolved || !mayCommit()) return false;
+  const published = validatePreviewSource(resolved);
   if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('invalid preview generation');
   const previous = source;
   // UI counters restart on a hard reload. Publication order is deliberately

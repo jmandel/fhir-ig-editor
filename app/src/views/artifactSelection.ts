@@ -61,6 +61,26 @@ export function resourceForSubject(
   return matches.length === 1 ? matches[0] : null;
 }
 
+export function resourceForPage(
+  resources: CompiledResource[],
+  page: OutputDescriptor | null | undefined,
+): CompiledResource | null {
+  return resourceForSubject(resources, page?.subject);
+}
+
+export function resourceForDefinition(
+  resources: CompiledResource[],
+  definition: CompiledResource['definition'] | null | undefined,
+): CompiledResource | null {
+  if (!definition) return null;
+  const matches = resources.filter((resource) => resource.definition
+    && resource.definition.kind === definition.kind
+    && resource.definition.path === definition.path
+    && resource.definition.line === definition.line
+    && resource.definition.column === definition.column);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function primaryPageForResource(
   pages: OutputDescriptor[] | null,
   resource: CompiledResource | null,

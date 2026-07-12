@@ -23,10 +23,33 @@ const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
 // run scales the wall-clock allowance with the emulated CPU slowdown.
-// End-to-end source edit -> rebuilt/published iframe. The Rust semantic-overlay
-// reuse gate below is separately asserted through its metrics; 2s leaves normal
+// End-to-end source edit -> rebuilt/published iframe. The exact private-reuse
+// gates below are separately asserted through their metrics; 2s leaves normal
 // browser scheduling headroom while still failing a lost-reuse regression (~3s).
 const STOCK_WARM_EDIT_BUDGET_MS = 2000 * timeoutScale;
+
+function assessWarmEditMetrics(events) {
+  const metrics = [...(events || [])]
+    .reverse()
+    .map((entry) => entry?.event)
+    .find((event) => event?.stage === 'site-build' && event.metrics)?.metrics;
+  const phaseNames = [
+    'outputCatalogMs',
+    'publisherArtifactsMs',
+    'siteBuildCloseMs',
+    'closureVerifyMs',
+  ];
+  return {
+    metrics: metrics || null,
+    ok: Boolean(metrics
+      && metrics.snapshotCompletedLocalCacheHit === 1
+      && metrics.publisherRecipeAssetsCacheHit === 1
+      && metrics.renderSemanticsCacheHit === 1
+      && metrics.templateMaterializeMs === 0
+      && metrics.publisherRuntimeMs === 0
+      && phaseNames.every((name) => Number.isFinite(metrics[name]) && metrics[name] >= 0)),
+  };
+}
 
 async function cdp(ws, method, params = {}, id = { n: 1 }) {
   return new Promise((resolve, reject) => {
@@ -339,7 +362,7 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     })()`);
     // Model the real interaction: typing happens with the editor focused. CDP's
     // /json/new calls leave the most recently opened preview tab foregrounded,
-    // which throttles the editor's 300ms debounce to a ~1s background timer.
+    // which can throttle the editor's 120ms prose debounce to a ~1s background timer.
     await cdp(editorWs, 'Page.bringToFront', {}, id);
     // Edit index.md's H1 in the editor (via Monaco).
     out.editResult = await editorEval(`(async () => { const leaves = [...document.querySelectorAll('.file-tree *')].filter(e => e.children.length === 0); const row = leaves.find(e => (e.textContent || '').replace(/[^\\x20-\\x7e]/g, '').trim() === 'index.md'); if (!row) return 'no-row'; (row.closest('[class*=row]') || row).click(); await new Promise(r => setTimeout(r, 400)); const ed = window.monaco && window.monaco.editor.getEditors()[0]; if (!ed) return 'no-ed'; const m = ed.getModel(); const v = m.getValue(); if (!/^# /m.test(v)) return 'not-index'; m.setValue(v.replace(/^# .*/m, '# HOTRELOAD ' + Date.now())); return 'ok'; })()`);
@@ -886,6 +909,58 @@ try {
     })()`,
   );
   results.brokenDiagCount = await evalJs(ws, `document.querySelectorAll('.diag').length`);
+  results.diagnosticNavigation = await evalJs(ws, `(async () => {
+    const details = document.querySelector('details.problems');
+    if (details) details.open = true;
+    const diagnostic = [...document.querySelectorAll('.diag')]
+      .find((candidate) => candidate.textContent?.includes('NoSuchRuleSet'));
+    const source = diagnostic?.querySelector('button.diag-source');
+    const definition = [...(diagnostic?.querySelectorAll('.diag-actions button') || [])]
+      .find((button) => button.textContent?.trim() === 'Definition');
+    const before = {
+      sourceControl: source?.tagName || '',
+      hasDefinition: Boolean(definition),
+    };
+    source?.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const afterSource = {
+      mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+      subject: document.querySelector('.artifact-trail-subject')?.textContent || '',
+      file: document.querySelector('.tree-row.file.active')?.getAttribute('title') || '',
+      drawerOpen: Boolean(details?.open),
+    };
+    if (details) details.open = true;
+    const refreshed = [...document.querySelectorAll('.diag')]
+      .find((candidate) => candidate.textContent?.includes('NoSuchRuleSet'));
+    const refreshedDefinition = [...(refreshed?.querySelectorAll('.diag-actions button') || [])]
+      .find((button) => button.textContent?.trim() === 'Definition');
+    refreshedDefinition?.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const afterDefinition = {
+      mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+      subject: document.querySelector('.artifact-trail-subject')?.textContent || '',
+      drawerOpen: Boolean(details?.open),
+    };
+    if (details) details.open = true;
+    const publishedDiagnostic = [...document.querySelectorAll('.diag')]
+      .find((candidate) => candidate.textContent?.includes('NoSuchRuleSet'));
+    const published = [...(publishedDiagnostic?.querySelectorAll('.diag-actions button') || [])]
+      .find((button) => /published page/i.test(button.textContent || ''));
+    published?.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {
+      ...before,
+      hasPublished: Boolean(published),
+      afterSource,
+      afterDefinition,
+      afterPublished: {
+        mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+        subject: document.querySelector('.artifact-trail-subject')?.textContent || '',
+        page: document.querySelector('.preview-page-select select')?.value || '',
+        drawerOpen: Boolean(details?.open),
+      },
+    };
+  })()`);
 
   // ---- M2 site preview (spec §7 / gate ii) --------------------------------
   // Undo the broken FSH so the site rebuilds cleanly, then open the Preview tab.
@@ -1230,6 +1305,7 @@ try {
     results.stockWarmEditMetrics = await evalJs(ws, `
       (window.__igDebug?.metrics || []).slice(${JSON.stringify(stockMetricStart)})
     `);
+    results.stockWarmReuse = assessWarmEditMetrics(results.stockWarmEditMetrics);
     await waitForStable(ws, stockMarkerCurrent, 5000, 'stock warm edit remains current');
   }
 
@@ -1240,6 +1316,7 @@ try {
       && results.stockIndexLen > 500
       && results.stockProfilePage?.hasHierarchy
       && results.stockEditResult === 'ok'
+      && results.stockWarmReuse?.ok
       && results.stockWarmEditMs < STOCK_WARM_EDIT_BUDGET_MS;
     if (!smokeOk) throw new Error('mobile preview smoke assertions failed');
     console.log('\nMOBILE PREVIEW GATE: PASS');
@@ -1621,6 +1698,10 @@ try {
     // but the stock build ends at "Site build failed". Keep this in the existing
     // catalog/browser flow: it exercises the baked archive, package resolution,
     // compile, Publisher preparation, preview publication, and the SW URL.
+    results.engineLifecycleBeforeMcode = await evalJs(ws, `(() => ({
+      preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+      recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+    }))()`);
     results.mcodeClicked = await evalJs(ws, `(() => {
       const select = document.querySelector('.open-ig-select');
       if (!select || ![...select.options].some((option) => option.value === 'mcode')) return 'no-mcode-option';
@@ -1674,6 +1755,10 @@ try {
         };
       })()`);
     }
+    results.engineLifecycleAfterMcode = await evalJs(ws, `(() => ({
+      preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+      recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+    }))()`);
 
     // Restore the exact stock-template project state the preview-window gate needs:
     // re-open the Cycle fixture, switch its preview generator to the stock template,
@@ -1796,6 +1881,20 @@ try {
         && doc.body?.textContent.length > 500;
     })()`, 60000, 'stock template index re-rendered after US Core');
 
+    // A narrative page has no exact FHIR subject, so selecting it must clear
+    // the prior artifact trail rather than claiming an unrelated definition.
+    results.narrativePageClearsTrail = await evalJs(ws, `(() => ({
+      empty: !!document.querySelector('.artifact-trail-empty'),
+      subject: document.querySelector('.artifact-trail-subject')?.textContent || '',
+    }))()`);
+    await evalJs(ws, `(() => {
+      const row = [...document.querySelectorAll('.res-row')].find((candidate) =>
+        candidate.querySelector('.res-type')?.textContent === 'StructureDefinition'
+        && candidate.querySelector('.res-id')?.textContent === 'period-tracking-bundle');
+      if (!row) throw new Error('exact artifact row unavailable');
+      row.click();
+    })()`);
+
     // The selected artifact is one exact subject across Source -> Definition ->
     // Published page. Exercise the three buttons with keyboard activation; a
     // filename-derived or mouse-only trail cannot pass this sequence.
@@ -1819,6 +1918,12 @@ try {
         windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
       }, id);
       await waitForStable(ws, `document.querySelector('.workspace-views')?.dataset.mode === ${JSON.stringify(mode)}`, 10000, `artifact trail ${mode}`);
+      const current = await evalJs(ws, `(() => {
+        const steps = [...document.querySelectorAll('.artifact-trail-step')];
+        const selected = steps.filter((step) => step.getAttribute('aria-current') === 'step');
+        return { count: selected.length, index: steps.indexOf(selected[0]) };
+      })()`);
+      results.trailCurrents = [...(results.trailCurrents || []), current];
     };
     await activateTrailStep(0, 'author');
     const sourceTrail = await evalJs(ws, `(() => ({
@@ -2041,12 +2146,20 @@ try {
     ) {
       console.error('assert: mCODE preparation did not reach a real stock preview page —', JSON.stringify(mp)); ok = false;
     }
+    const before = results.engineLifecycleBeforeMcode || {};
+    const after = results.engineLifecycleAfterMcode || {};
+    if (after.recycleCount !== before.recycleCount + 1 || after.preparedConfigCount !== 1) {
+      console.error('assert: direct US Core -> mCODE did not recycle exactly once before the heavy successor —', JSON.stringify({ before, after })); ok = false;
+    }
   }
   if (!results.workspaceDirtyAfterABA?.marker) {
     console.error('assert: dirty Cycle workspace did not survive A -> B/C -> A —', JSON.stringify(results.workspaceDirtyAfterABA)); ok = false;
   }
   if (!results.workspaceDirtyAfterReload?.marker) {
     console.error('assert: dirty Cycle workspace did not survive editor reload —', JSON.stringify(results.workspaceDirtyAfterReload)); ok = false;
+  }
+  if (!results.narrativePageClearsTrail?.empty || results.narrativePageClearsTrail?.subject) {
+    console.error('assert: narrative page retained an unrelated artifact trail —', JSON.stringify(results.narrativePageClearsTrail)); ok = false;
   }
   // preview-window gates (task #37).
   const pw = results.previewWindow || {};
@@ -2101,6 +2214,23 @@ try {
     // location should reference the edited fsh file
     console.error('assert: diagnostic missing fsh location:', results.brokenDiagnostic.loc); ok = false;
   }
+  if (!(
+    results.diagnosticNavigation?.sourceControl === 'BUTTON'
+    && results.diagnosticNavigation?.hasDefinition
+    && results.diagnosticNavigation?.hasPublished
+    && results.diagnosticNavigation?.afterSource?.mode === 'author'
+    && /e2e-broken/i.test(results.diagnosticNavigation?.afterSource?.subject || '')
+    && !results.diagnosticNavigation?.afterSource?.drawerOpen
+    && results.diagnosticNavigation?.afterDefinition?.mode === 'explore'
+    && /e2e-broken/i.test(results.diagnosticNavigation?.afterDefinition?.subject || '')
+    && !results.diagnosticNavigation?.afterDefinition?.drawerOpen
+    && results.diagnosticNavigation?.afterPublished?.mode === 'preview'
+    && /e2e-broken/i.test(results.diagnosticNavigation?.afterPublished?.subject || '')
+    && /StructureDefinition-e2e-broken\.html$/i.test(results.diagnosticNavigation?.afterPublished?.page || '')
+    && !results.diagnosticNavigation?.afterPublished?.drawerOpen
+  )) {
+    console.error('assert: exact diagnostic navigation failed —', JSON.stringify(results.diagnosticNavigation)); ok = false;
+  }
   // M2 preview assertions.
   if (!(results.previewTextLen > 200)) { console.error('assert: preview page did not render'); ok = false; }
   if (!results.previewHasIgContent) { console.error('assert: preview missing IG content'); ok = false; }
@@ -2125,8 +2255,8 @@ try {
   }
   if (results.editTitleResult !== 'ok') { console.error('assert: could not edit index title —', results.editTitleResult); ok = false; }
   else if (!results.previewUpdatedAfterEdit) { console.error('assert: preview did not update after FSH/page edit'); ok = false; }
-  // F6 stock-template gates: renders + a 1.5s warm-edit automation budget. The
-  // measured span includes the 300ms edit debounce, compile, stage, Liquid render,
+  // F6 stock-template gates: renders + a 2s warm-edit automation budget. The
+  // measured span includes the 120ms prose debounce, compile, stage, Publisher render,
   // fragment fills, iframe publication, and up to one 120ms polling interval.
   // This still catches gross regressions without claiming a sub-second result
   // that the controlled browser does not consistently achieve.
@@ -2139,6 +2269,10 @@ try {
     && results.artifactTrail?.mode === 'preview'
   )) {
     console.error('assert: exact keyboard artifact trail failed —', JSON.stringify(results.artifactTrail)); ok = false;
+  }
+  if (!(results.trailCurrents?.length === 3
+    && results.trailCurrents.every((current, index) => current.count === 1 && current.index === index))) {
+    console.error('assert: artifact trail current-step semantics failed —', JSON.stringify(results.trailCurrents)); ok = false;
   }
   if (!(
     results.workspaceKeyboard?.focused === 'workspace-tab-explore'
@@ -2162,6 +2296,9 @@ try {
     console.error('assert: stock warm edit was not applied —', results.stockEditResult); ok = false;
   } else if (!(results.stockWarmEditMs < STOCK_WARM_EDIT_BUDGET_MS)) {
     console.error('assert: stock warm edit took', results.stockWarmEditMs, `ms (gate: <${STOCK_WARM_EDIT_BUDGET_MS})`); ok = false;
+  }
+  if (!results.stockWarmReuse?.ok) {
+    console.error('assert: stock warm edit missed exact private reuse —', JSON.stringify(results.stockWarmReuse)); ok = false;
   }
   // #40 template selector: curated version catalog (default UX — no typing).
   const tc = results.templateCatalog || {};

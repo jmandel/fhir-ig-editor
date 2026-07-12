@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { deriveBuildState, summarizeProject } from '../src/views/ProjectOverview';
+import { deriveBuildState, settledBuildStatus, summarizeProject } from '../src/views/ProjectOverview';
 
 test('build state distinguishes initial, rebuilding, stale, ready, and failed output', () => {
   expect(deriveBuildState({ previewStale: false, compiling: false, siteBuilding: false, hasPublishedPreview: false, hasError: false })).toBe('checking');
@@ -9,6 +9,11 @@ test('build state distinguishes initial, rebuilding, stale, ready, and failed ou
   expect(deriveBuildState({ previewStale: false, compiling: true, siteBuilding: true, hasPublishedPreview: true, hasError: false })).toBe('rebuilding');
   expect(deriveBuildState({ previewStale: true, compiling: false, siteBuilding: false, hasPublishedPreview: false, hasError: true })).toBe('failed');
   expect(deriveBuildState({ previewStale: true, compiling: false, siteBuilding: false, hasPublishedPreview: true, hasError: true })).toBe('failed-preview');
+});
+
+test('a settled project without a current preview is checking, never ready', () => {
+  expect(settledBuildStatus('checking', 'Demo')).toBe('Checking the current project…');
+  expect(settledBuildStatus('ready', 'Demo')).toBe('Demo ready.');
 });
 
 test('overview groups existing compile/catalog presentation data without another manifest', () => {

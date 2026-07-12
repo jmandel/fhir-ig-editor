@@ -19,6 +19,19 @@ export function deriveBuildState(input: {
   return input.hasPublishedPreview ? 'ready' : 'checking';
 }
 
+export function settledBuildStatus(state: BuildState, projectName: string): string {
+  if (state === 'checking') return 'Checking the current project…';
+  if (state === 'stale') return 'Preview is out of date.';
+  if (state === 'ready') return `${projectName} ready.`;
+  return state === 'failed-preview'
+    ? 'Site rebuild failed; showing the previous preview.'
+    : state === 'failed'
+      ? 'Site build failed.'
+      : state === 'rebuilding'
+        ? 'Rebuilding; showing the previous preview.'
+        : 'Building preview…';
+}
+
 interface Props {
   projectId: string;
   projectName: string;
@@ -28,6 +41,7 @@ interface Props {
   diagnostics: Diagnostic[];
   buildState: BuildState;
   onOpenMode: (mode: WorkspaceMode) => void;
+  onOpenProblems: () => void;
 }
 
 export function ProjectOverview({
@@ -39,6 +53,7 @@ export function ProjectOverview({
   diagnostics,
   buildState,
   onOpenMode,
+  onOpenProblems,
 }: Props) {
   const summary = useMemo(
     () => summarizeProject(paths, resources, pages, diagnostics),
@@ -75,13 +90,19 @@ export function ProjectOverview({
               : 'Open verified preview'
             : 'Preview is building…'}
         </button>
-        <span className={summary.errors ? 'overview-problems has-errors' : 'overview-problems'}>
-          {summary.errors
-            ? `${summary.errors} error${summary.errors === 1 ? '' : 's'}`
-            : summary.warnings
-              ? `${summary.warnings} warning${summary.warnings === 1 ? '' : 's'}`
-              : 'No reported problems'}
-        </span>
+        {summary.errors || summary.warnings ? (
+          <button
+            type="button"
+            className={summary.errors
+              ? 'overview-problems has-errors'
+              : 'overview-problems has-warnings'}
+            onClick={onOpenProblems}
+          >
+            {summary.errors
+              ? `${summary.errors} error${summary.errors === 1 ? '' : 's'}`
+              : `${summary.warnings} warning${summary.warnings === 1 ? '' : 's'}`}
+          </button>
+        ) : <span className="overview-problems">No reported problems</span>}
       </div>
     </section>
   );

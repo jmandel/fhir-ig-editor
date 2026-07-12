@@ -11,6 +11,7 @@ import {
   previewWorkerPublication,
   previewWorkerScriptPath,
   registeredPreviewPaths,
+  resolvePreviewOutputRefs,
   validatePreviewSource,
   waitForCompatiblePreviewWorker,
 } from '../src/preview/previewWindow';
@@ -220,6 +221,42 @@ test('one preview client replaces history and stale clients expire', () => {
     ['expired', { igId: 'ig-a', path: 'en/old.html', lastSeen: now - 5 * 60_000 - 1 }],
   ]);
   expect(registeredPreviewPaths(registry, 'ig-a', now)).toEqual(['en/current.html']);
+});
+
+test('publication resolves each open successor page once and leaves the full catalog intact', async () => {
+  const unresolved = source(null);
+  unresolved.catalog.outputs.push({
+    path: 'en/other.html',
+    kind: 'page',
+    mediaType: 'text/html; charset=utf-8',
+  });
+  const calls: string[] = [];
+  const resolved = await resolvePreviewOutputRefs(
+    unresolved,
+    ['en/index.html', 'en/index.html'],
+    async (_handle, path) => {
+      calls.push(path);
+      return { path, mediaType: 'text/html; charset=utf-8', content: ref('b') };
+    },
+  );
+  expect(calls).toEqual(['en/index.html']);
+  expect(resolved?.catalog.outputs).toHaveLength(2);
+  expect(resolved?.catalog.outputs[0].content).toEqual(ref('b'));
+  expect(resolved?.catalog.outputs[1].content).toBeUndefined();
+});
+
+test('stale open-page resolution cannot publish a partial successor', async () => {
+  let current = true;
+  const resolved = await resolvePreviewOutputRefs(
+    source(null),
+    ['en/index.html'],
+    async (_handle, path) => {
+      current = false;
+      return { path, mediaType: 'text/html; charset=utf-8', content: ref('b') };
+    },
+    () => current,
+  );
+  expect(resolved).toBeNull();
 });
 
 test('Service Worker persists a per-IG pointer and has no byte-provisioning side channel', async () => {

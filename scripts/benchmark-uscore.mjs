@@ -467,6 +467,11 @@ async function traceSnapshot(target, phaseStart) {
       progress: trace.progress,
       longTasks: trace.longTasks,
       runtimeMetrics: window.__igDebug?.metrics || [],
+      engineLifecycle: {
+        recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+        preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+        lastCompiledResourceCount: window.__igDebug?.engine?.lastCompiledResourceCount ?? -1,
+      },
       milestones: trace.milestones,
       resourceCount: document.querySelectorAll('.res-row').length,
       siteError: document.querySelector('.site-error')?.textContent || '',
@@ -520,6 +525,7 @@ async function traceSnapshot(target, phaseStart) {
     operations,
     operationTotals: summarizeOperations(operations),
     runtimeMetrics,
+    engineLifecycle: raw.engineLifecycle,
     stageTotals: summarizeRuntimeMetrics(runtimeMetrics),
     longTasks: {
       count: longTasks.length,
@@ -636,9 +642,29 @@ async function main() {
     await sleep(250);
     const warm = await traceSnapshot(target, 0);
     warm.network = networkSummary(networkEvents, 'warmHardReload');
+    const warmPreparedMount = warm.operationTotals.mountPackages;
+    if (!(warmPreparedMount?.preparedWarmCalls > 0)
+        || warmPreparedMount.preparedColdCalls !== 0
+        || warmPreparedMount.preparedChunksInflated !== 0
+        || warmPreparedMount.preparedRawInflatedBytes !== 0) {
+      throw new Error(`warm hard reload did not shallow-mount only authenticated prepared packages: ${JSON.stringify(warmPreparedMount)}`);
+    }
+    const warmBuild = [...warm.runtimeMetrics].reverse().find(({ event }) =>
+      event.stage === 'site-build' && event.metrics?.closureVerifyMs != null);
+    const warmClosureVerifyMs = warmBuild?.event?.metrics?.closureVerifyMs;
+    if (!Number.isFinite(warmClosureVerifyMs) || warmClosureVerifyMs >= 1_000) {
+      throw new Error(`warm hard reload re-expanded package closure instead of verifying retained carriers: ${warmClosureVerifyMs}`);
+    }
+    const stale = warm.milestones;
+    if (!(stale.previousPreviewUiAt >= 0)
+        || !(stale.previousPreviewPageAt >= stale.previousPreviewUiAt)
+        || !(stale.currentReadyAt >= stale.previousPreviewPageAt)) {
+      throw new Error(`stale preview milestones are not ordered before exact Ready: ${JSON.stringify(stale)}`);
+    }
 
     progress('preparing same-worker comparison via Cycle');
     target.phase = 'preparation';
+    const sameWorkerRecycleBaseline = warm.engineLifecycle.recycleCount;
     if (!(await selectCatalogProject(target, 'cycle'))) {
       throw new Error('Cycle is absent from .open-ig-select');
     }
@@ -650,6 +676,11 @@ async function main() {
       `!document.querySelector('.open-progress') && document.querySelectorAll('.res-row').length > 0 && document.querySelectorAll('.res-row').length < 100`,
       'Cycle project open',
     );
+    const cycleLifecycle = await target.evaluate(`(() => ({
+      recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+      preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+      lastCompiledResourceCount: window.__igDebug?.engine?.lastCompiledResourceCount ?? -1,
+    }))()`);
 
     progress('same-worker US Core reopen');
     target.phase = 'sameWorkerReopen';
@@ -660,6 +691,37 @@ async function main() {
     await waitForProjectOpen(target, 'uscore');
     const same = await traceSnapshot(target, sameStart);
     same.network = networkSummary(networkEvents, 'sameWorkerReopen');
+    const samePrepare = [...same.runtimeMetrics].reverse().find(({ event }) =>
+      event.stage === 'site-build' && event.metrics?.siteBuildCacheHit != null);
+    const sameMetrics = samePrepare?.event?.metrics || {};
+    const sameWorkerContract = {
+      recycleBaseline: sameWorkerRecycleBaseline,
+      recycleAfterCycle: cycleLifecycle.recycleCount,
+      recycleAfter: same.engineLifecycle.recycleCount,
+      preparedConfigsAfterCycle: cycleLifecycle.preparedConfigCount,
+      preparedConfigsAfterReopen: same.engineLifecycle.preparedConfigCount,
+      cycleCompiledResources: cycleLifecycle.lastCompiledResourceCount,
+      reopenedCompiledResources: same.engineLifecycle.lastCompiledResourceCount,
+      siteBuildCacheHit: sameMetrics.siteBuildCacheHit ?? null,
+      skippedPublisherPhases: {
+        templateMaterializeMs: sameMetrics.templateMaterializeMs ?? null,
+        publisherRuntimeMs: sameMetrics.publisherRuntimeMs ?? null,
+        publisherModelMs: sameMetrics.publisherModelMs ?? null,
+        renderModelMs: sameMetrics.renderModelMs ?? null,
+        outputCatalogMs: sameMetrics.outputCatalogMs ?? null,
+      },
+    };
+    if (sameWorkerContract.recycleAfterCycle !== sameWorkerContract.recycleBaseline
+        || sameWorkerContract.recycleAfter !== sameWorkerContract.recycleBaseline
+        || sameWorkerContract.preparedConfigsAfterCycle !== 2
+        || sameWorkerContract.preparedConfigsAfterReopen !== 2
+        || !(sameWorkerContract.cycleCompiledResources > 0)
+        || sameWorkerContract.reopenedCompiledResources !== 0
+        || sameWorkerContract.siteBuildCacheHit !== 1
+        || Object.values(sameWorkerContract.skippedPublisherPhases)
+          .some((value) => value !== 0)) {
+      throw new Error(`US Core -> Cycle -> US Core did not retain the exact SiteEngine generation: ${JSON.stringify(sameWorkerContract)}`);
+    }
 
     const warmMountMs = (warm.operationTotals.init?.durationMs || 0)
       + (warm.operationTotals.mountPackages?.durationMs || 0);
@@ -679,6 +741,16 @@ async function main() {
         coldStart: cold,
         warmHardReload: warm,
         sameWorkerReopen: same,
+      },
+      contracts: {
+        warmPreparedMount: {
+          warmCalls: warmPreparedMount.preparedWarmCalls,
+          coldCalls: warmPreparedMount.preparedColdCalls,
+          chunksInflatedAtCommit: warmPreparedMount.preparedChunksInflated,
+          rawInflatedBytesAtCommit: warmPreparedMount.preparedRawInflatedBytes,
+          closureVerifyMs: warmClosureVerifyMs,
+        },
+        sameWorkerReopen: sameWorkerContract,
       },
       comparisons: {
         warmToColdRatio: ratio(warm.durationMs / cold.durationMs),

@@ -11,7 +11,7 @@ import {
   WorkspaceRepository,
 } from './vfs/workspace';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
-import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
+import type { CompiledResource, CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
 import type { GeneratorSpec, OutputDescriptor } from './site/contract';
 import {
   ensurePreviewServiceWorker,
@@ -19,7 +19,7 @@ import {
   publishPreviewSource,
   restorePersistedPreviewSource,
 } from './preview/previewWindow';
-import { LatestTaskQueue, type TaskLease } from './build/latestTaskQueue';
+import { LatestTaskQueue, editDebounceMs, type TaskLease } from './build/latestTaskQueue';
 import { getCuratedCatalogs, type TemplateCatalog } from './adapters/templateCatalog';
 
 const GENERATOR_KEY = 'igEditor.siteGenerator';
@@ -51,20 +51,19 @@ import { ArtifactTrail } from './views/ArtifactTrail';
 import {
   mergeResourcesByIdentity,
   primaryPageForResource,
+  resourceForPage,
   resourceIdentity,
-  resourceForSubject,
   soleResourceDeclaredIn,
 } from './views/artifactSelection';
 import {
-  BuildStateBadge,
   deriveBuildState,
   ProjectOverview,
+  settledBuildStatus,
   type WorkspaceMode,
 } from './views/ProjectOverview';
 import type { ProgressEvent } from './worker/protocol';
 import { presentProgress } from './progressPresentation';
 
-const DEBOUNCE_MS = 300;
 
 interface BuildOutcome {
   ok: boolean;
@@ -113,6 +112,7 @@ function recordRuntimeMetric(event: ProgressEvent): void {
 
 export function App() {
   const engineRef = useRef<EngineClient | null>(null);
+  const problemsRef = useRef<HTMLDetailsElement | null>(null);
   // Engine work is serialized; leases prevent obsolete immutable build handles
   // from publishing UI or Service Worker generations.
   const buildQueueRef = useRef(new LatestTaskQueue());
@@ -124,7 +124,6 @@ export function App() {
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
-  const [status, setStatus] = useState('Booting…');
   // Cold-start progress (spec §1): staged phase + per-bundle progress.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   // Project-open progress: while a baked project is opening/switching (US Core,
@@ -168,6 +167,11 @@ export function App() {
     setActivatedModes((current) => current.has(mode) ? current : new Set([...current, mode]));
     setWorkspaceMode(mode);
   }, []);
+  const leaveProblemsFor = useCallback((mode: WorkspaceMode) => {
+    if (problemsRef.current) problemsRef.current.open = false;
+    activateWorkspace(mode);
+    requestAnimationFrame(() => document.getElementById(`workspace-tab-${mode}`)?.focus());
+  }, [activateWorkspace]);
   const [previewStale, setPreviewStale] = useState(false);
 
   // task #32: packages the runtime resolver could not obtain from any source.
@@ -263,7 +267,6 @@ export function App() {
       const res = await engine.init((ev) => {
         recordRuntimeMetric(ev);
         setProgress(ev);
-        setStatus(ev.message);
       });
       if (cancelled) return;
       setVersion(res.version);
@@ -272,7 +275,6 @@ export function App() {
       const readyEvent: ProgressEvent = { stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` };
       recordRuntimeMetric(readyEvent);
       setProgress(readyEvent);
-      setStatus(`Engine ready — mounted ${res.mounted} packages.`);
 
       // If OPFS already has a project (reload), compile it immediately.
       if (workspace) {
@@ -351,7 +353,6 @@ export function App() {
       if (!lease.isLatest()) return;
       recordRuntimeMetric(ev);
       setProgress(ev);
-      setStatus(ev.message);
     };
     if (lease.isLatest()) {
       setSiteBuilding(true);
@@ -536,7 +537,7 @@ export function App() {
 
   // ---- debounced compile on edit ------------------------------------------
   const debounceRef = useRef<number | null>(null);
-  const scheduleCompile = useCallback(() => {
+  const scheduleCompile = useCallback((editedPath: string) => {
     if (!projectWorkspace || !engineRef.current) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const editedWorkspace = projectWorkspace;
@@ -544,7 +545,7 @@ export function App() {
       debounceRef.current = null;
       if (projectWorkspaceRef.current !== editedWorkspace) return;
       void runCompile(editedWorkspace, engineRef.current!);
-    }, DEBOUNCE_MS);
+    }, editDebounceMs(editedPath));
   }, [projectWorkspace, runCompile]);
 
   // ---- open a baked project -------------------------------------------------
@@ -570,11 +571,11 @@ export function App() {
     // "Loading …" statusline while ~14 MB streams — indistinguishable from hung.
     setOpeningSince(Date.now());
     setOpenError(null); // clear any prior failure the moment a new open starts
+    setSiteError(null);
     const emit = (ev: ProgressEvent) => {
       if (openRequestRef.current !== requestId) return;
       recordRuntimeMetric(ev);
       setProgress(ev);
-      setStatus(ev.message);
     };
     emit({ stage: 'manifest', message: `Loading ${projectId} project files…` });
     try {
@@ -638,7 +639,6 @@ export function App() {
       // Surface the failure VISIBLY (persistent banner) — a fetch/CORS/HTTP/parse
       // error must never be a silent dead click (the exact US Core 404 bug).
       const message = String(e).replace(/^Error:\s*/, '');
-      setStatus(`Failed to open ${projectId}: ${message}`);
       setOpenError({ projectId, message });
     } finally {
       if (openRequestRef.current === requestId) {
@@ -656,18 +656,20 @@ export function App() {
       setActiveText(text);
       void projectWorkspace.write(activePath, text);
       setPreviewStale(true);
-      scheduleCompile();
+      scheduleCompile(activePath);
     },
     [projectWorkspace, activePath, scheduleCompile],
   );
 
   const selectFile = useCallback(
-    (path: string) => {
+    (path: string, knownOwner?: CompiledResource | null) => {
       if (!projectWorkspace) return;
       setActivePath(path);
       setActiveText(projectWorkspace.read(path) ?? '');
       setRevealLine(undefined);
-      const declared = soleResourceDeclaredIn(resources, path);
+      const declared = knownOwner === undefined
+        ? soleResourceDeclaredIn(resources, path)
+        : knownOwner;
       setSelectedResource(declared ? resourceIdentity(declared) : null);
       activateWorkspace('author');
     },
@@ -675,10 +677,12 @@ export function App() {
   );
 
   const navigateTo = useCallback(
-    (file: string, line: number) => {
-      selectFile(file);
+    (file: string, line: number, owner: CompiledResource | null) => {
+      selectFile(file, owner);
       // force a new object identity so the reveal effect re-fires on same line
       setRevealLine(line);
+      if (problemsRef.current) problemsRef.current.open = false;
+      requestAnimationFrame(() => document.getElementById('workspace-tab-author')?.focus());
     },
     [selectFile],
   );
@@ -698,18 +702,22 @@ export function App() {
   const activeResource = resources.find((resource) => resourceIdentity(resource) === selectedResource) ?? null;
   const currentProjectPages = siteIgId === projectIdRef.current ? sitePages : null;
   const selectedResourcePage = primaryPageForResource(currentProjectPages, activeResource);
+  const shownSitePage = currentProjectPages
+    ?.find((candidate) => candidate.path === selectedSitePage) ?? null;
+  const shownSiteResource = resourceForPage(resources, shownSitePage);
+  const trailResource = workspaceMode === 'preview' ? shownSiteResource : activeResource;
+  const trailPage = workspaceMode === 'preview'
+    ? (shownSiteResource ? shownSitePage : null)
+    : selectedResourcePage;
   const normalizedResourceFilter = resourceFilter.trim().toLocaleLowerCase();
   const filteredResources = normalizedResourceFilter
     ? resources.filter((resource) => `${resource.resourceType ?? ''}/${resource.id ?? ''} ${resource.filename}`.toLocaleLowerCase().includes(normalizedResourceFilter))
     : resources;
-  const selectResourceBySubject = (subject: OutputDescriptor['subject']) => {
-    const resource = resourceForSubject(resources, subject);
-    if (resource) setSelectedResource(resourceIdentity(resource));
-  };
   const selectSitePage = (path: string) => {
     setSelectedSitePage(path);
     const page = currentProjectPages?.find((candidate) => candidate.path === path);
-    if (page?.subject) selectResourceBySubject(page.subject);
+    const resource = resourceForPage(resources, page);
+    setSelectedResource(resource ? resourceIdentity(resource) : null);
   };
   const onWorkspaceTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, mode: WorkspaceMode) => {
     const current = WORKSPACE_MODES.findIndex(([candidate]) => candidate === mode);
@@ -731,6 +739,17 @@ export function App() {
     hasPublishedPreview: Boolean(currentProjectPages),
     hasError: Boolean(siteError),
   });
+  const statusMessage = openingSince != null
+    ? null
+    : openError
+      ? `Couldn't open ${openError.projectId}.`
+      : siteError
+        ? buildState === 'failed-preview'
+          ? 'Site rebuild failed; showing the previous preview.'
+          : 'Site build failed.'
+        : compiling || siteBuilding || !engineReady
+          ? progress?.message ?? 'Starting…'
+          : settledBuildStatus(buildState, projectName);
 
   return (
     <div className="app">
@@ -745,7 +764,6 @@ export function App() {
               in-memory
             </span>
           )}
-          {projectLoaded && <BuildStateBadge state={buildState} />}
           {projectLoaded && (
             <BuildSettings
               generatorId={generatorId}
@@ -801,7 +819,7 @@ export function App() {
       </header>
 
       <div className={`statusline${openingSince != null ? ' suppressed' : ''}`}>
-        {openingSince == null ? status : null}
+        {statusMessage}
       </div>
 
       <div className="status-area">
@@ -898,21 +916,35 @@ export function App() {
             diagnostics={diagnostics}
             buildState={buildState}
             onOpenMode={activateWorkspace}
+            onOpenProblems={() => {
+              if (!problemsRef.current) return;
+              problemsRef.current.open = true;
+              requestAnimationFrame(() => {
+                problemsRef.current?.querySelector<HTMLElement>('button, summary')?.focus();
+              });
+            }}
           />
           <ArtifactTrail
-            resource={activeResource}
-            page={selectedResourcePage}
+            resource={trailResource}
+            page={trailPage}
+            currentMode={workspaceMode}
+            activeSourcePath={activePath}
+            selectedPagePath={selectedSitePage}
             onOpenSource={() => {
-              if (!activeResource?.definition || !projectWorkspace) return;
-              setActivePath(activeResource.definition.path);
-              setActiveText(projectWorkspace.read(activeResource.definition.path) ?? '');
-              setRevealLine(activeResource.definition.line);
+              if (!trailResource?.definition || !projectWorkspace) return;
+              setSelectedResource(resourceIdentity(trailResource));
+              setActivePath(trailResource.definition.path);
+              setActiveText(projectWorkspace.read(trailResource.definition.path) ?? '');
+              setRevealLine(trailResource.definition.line);
               activateWorkspace('author');
             }}
-            onOpenDefinition={() => activateWorkspace('explore')}
+            onOpenDefinition={() => {
+              if (trailResource) setSelectedResource(resourceIdentity(trailResource));
+              activateWorkspace('explore');
+            }}
             onOpenPreview={() => {
-              if (!selectedResourcePage) return;
-              setSelectedSitePage(selectedResourcePage.path);
+              if (!trailPage) return;
+              setSelectedSitePage(trailPage.path);
               activateWorkspace('preview');
             }}
           />
@@ -1015,12 +1047,29 @@ export function App() {
       )}
 
       {projectLoaded && (
-        <details className="problems">
+        <details ref={problemsRef} className="problems">
           <summary className="problems-header">
             Problems
             {diagnostics.length > 0 && <span className="problems-count">{diagnostics.length}</span>}
           </summary>
-          <DiagnosticsPanel diagnostics={diagnostics} onNavigate={navigateTo} />
+          <DiagnosticsPanel
+            diagnostics={diagnostics}
+            resources={resources}
+            pages={currentProjectPages}
+            publishedLabel={['stale', 'rebuilding', 'failed-preview'].includes(buildState)
+              ? 'Previous published page'
+              : 'Published page'}
+            onNavigate={navigateTo}
+            onOpenDefinition={(resource) => {
+              setSelectedResource(resourceIdentity(resource));
+              leaveProblemsFor('explore');
+            }}
+            onOpenPreview={(page, resource) => {
+              setSelectedResource(resourceIdentity(resource));
+              setSelectedSitePage(page.path);
+              leaveProblemsFor('preview');
+            }}
+          />
         </details>
       )}
     </div>

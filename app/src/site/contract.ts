@@ -48,11 +48,16 @@ export interface RustPrepareMetrics {
   snapshotCompletedLocalCacheHit: boolean;
   preparedGuideCacheHit: boolean;
   siteBuildCacheHit: boolean;
+  publisherRecipeAssetsCacheHit: boolean;
   templateMaterializeMs: number;
   publisherRuntimeMs: number;
   publisherModelMs: number;
   renderSemanticsCacheHit: boolean;
   renderModelMs: number;
+  outputCatalogMs: number;
+  publisherArtifactsMs: number;
+  siteBuildCloseMs: number;
+  closureVerifyMs: number;
   catalogMs: number;
 }
 

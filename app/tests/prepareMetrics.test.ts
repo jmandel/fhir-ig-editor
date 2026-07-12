@@ -16,11 +16,16 @@ describe('prepare timing sidecar', () => {
       'preparedGuideMs',
       'preparedGuideCacheHit',
       'siteBuildCacheHit',
+      'publisherRecipeAssetsCacheHit',
       'templateMaterializeMs',
       'publisherRuntimeMs',
       'publisherModelMs',
       'renderSemanticsCacheHit',
       'renderModelMs',
+      'outputCatalogMs',
+      'publisherArtifactsMs',
+      'siteBuildCloseMs',
+      'closureVerifyMs',
       'catalogMs',
     ]) {
       expect(CONTRACT).toContain(`${field}:`);
@@ -77,5 +82,40 @@ describe('prepare timing sidecar', () => {
     expect(render).toContain('unwrap<RenderedOutput>(s.render(handle, path))');
     expect(render).toContain('return rendered');
     expect(render).not.toContain('s.outputs(handle)');
+  });
+
+  test('publishes only changed Rust ContentRefs during one worker lifetime', () => {
+    expect(WORKER).toContain('const publishedRustContent = new Set<string>()');
+    expect(WORKER).toContain("`${content.sha256}\\u0000${content.byteLength}\\u0000${content.mediaType ?? ''}`");
+    const publish = WORKER.slice(
+      WORKER.indexOf('async function publishRustContent('),
+      WORKER.indexOf('function publicCycleDescriptor'),
+    );
+    expect(publish).toContain('if (publishedRustContent.has(key)) return');
+    expect(publish).toContain('if (await contentStore.get(content))');
+    expect(publish).toContain('publishedRustContent.add(key)');
+    expect(publish.indexOf('await storeExactContent')).toBeLessThan(
+      publish.lastIndexOf('publishedRustContent.add(key)'),
+    );
+  });
+
+  test('keeps a package-heavy guide only across a lightweight external Cycle successor', () => {
+    expect(CLIENT).toContain("project.projectId !== 'cycle' || spec.generator !== 'cycle'");
+    expect(CLIENT).toContain('MAX_RETAINED_CYCLE_SUCCESSOR_FILES = 128');
+    expect(CLIENT).toContain('MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS = 16 * 1024 * 1024');
+    expect(CLIENT).toContain('this.lastCompiledResourceCount === 0 && !smallCycleSuccessor');
+    expect(CLIENT).toContain('this.preparedConfigs.length >= 2');
+  });
+
+  test('rejects a warm pointer whose selected artifact decodes to another label', () => {
+    const stage = WORKER.slice(
+      WORKER.indexOf('for (const { pointer } of prepared)'),
+      WORKER.indexOf('result = unwrap(s.commitPreparedMount())'),
+    );
+    expect(stage).toContain('const staged = unwrap<{ label: string }>(');
+    expect(stage).toContain('if (staged.label !== pointer.label)');
+    expect(WORKER.indexOf('if (staged.label !== pointer.label)')).toBeLessThan(
+      WORKER.indexOf('result = unwrap(s.commitPreparedMount())'),
+    );
   });
 });

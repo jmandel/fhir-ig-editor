@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test';
 import {
   mergeResourcesByIdentity,
   primaryPageForResource,
+  resourceForDefinition,
+  resourceForPage,
   resourceIdentity,
   resourceForSubject,
   soleResourceDeclaredIn,
@@ -34,12 +36,48 @@ test('joins definition and renderer page only through an exact resource subject'
   ], resource)?.path).toBe('configured-landing.html');
 });
 
+test('joins a diagnostic owner only through its exact declaration location', () => {
+  expect(resourceForDefinition(resources, {
+    kind: 'fsh-declaration',
+    path: 'input/fsh/profiles.fsh',
+    line: 3,
+    column: 0,
+  })?.id).toBe('patient');
+  expect(resourceForDefinition(resources, {
+    kind: 'fsh-declaration',
+    path: 'input/fsh/profiles.fsh',
+    line: 4,
+    column: 0,
+  })).toBeNull();
+  expect(resourceForDefinition([...resources, { ...resources[0] }], resources[0].definition)).toBeNull();
+});
+
 test('fails closed rather than guessing a page or ambiguous source declaration', () => {
   expect(primaryPageForResource([
     { path: 'StructureDefinition-patient.html', kind: 'page', mediaType: 'text/html' },
   ], resources[0])).toBeNull();
   expect(soleResourceDeclaredIn([...resources, { ...resources[1], filename: 'ValueSet-other.json', id: 'other' }], 'input/fsh/terminology.fsh')).toBeNull();
   expect(soleResourceDeclaredIn(resources, 'input/fsh/profiles.fsh')?.id).toBe('patient');
+});
+
+test('page selection clears artifact context unless the page has one exact subject', () => {
+  expect(resourceForPage(resources, {
+    path: 'en/StructureDefinition-patient.html',
+    kind: 'page',
+    mediaType: 'text/html',
+    subject: { resourceType: 'StructureDefinition', id: 'patient' },
+  })?.id).toBe('patient');
+  expect(resourceForPage(resources, {
+    path: 'en/index.html',
+    kind: 'page',
+    mediaType: 'text/html',
+  })).toBeNull();
+  expect(resourceForPage([...resources, { ...resources[0] }], {
+    path: 'en/StructureDefinition-patient.html',
+    kind: 'page',
+    mediaType: 'text/html',
+    subject: { resourceType: 'StructureDefinition', id: 'patient' },
+  })).toBeNull();
 });
 
 test('selection identity is exact subject plus source, never an output filename', () => {

@@ -37,6 +37,49 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Active performance/UX certification (2026-07-12)
+
+The audit patch is landed and Pages run `29195715737` passed. The active
+uncommitted round keeps the four-operation architecture and makes the persistent
+package path exact and lazy. SiteBuild v2 roots the exact deterministic
+PreparedPackage carrier used by execution; the unprovable parallel normalized
+payload and redundant renderer-package artifacts are deleted. One typed mount
+owns carrier identity and lazy files, rejects nested-only same-label drift, and
+gives live/restored Publisher rendering the same top-level semantic members plus
+`other/spec.internals`. Warm A/B pointer labels are compared before atomic
+commit. The path-membership check is logarithmic.
+
+The final corrected rebuilt-WASM receipt is `/tmp/uscore-v2-bound-final.json`.
+Fresh-profile US Core cold setup is 77.435 s; hard reload exposes prior verified
+UI/page at 659/765 ms and reaches exact Ready at 8.432 s (8.683 s tail). A
+deliberately strict interim v1 verification was measured at 20.638 s because it
+inflated and hashed the entire semantic closure; it was not shipped. Prepared
+mounting retains 152 MB of compact artifacts, inflates zero chunks/bytes, and
+closure verification is 0 ms because carrier bytes are authenticated exactly
+once. US Core -> Cycle -> US Core is 1.250 s with no Worker recycle,
+`siteBuildCacheHit=1`, and zero template/runtime/model/render/catalog
+reconstruction. The benchmark fails on body inflation, a >=1 s closure walk,
+or retained-runtime/lifecycle regression.
+
+The exact committed-engine-stamp Pages-subpath browser receipt is
+`/tmp/fhir-v2-bound-stamped-full.log` (`E2E GATE: PASS`): 632 ms Cycle edit,
+924 ms Publisher edit, exact diagnostic
+source/definition/published-page navigation, US Core 1,535/1,535 images and
+85/85 assets, one-shell CarePlan, real mCODE, exactly one US Core -> mCODE
+recycle, dirty workspace persistence, scroll 640 -> 640, restart, and mobile
+geometry. Fresh-process native Publisher also passes at
+`/tmp/fhir-v2-bound-fig-gate.log` with the 1,799-file
+`so1-sha256:eb61f833...` receipt. Engine implementation `e0d3a217` plus its
+certification-only handoff commit `bfcb9903` are pushed identically to
+`snapshot-gen` and `main`; Cycle `70231bd` is pushed to `main`. Editor
+commit/push and Pages/live certification remain.
+
+The same app patch adds exact diagnostic owner navigation through source,
+definition, and published consequence; one truthful build status; page-owned
+artifact trails; bounded Cycle coexistence; changed-ContentRef publication; and
+targeted preview pre-resolution. App 94/94 and focused Rust/static gates are
+green at this checkpoint.
+
 ## Completion-audit landing (engine landed, editor patch active 2026-07-12)
 
 An independent requirement-by-requirement audit confirmed the deletion-first
@@ -365,11 +408,11 @@ Dependency landing receipts for this overhaul:
   initialization is parameterless and `mountPackages` is the sole transactional
   package mount seam; compilation for a site occurs only inside `prepare`.
 - The legacy v3 inflated/base64 bundle-cache migration reader is deleted. The
-  only persistent warm package form is PreparedPackage v2; a missing/corrupt
+  only persistent warm package form is PreparedPackage v3; a missing/corrupt
   artifact safely reacquires its exact baked transport, explicit local package,
   or registry coordinate.
 - Preview publishes one immutable `{igId, handle, buildId, catalog}` pointer.
-  The protocol-4 module Service Worker verifies ContentRefs in OPFS, renders
+  The protocol-5 module Service Worker verifies ContentRefs in OPFS, renders
   only unresolved pages, persists across editor/SW restart, and injects one
   shared response-time base/hot-reload/scroll control module.
 - Publisher runtime assets are renderer-owned outputs. Rust assembles exact

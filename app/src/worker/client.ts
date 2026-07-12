@@ -62,6 +62,28 @@ const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
 export type ProgressCb = (ev: ProgressEvent) => void;
 
+const MAX_RETAINED_CYCLE_SUCCESSOR_FILES = 128;
+const MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS = 16 * 1024 * 1024;
+
+/** The one no-recycle exception is a bounded input class, not trust in an
+ * editable project id. It exists only to exercise the certified lightweight
+ * external-builder A -> B -> A path beside one retained Publisher runtime. */
+function isBoundedCycleSuccessor(project: ProjectRevision, spec: GeneratorSpec): boolean {
+  if (project.projectId !== 'cycle' || spec.generator !== 'cycle') return false;
+  const values = [
+    project.config,
+    ...Object.values(project.files),
+    ...Object.values(project.siteFiles),
+    JSON.stringify(project.predefined) ?? '',
+  ];
+  const fileCount = Object.keys(project.files).length
+    + Object.keys(project.siteFiles).length
+    + Object.keys(project.predefined).length;
+  return fileCount <= MAX_RETAINED_CYCLE_SUCCESSOR_FILES
+    && values.reduce((sum, value) => sum + value.length, 0)
+      <= MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS;
+}
+
 export class EngineClient {
   private worker: Worker;
   private nextId = 1;
@@ -179,7 +201,7 @@ export class EngineClient {
   ): Promise<PackageMountInput> {
     const started = performance.now();
     const transportIdentity = `tgz-${entry.sha256}`;
-    // PreparedPackage v2 represents the complete package, including template
+    // PreparedPackage v3 represents the complete package, including template
     // metadata. Templates therefore use the same authenticated warm path and
     // raw cold fallback as every other package.
     if (!forceRaw) {
@@ -662,8 +684,15 @@ export class EngineClient {
     const started = performance.now();
     try {
       const switchingProject = !this.preparedConfigs.includes(project.config);
+      // A zero-emission predefined Publisher guide can hold a very large
+      // package/render graph. Recycle before every unbounded successor, with
+      // one certified exception: the built-in small Cycle fixture can coexist
+      // with one retained Publisher runtime for the measured A -> B -> A path.
+      // A third distinct project always recycles.
+      const smallCycleSuccessor = isBoundedCycleSuccessor(project, spec);
       if (switchingProject
-        && (this.preparedConfigs.length >= 2 || this.lastCompiledResourceCount === 0)) {
+        && (this.preparedConfigs.length >= 2
+          || (this.lastCompiledResourceCount === 0 && !smallCycleSuccessor))) {
         await this.recycleWorker();
       }
       await this.acquireForProject(project.config);
@@ -692,11 +721,18 @@ export class EngineClient {
           ),
           preparedGuideCacheHit: Number(result.metrics.rust.preparedGuideCacheHit),
           siteBuildCacheHit: Number(result.metrics.rust.siteBuildCacheHit),
+          publisherRecipeAssetsCacheHit: Number(
+            result.metrics.rust.publisherRecipeAssetsCacheHit,
+          ),
           templateMaterializeMs: result.metrics.rust.templateMaterializeMs,
           publisherRuntimeMs: result.metrics.rust.publisherRuntimeMs,
           publisherModelMs: result.metrics.rust.publisherModelMs,
           renderSemanticsCacheHit: Number(result.metrics.rust.renderSemanticsCacheHit),
           renderModelMs: result.metrics.rust.renderModelMs,
+          outputCatalogMs: result.metrics.rust.outputCatalogMs,
+          publisherArtifactsMs: result.metrics.rust.publisherArtifactsMs,
+          siteBuildCloseMs: result.metrics.rust.siteBuildCloseMs,
+          closureVerifyMs: result.metrics.rust.closureVerifyMs,
           catalogMs: result.metrics.rust.catalogMs,
         },
       });

@@ -60,10 +60,12 @@ crate is a transport facade over that executor, not another preparation layer.
 The browser's `WorkspaceRepository -> Workspace -> ProjectRevision` path keeps
 one working copy per guide and captures one immutable request for `prepare`.
 
-Package transport remains compact `PreparedPackage` v2: authenticated 1 MiB
-chunks, transactional one-artifact-at-a-time warm mount, and bounded lazy member
-inflation. Cache records and worker/preview handles are private execution
-details, not additional build representations.
+Package transport remains compact `PreparedPackage` v3: authenticated 1 MiB
+chunks, a source-metadata-bound cache key, transactional one-artifact-at-a-time
+warm mount, and bounded lazy member inflation. `SiteBuild` v2 package locks root
+that exact deterministic carrier; they do not assert a second inflated package
+payload. Cache records and worker/preview handles are private execution details,
+not additional build representations.
 
 ## Repository shape
 

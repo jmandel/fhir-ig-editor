@@ -48,7 +48,11 @@ host supplies an explicit resolver-scoped `PackageEnvironment`; `wasm_api`
 only parses and serializes transport and has no parallel preparation path.
 Publisher `SiteBuild` artifacts root semantic documents, all authored roles,
 the materialized template tree, assembled runtime tree, exact source revision,
-and package lock. `SiteEngine::restore(ClosedSiteBuild, ContentStore)` strictly
+and package lock. SiteBuild v2 makes each locked package's `content` the exact
+deterministic PreparedPackage carrier mounted by execution. The carrier is the
+single package handoff: its directory is validated without expansion, member
+bytes remain compressed until read, and no normalized-payload or renderer-input
+side artifact exists beside it. `SiteEngine::restore(ClosedSiteBuild, ContentStore)` strictly
 reconstructs either target's ordinary bounded runtime in a fresh process. This
 is handle lifecycle admission, not a fifth host operation or another value.
 

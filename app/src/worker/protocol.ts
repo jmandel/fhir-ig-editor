@@ -46,6 +46,8 @@ export interface Diagnostic {
   file?: string;
   /** 1-based line, when known. */
   line?: number;
+  /** Exact declaration whose compiled/published consequence is affected. */
+  ownerDefinition?: DefinitionLocation;
 }
 
 export interface CompileResult {
@@ -302,7 +304,7 @@ export interface BundleSpec {
 }
 
 export interface PreparedPackagePointer {
-  schema: 2;
+  schema: 3;
   label: string;
   transportIdentity: string;
   cacheKey: string;
