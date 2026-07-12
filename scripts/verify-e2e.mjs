@@ -1724,6 +1724,50 @@ try {
       console.error('[diag] Cycle reopen after catalog guides:', JSON.stringify(dump, null, 2));
       throw error;
     }
+
+    // The Cycle index was edited twice before switching through US Core and
+    // mCODE; the stock warm-edit marker is the final authored value.
+    // Prove that selecting A after B/C reopens A's mutable workspace rather
+    // than reinstalling its catalog archive, then reload the editor and prove
+    // the same dirty bytes survive OPFS restoration.
+    const readCycleWorkspaceMarker = async (label) => {
+      await evalJs(ws, `document.querySelector('#workspace-tab-author')?.click()`);
+      await waitForStable(
+        ws,
+        `document.querySelector('#workspace-tab-author')?.getAttribute('aria-selected') === 'true'`,
+        10000,
+        `${label}: Author workspace`,
+      );
+      const outcome = await evalJs(ws, `(async () => {
+        const leaves = [...document.querySelectorAll('.file-tree *')]
+          .filter(element => element.children.length === 0);
+        const row = leaves.find(element =>
+          (element.textContent || '').replace(/[^\\x20-\\x7e]/g, '').trim() === 'index.md');
+        if (!row) return { error: 'no-index-row' };
+        (row.closest('[class*=row]') || row).click();
+        await new Promise(resolve => setTimeout(resolve, 400));
+        const editor = window.monaco?.editor.getEditors()[0];
+        const value = editor?.getModel()?.getValue() || '';
+        return {
+          marker: /# Stock Warm Edit Marker/m.test(value),
+          prefix: value.slice(0, 120),
+        };
+      })()`);
+      return outcome;
+    };
+    results.workspaceDirtyAfterABA = await readCycleWorkspaceMarker('Cycle A -> B/C -> A');
+
+    await cdp(ws, 'Page.reload', {}, id);
+    await waitForStable(
+      ws,
+      `localStorage.getItem('igEditor.project') === 'cycle'
+        && !!window.__igDebug?.engine
+        && !!document.querySelector('.project-overview')`,
+      120000,
+      'Cycle dirty workspace after editor reload',
+    );
+    results.workspaceDirtyAfterReload = await readCycleWorkspaceMarker('Cycle reload');
+
     // Ensure we're on the Site preview tab, then re-select the stock-template generator.
     await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
     await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'preview generator select present');
@@ -1997,6 +2041,12 @@ try {
     ) {
       console.error('assert: mCODE preparation did not reach a real stock preview page —', JSON.stringify(mp)); ok = false;
     }
+  }
+  if (!results.workspaceDirtyAfterABA?.marker) {
+    console.error('assert: dirty Cycle workspace did not survive A -> B/C -> A —', JSON.stringify(results.workspaceDirtyAfterABA)); ok = false;
+  }
+  if (!results.workspaceDirtyAfterReload?.marker) {
+    console.error('assert: dirty Cycle workspace did not survive editor reload —', JSON.stringify(results.workspaceDirtyAfterReload)); ok = false;
   }
   // preview-window gates (task #37).
   const pw = results.previewWindow || {};

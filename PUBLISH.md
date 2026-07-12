@@ -85,7 +85,7 @@ Run the focused engine contracts from the engine commit that will be pinned:
 
 ```sh
 cd vendor/sushi-rs
-cargo test -p compiler -p wasm_api -p snapshot_gen --release
+cargo test -p compiler -p wasm_api -p snapshot_gen -p prepared_guide -p site_engine --release
 cargo test -p site_build --release
 cargo test -p render_page --release
 cargo test -p fig --release
@@ -102,10 +102,12 @@ bun test
 cd ../..
 ```
 
-The Pages job also runs the preferred native path against an archived copy of
-the pinned guide: project-specific example generation, `fig prepare` with the
-explicit package cache, then `SITE_BUILD_DIR=<bundle> bun site-gen/build.tsx`.
-The exact reusable command and its input/output boundary are documented in
+The Pages job runs both native patterns. `scripts/fig-publisher-gate.sh`
+exercises fresh-process Publisher `prepare -> outputs -> render -> finalize`
+against the tiny guide. The Cycle gate uses an archived copy of the pinned
+guide: project-specific example generation, `fig prepare` with the explicit
+package cache, then `SITE_BUILD_DIR=<bundle> bun site-gen/build.tsx`. The Cycle
+input/output boundary is documented in
 [`vendor/cycle/site-gen/README.md`](vendor/cycle/site-gen/README.md).
 
 Run app contracts and build with the actual Pages base:

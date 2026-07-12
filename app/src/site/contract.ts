@@ -114,7 +114,6 @@ export interface RenderedOutput {
   path: string;
   mediaType: string;
   content: ContentRef;
-  nonReadyFragments?: number;
 }
 
 export interface OutputProducer {

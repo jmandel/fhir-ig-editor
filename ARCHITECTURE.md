@@ -66,10 +66,13 @@ domain values. A handle names one immutable `SiteBuild`; it is never authority
 independent of that value. `Output` returns a path, media type, and `ContentRef`
 whose bytes are already in the host's `ContentStore`.
 
-Inputs cross the host boundary once. `prepare` captures them and owns package
-resolution, compilation, semantic preparation, template materialization, and
-target projection. Later operations accept only the returned handle. They never
-accept raw FSH/config/site files again and never consult ambient "last build"
+The complete immutable `ProjectRevision` crosses the site-execution boundary
+once, through `prepare`. Browser package acquisition has a private config-only
+handshake before that call: Rust computes the resolver fixpoint and template
+chain, while the host fetches and transactionally mounts any missing exact
+coordinates. This is package transport, not a second site operation. FSH,
+predefined resources, and authored site bytes cross only in `prepare`; later
+site operations accept only its handle and never consult ambient "last build"
 state.
 
 `outputs` is complete and collision-checked before rendering begins. Pages,
@@ -150,9 +153,11 @@ key and is not covered by this seam.
 
 ## Ownership
 
-- Rust owns source capture, package resolution, compilation, `PreparedGuide`,
+- Rust owns source validation/capture, package-resolution decisions, compilation, `PreparedGuide`,
   target projection, Publisher need resolution, runtime construction, and
   canonical `SiteOutput` construction/validation through `SiteEngine`.
+- The host acquires and mounts exact package bytes requested by Rust; it does
+  not interpret dependency or template semantics.
 - A renderer owns its declared output namespace and all output bytes.
 - The host owns `ContentStore`, scheduling, private caches, handle lifetimes,
   and atomic publication.
@@ -196,7 +201,9 @@ Completion requires evidence that:
   `finalize` for site generation;
 - Cycle v1/`site.db` symbols, features, fixtures, commands, environment
   variables, branches, and documentation have zero callers and are deleted;
-- raw project inputs cross the worker boundary once per preparation;
+- FSH, predefined-resource, and authored-site bytes cross the worker boundary
+  once per preparation; the private preflight carries config/template identity
+  only for package acquisition;
 - both generators use immutable handles and return content references;
 - no site asset is transferred through base64 or a separate asset API;
 - independent page renders are order-independent;

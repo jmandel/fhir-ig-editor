@@ -37,6 +37,43 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Completion-audit landing (engine landed, editor patch active 2026-07-12)
+
+An independent requirement-by-requirement audit confirmed the deletion-first
+architecture is real, then found a small amount of public/test/documentation
+residue. The current uncommitted follow-up:
+
+- deletes `nonReadyFragments` from Rust, Fig, and TypeScript so Publisher
+  fragment observations remain private behind `render(handle, path)`;
+- makes the complete public Rust input `site_engine::ProjectRevision`, renames
+  the post-compile executor state to private `CompiledProjectRevision`, and
+  deletes its unused test-support feature/mutators;
+- directly gates `prepared_guide` and `site_engine` in Pages CI, adds exact
+  retained-runtime/recency/render-semantics reuse tests, and adds
+  `scripts/fig-publisher-gate.sh` for a fresh-process native Publisher
+  `prepare -> outputs -> render -> finalize` integration;
+- makes the full browser gate assert the dirty Cycle workspace survives both
+  A -> US Core/mCODE -> A and a complete editor reload; and
+- corrects old relational/watch/test prose and distinguishes the private
+  config/template package-acquisition handshake from the one complete project
+  payload that crosses in `prepare`.
+
+The completion audit is fully green. Focused evidence: SiteEngine 17 pass/1
+explicit oracle-fixture ignore, Fig 17+4, WASM 3+5+8, app 78/78 (422
+assertions) plus production build, Cycle 236/236 (651 assertions) plus renderer
+typecheck, all-target workspace and wasm32 checks, formatting, syntax, and
+diff-integrity checks. The fresh-process native Publisher gate produced 1,799
+files with receipt `so1-sha256:f082806d...`. The rebuilt Pages-subpath Chromium
+receipt is `/tmp/fhir-architecture-completion-audit.log` (`E2E GATE: PASS`): it
+proves US Core 1,535/1,535 images and a one-shell CarePlan, real mCODE without
+fallback/error, dirty workspace survival across A -> B/C -> A and editor
+reload, exact retained-render reuse, protocol-5 persistence, scroll retention,
+and mobile geometry. Engine commit `19856385` is pushed identically to
+`snapshot-gen` and `main`; the current editor patch pins that engine and adds
+the CI/browser certification. The user has authorized landing this patch.
+Rebuild WASM from `19856385`, commit/push editor `main`, and monitor Pages
+through deployment before claiming the live site is updated.
+
 ## Landing-ready architecture receipt (2026-07-12)
 
 The deletion-first overhaul is locally complete. The exact current browser
