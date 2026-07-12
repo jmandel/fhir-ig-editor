@@ -99,7 +99,7 @@ export interface MountResult {
 }
 
 export interface PreparedMountMetrics {
-  mode: 'cold-prepare' | 'warm-binary';
+  mode: 'cold-prepare' | 'warm-binary' | 'mixed';
   added: number;
   artifactBytes: number;
   engineMountMs: number;

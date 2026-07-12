@@ -285,25 +285,16 @@ export class EngineClient {
    * compile, and snapshot caches synchronized with the worker/Rust session. */
   private async mountPackages(packages: PackageMountInput[]): Promise<MountResult> {
     let transaction = packages;
-    const hasRaw = transaction.some((item) => item.kind === 'raw');
-    const hasPrepared = transaction.some((item) => item.kind === 'prepared');
-    // Preserve one Rust transaction. A partially warm batch falls back to raw
-    // for its prepared members instead of committing two independent groups.
-    if (hasRaw && hasPrepared) {
-      transaction = await Promise.all(transaction.map(async (item) => {
-        if (item.kind === 'raw') return item;
-        return this.rawFallbackForPrepared(item.pointer.label);
-      }));
-    }
     const started = performance.now();
     let result: MountResult;
     try {
       result = await this.call('mountPackages', transaction);
     } catch (error) {
       // A missing/corrupt prepared artifact is an optimization miss. Reacquire
-      // the authenticated original transport and prepare it again immediately.
-      if (!transaction.every((item) => item.kind === 'prepared')) throw error;
+      // only the prepared members, then retry the same atomic mixed batch.
+      if (!transaction.some((item) => item.kind === 'prepared')) throw error;
       const fallbacks = await Promise.all(transaction.map(async (item) => {
+        if (item.kind === 'raw') return item;
         try {
           return await this.rawFallbackForPrepared(item.pointer.label);
         } catch {
@@ -335,6 +326,7 @@ export class EngineClient {
         ...(prepared ? {
           preparedWarmBinary: prepared.mode === 'warm-binary' ? 1 : 0,
           preparedColdPrepare: prepared.mode === 'cold-prepare' ? 1 : 0,
+          preparedMixed: prepared.mode === 'mixed' ? 1 : 0,
           preparedAdded: prepared.added,
           preparedArtifactBytes: prepared.artifactBytes,
           preparedEngineMountMs: prepared.engineMountMs,

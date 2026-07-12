@@ -63,7 +63,7 @@ app `assets/index-DMW22hhF.js`, CSS `assets/index-BclA8Kk1.css`, worker
 `assets/engine.worker-D8QfEkFa.js`, preview protocol 5, the new progress/Explore
 copy, and the exact 11,747,189-byte baked R4 core artifact.
 
-**BAKED TRANSPORT RETRY FOLLOW-UP (UNCOMMITTED 2026-07-12):** investigation of
+**BAKED TRANSPORT RETRY FOLLOW-UP (`dcc6e6c`, PUSHED 2026-07-12):** investigation of
 the mobile screenshot that unexpectedly downloaded baked R4 core from the
 registry found that `obtainPackage` silently swallowed every generic
 same-origin load failure. The active patch classifies only HTTP/network/body
@@ -78,7 +78,33 @@ TypeScript, and a 1,135-module Pages-base production build. The exact full
 Pages-subpath browser receipt is `/tmp/fhir-baked-retry-full.log` (`E2E GATE:
 PASS`): Tiny/Cycle, US Core 1,535/1,535 images and one-shell CarePlan, real
 mCODE, persistence/restart/scroll, 63px-stable mobile progress, and a 922 ms
-warm edit all remain green.
+warm edit all remain green. Pages run `29207110648` passed every engine/native/
+package/Cycle/app/build/browser/upload/deploy job. The live origin was separately
+verified serving app `assets/index-CdYUDRdQ.js`, resolver
+`assets/packageResolver-D9o9M5Zj.js` containing the typed retry/fallback, preview
+protocol 5, and the exact 11,747,189-byte baked R4 core artifact.
+
+**ATOMIC MIXED PACKAGE MOUNT FOLLOW-UP (UNCOMMITTED 2026-07-12):** the complete
+browser receipt exposed a second, separate cause of repeat work: whenever one
+resolver batch contained both prepared and raw packages, `EngineClient`
+deliberately reacquired every prepared member as raw because the Worker only
+accepted all-warm or all-cold batches. That restriction and the duplicated
+Worker mount branches are deleted (31 net lines). Warm and cold carriers now
+stage in original resolver order behind one `beginPreparedMount`, and one Rust
+commit remains the sole mounted-state mutation. Recovery replaces only prepared
+members and retries the same atomic batch. Protocol metrics distinguish mixed
+transactions. App 101/101 (512 assertions), TypeScript, syntax, diff integrity,
+and the 1,135-module Pages-base build pass. The exact browser receipt is
+`/tmp/fhir-mixed-package-mount-full.log` (`E2E GATE: PASS`): real US Core used
+two mixed transactions with nine prepared hits and `refetched: []`; all prior
+Tiny/Cycle, 1,535-image/one-shell CarePlan, mCODE, persistence/restart/scroll,
+mobile, and warm-edit gates remain green. The repeatable benchmark receipt is
+`/tmp/uscore-mixed-package-mount.json`: 77.439 s cold, 8.740 s persistent hard
+reload, and 1.423 s same-worker reopen. Those are within the prior baseline
+because this benchmark jumps from engine boot directly to US Core and therefore
+correctly reports zero mixed calls; do not claim a warm-reload improvement from
+this slice. The measured gain is the Tiny/Cycle -> US Core transition exercised
+by the full gate: nine prepared packages retained, zero baked re-fetches.
 
 The audit patch is landed and Pages run `29195715737` passed. The active
 uncommitted round keeps the four-operation architecture and makes the persistent

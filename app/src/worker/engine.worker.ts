@@ -333,8 +333,8 @@ const handlers: Handlers = {
   },
 
   /** Preferred package seam. Warm compact `.fpp` artifacts are authenticated in
-   * OPFS, staged into WASM one at a time, and committed together. A cold raw batch
-   * is normalized/mounted once and publishes the resulting artifacts. */
+   * OPFS and cold raw packages are normalized/published one at a time. Both stage
+   * in resolver order and become mounted through one atomic Rust commit. */
   async mountPackages(packages: PackageMountInput[]) {
     const s = await ensureSession();
     const t0 = performance.now();
@@ -346,47 +346,72 @@ const handlers: Handlers = {
       return { mounted: mountedLabels.size, newlyMounted: [], mountMs: 0, serializeMs: 0, wasmMs: 0, inputBytes: 0 };
     }
     const inputs = fresh.map(({ item }) => item);
-    const raw = inputs.filter((item): item is Extract<PackageMountInput, { kind: 'raw' }> => item.kind === 'raw');
-    const prepared = inputs.filter((item): item is Extract<PackageMountInput, { kind: 'prepared' }> => item.kind === 'prepared');
-    if (raw.length > 0 && prepared.length > 0) {
-      throw new Error('mountPackages requires an all-raw or all-prepared transaction');
-    }
-
+    const rawCount = inputs.filter((item) => item.kind === 'raw').length;
+    const preparedCount = inputs.length - rawCount;
     let serializeMs = 0;
-    let wasmMs = 0;
+    const wasmStarted = performance.now();
     let inputBytes = 0;
-    let mounted = mountedLabels.size;
-    let preparedMetrics: PreparedMountMetrics | undefined;
-    if (prepared.length > 0) {
-      const cache = await import('./preparedPackageCache');
-      const wasmStarted = performance.now();
-      let committed = false;
-      let maxStagedArtifactBytes = 0;
-      unwrap(s.beginPreparedMount(prepared.length));
-      let result: {
-        mounted: number;
-        added: number;
-        packages: number;
-        manifestJsonBytes: number;
-        artifactBytes: number;
-        retainedBlobBytes: number;
-        indexedMembers: number;
-        memberBodyCopies: number;
-        manifestParseMs: number;
-        decodeValidateMs: number;
-        mountMs: number;
-        compressedRetainedBytes: number;
-        declaredRawBytes: number;
-        chunksInflated: number;
-        rawInflatedBytes: number;
-        cacheHits: number;
-        cachedRawBytes: number;
-      };
-      try {
-        // Read, authenticate, transfer, and release one compact artifact at a
-        // time. Rust retains staged packages but mutates no mounted state until
-        // the final commit succeeds.
-        for (const { pointer } of prepared) {
+    const cache = await import('./preparedPackageCache');
+    const totals = {
+      artifactBytes: 0,
+      preparedMembers: 0,
+      inputJsonBytes: 0,
+      base64Bytes: 0,
+      decodedSourceBytes: 0,
+      normalizedBytes: 0,
+      decodeValidatePrepareMs: 0,
+      jsonParseMs: 0,
+      base64DecodeMs: 0,
+      normalizationMs: 0,
+      indexingMs: 0,
+      artifactEncodeMs: 0,
+    };
+    type ColdArtifactResult = {
+      artifacts: Array<{ label: string; cacheKey: string; artifactSha256: string; bytes: number }>;
+      artifactBytes: number;
+      preparedMembers: number;
+      inputJsonBytes: number;
+      base64Bytes: number;
+      decodedSourceBytes: number;
+      normalizedBytes: number;
+      mountMemberBodyCopies: number;
+      decodeValidatePrepareMs: number;
+      jsonParseMs: number;
+      base64DecodeMs: number;
+      normalizationMs: number;
+      indexingMs: number;
+      artifactEncodeMs: number;
+    };
+    type PreparedCommitResult = {
+      mounted: number;
+      added: number;
+      packages: number;
+      manifestJsonBytes: number;
+      artifactBytes: number;
+      retainedBlobBytes: number;
+      indexedMembers: number;
+      memberBodyCopies: number;
+      manifestParseMs: number;
+      decodeValidateMs: number;
+      mountMs: number;
+      compressedRetainedBytes: number;
+      declaredRawBytes: number;
+      chunksInflated: number;
+      rawInflatedBytes: number;
+      cacheHits: number;
+      cachedRawBytes: number;
+    };
+    let commitResult!: PreparedCommitResult;
+    let commitSucceeded = false;
+    let maxStagedArtifactBytes = 0;
+    unwrap(s.beginPreparedMount(inputs.length));
+    try {
+      // Warm and cold packages share one ordered staging transaction. Rust sees
+      // no mounted mutation until every authenticated/canonical carrier is
+      // staged and the single commit succeeds.
+      for (const item of inputs) {
+        if (item.kind === 'prepared') {
+          const { pointer } = item;
           const artifact = await cache.readPreparedPackage(pointer);
           if (!artifact) throw new Error(`prepared-package cache miss: ${pointer.label}`);
           inputBytes += artifact.byteLength;
@@ -399,176 +424,91 @@ const handlers: Handlers = {
               `prepared-package pointer label ${pointer.label} selected artifact ${staged.label}`,
             );
           }
+          continue;
         }
-        result = unwrap(s.commitPreparedMount());
-        committed = true;
-      } finally {
-        if (!committed) {
-          try { unwrap(s.abortPreparedMount()); } catch { /* preserve the original cache/decode error */ }
-        }
-      }
-      inputBytes = result.artifactBytes + result.manifestJsonBytes;
-      wasmMs = performance.now() - wasmStarted;
-      mounted = result.mounted;
-      preparedMetrics = {
-        mode: 'warm-binary',
-        added: result.added,
-        packages: result.packages,
-        manifestJsonBytes: result.manifestJsonBytes,
-        artifactBytes: result.artifactBytes,
-        retainedBlobBytes: result.retainedBlobBytes,
-        maxStagedArtifactBytes,
-        jsBatchBytes: 0,
-        compressedRetainedBytes: result.compressedRetainedBytes,
-        declaredRawBytes: result.declaredRawBytes,
-        chunksInflated: result.chunksInflated,
-        rawInflatedBytes: result.rawInflatedBytes,
-        chunkCacheHits: result.cacheHits,
-        cachedRawBytes: result.cachedRawBytes,
-        indexedMembers: result.indexedMembers,
-        memberBodyCopies: result.memberBodyCopies,
-        manifestParseMs: result.manifestParseMs,
-        decodeValidateMs: result.decodeValidateMs,
-        engineMountMs: result.mountMs,
-      };
-    } else {
-      const cache = await import('./preparedPackageCache');
-      const wasmStarted = performance.now();
-      const totals = {
-        artifactBytes: 0,
-        preparedMembers: 0,
-        inputJsonBytes: 0,
-        base64Bytes: 0,
-        decodedSourceBytes: 0,
-        normalizedBytes: 0,
-        decodeValidatePrepareMs: 0,
-        jsonParseMs: 0,
-        base64DecodeMs: 0,
-        normalizationMs: 0,
-        indexingMs: 0,
-        artifactEncodeMs: 0,
-      };
-      type ColdArtifactResult = {
-        artifacts: Array<{ label: string; cacheKey: string; artifactSha256: string; bytes: number }>;
-        artifactBytes: number;
-        preparedMembers: number;
-        inputJsonBytes: number;
-        base64Bytes: number;
-        decodedSourceBytes: number;
-        normalizedBytes: number;
-        mountMemberBodyCopies: number;
-        decodeValidatePrepareMs: number;
-        jsonParseMs: number;
-        base64DecodeMs: number;
-        normalizationMs: number;
-        indexingMs: number;
-        artifactEncodeMs: number;
-      };
-      type PreparedCommitResult = {
-        mounted: number;
-        added: number;
-        packages: number;
-        manifestJsonBytes: number;
-        artifactBytes: number;
-        retainedBlobBytes: number;
-        indexedMembers: number;
-        memberBodyCopies: number;
-        manifestParseMs: number;
-        decodeValidateMs: number;
-        mountMs: number;
-        compressedRetainedBytes: number;
-        declaredRawBytes: number;
-        chunksInflated: number;
-        rawInflatedBytes: number;
-        cacheHits: number;
-        cachedRawBytes: number;
-      };
-      let commitResult!: PreparedCommitResult;
-      let committed = false;
-      let maxStagedArtifactBytes = 0;
-      unwrap(s.beginPreparedMount(raw.length));
-      try {
-        for (const { spec, transportIdentity } of raw) {
-          const serializeStarted = performance.now();
-          const input = JSON.stringify([spec]);
-          serializeMs += performance.now() - serializeStarted;
-          const result = unwrap<ColdArtifactResult>(s.prepareArtifacts(input));
-          if (result.artifacts.length !== 1 || result.artifacts[0].label !== spec.label) {
-            throw new Error(`prepareArtifacts returned the wrong artifact for ${spec.label}`);
-          }
-          totals.artifactBytes += result.artifactBytes;
-          totals.preparedMembers += result.preparedMembers;
-          totals.inputJsonBytes += result.inputJsonBytes;
-          totals.base64Bytes += result.base64Bytes;
-          totals.decodedSourceBytes += result.decodedSourceBytes;
-          totals.normalizedBytes += result.normalizedBytes;
-          totals.decodeValidatePrepareMs += result.decodeValidatePrepareMs;
-          totals.jsonParseMs += result.jsonParseMs;
-          totals.base64DecodeMs += result.base64DecodeMs;
-          totals.normalizationMs += result.normalizationMs;
-          totals.indexingMs += result.indexingMs;
-          totals.artifactEncodeMs += result.artifactEncodeMs;
 
-          const artifact = result.artifacts[0];
-          const bytes = s.takePrepared(artifact.label);
-          maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
-          await cache.writePreparedPackage({
-            schema: 3,
-            label: artifact.label,
-            transportIdentity,
-            cacheKey: artifact.cacheKey,
-            artifactSha256: artifact.artifactSha256,
-            bytes: artifact.bytes,
-          }, bytes).catch(() => {});
-          unwrap(s.stagePreparedMount(bytes, artifact.cacheKey));
+        const { spec, transportIdentity } = item;
+        const serializeStarted = performance.now();
+        const input = JSON.stringify([spec]);
+        serializeMs += performance.now() - serializeStarted;
+        const result = unwrap<ColdArtifactResult>(s.prepareArtifacts(input));
+        if (result.artifacts.length !== 1 || result.artifacts[0].label !== spec.label) {
+          throw new Error(`prepareArtifacts returned the wrong artifact for ${spec.label}`);
         }
-        commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount());
-        committed = true;
-      } finally {
-        if (!committed) {
-          try { unwrap(s.abortPreparedMount()); } catch { /* preserve the original preparation error */ }
-        }
+        totals.artifactBytes += result.artifactBytes;
+        totals.preparedMembers += result.preparedMembers;
+        totals.inputJsonBytes += result.inputJsonBytes;
+        totals.base64Bytes += result.base64Bytes;
+        totals.decodedSourceBytes += result.decodedSourceBytes;
+        totals.normalizedBytes += result.normalizedBytes;
+        totals.decodeValidatePrepareMs += result.decodeValidatePrepareMs;
+        totals.jsonParseMs += result.jsonParseMs;
+        totals.base64DecodeMs += result.base64DecodeMs;
+        totals.normalizationMs += result.normalizationMs;
+        totals.indexingMs += result.indexingMs;
+        totals.artifactEncodeMs += result.artifactEncodeMs;
+        inputBytes += result.inputJsonBytes;
+
+        const artifact = result.artifacts[0];
+        const bytes = s.takePrepared(artifact.label);
+        maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
+        await cache.writePreparedPackage({
+          schema: 3,
+          label: artifact.label,
+          transportIdentity,
+          cacheKey: artifact.cacheKey,
+          artifactSha256: artifact.artifactSha256,
+          bytes: artifact.bytes,
+        }, bytes).catch(() => {});
+        unwrap(s.stagePreparedMount(bytes, artifact.cacheKey));
       }
-      inputBytes = totals.inputJsonBytes;
-      wasmMs = performance.now() - wasmStarted;
-      mounted = commitResult.mounted;
-      preparedMetrics = {
-        mode: 'cold-prepare',
-        added: commitResult.added,
-        artifactBytes: totals.artifactBytes,
-        preparedMembers: totals.preparedMembers,
-        inputJsonBytes: totals.inputJsonBytes,
-        base64Bytes: totals.base64Bytes,
-        decodedSourceBytes: totals.decodedSourceBytes,
-        normalizedBytes: totals.normalizedBytes,
-        mountMemberBodyCopies: commitResult.memberBodyCopies,
-        decodeValidatePrepareMs: totals.decodeValidatePrepareMs,
-        jsonParseMs: totals.jsonParseMs,
-        base64DecodeMs: totals.base64DecodeMs,
-        normalizationMs: totals.normalizationMs,
-        indexingMs: totals.indexingMs,
-        artifactEncodeMs: totals.artifactEncodeMs,
-        engineMountMs: commitResult.mountMs,
-        maxStagedArtifactBytes,
-        jsBatchBytes: 0,
-        compressedRetainedBytes: commitResult.compressedRetainedBytes,
-        declaredRawBytes: commitResult.declaredRawBytes,
-        chunksInflated: commitResult.chunksInflated,
-        rawInflatedBytes: commitResult.rawInflatedBytes,
-        chunkCacheHits: commitResult.cacheHits,
-        cachedRawBytes: commitResult.cachedRawBytes,
-        indexedMembers: commitResult.indexedMembers,
-        memberBodyCopies: commitResult.memberBodyCopies,
-        manifestJsonBytes: commitResult.manifestJsonBytes,
-        manifestParseMs: commitResult.manifestParseMs,
-        decodeValidateMs: commitResult.decodeValidateMs,
-      };
+      commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount());
+      commitSucceeded = true;
+    } finally {
+      if (!commitSucceeded) {
+        try { unwrap(s.abortPreparedMount()); } catch { /* preserve the original staging error */ }
+      }
     }
-    const committed = fresh.map(({ label }) => ({ label }));
-    mountedLabels.add(committed);
+    const wasmMs = performance.now() - wasmStarted;
+    const mounted = commitResult.mounted;
+    const preparedMetrics: PreparedMountMetrics = {
+      mode: rawCount === 0 ? 'warm-binary' : preparedCount === 0 ? 'cold-prepare' : 'mixed',
+      added: commitResult.added,
+      packages: commitResult.packages,
+      artifactBytes: commitResult.artifactBytes,
+      preparedMembers: totals.preparedMembers,
+      inputJsonBytes: totals.inputJsonBytes,
+      base64Bytes: totals.base64Bytes,
+      decodedSourceBytes: totals.decodedSourceBytes,
+      normalizedBytes: totals.normalizedBytes,
+      mountMemberBodyCopies: commitResult.memberBodyCopies,
+      decodeValidatePrepareMs: totals.decodeValidatePrepareMs,
+      jsonParseMs: totals.jsonParseMs,
+      base64DecodeMs: totals.base64DecodeMs,
+      normalizationMs: totals.normalizationMs,
+      indexingMs: totals.indexingMs,
+      artifactEncodeMs: totals.artifactEncodeMs,
+      engineMountMs: commitResult.mountMs,
+      retainedBlobBytes: commitResult.retainedBlobBytes,
+      maxStagedArtifactBytes,
+      jsBatchBytes: 0,
+      compressedRetainedBytes: commitResult.compressedRetainedBytes,
+      declaredRawBytes: commitResult.declaredRawBytes,
+      chunksInflated: commitResult.chunksInflated,
+      rawInflatedBytes: commitResult.rawInflatedBytes,
+      chunkCacheHits: commitResult.cacheHits,
+      cachedRawBytes: commitResult.cachedRawBytes,
+      indexedMembers: commitResult.indexedMembers,
+      memberBodyCopies: commitResult.memberBodyCopies,
+      manifestJsonBytes: commitResult.manifestJsonBytes,
+      manifestParseMs: commitResult.manifestParseMs,
+      decodeValidateMs: commitResult.decodeValidateMs,
+    };
+    const committedLabels = fresh.map(({ label }) => ({ label }));
+    mountedLabels.add(committedLabels);
     return {
       mounted,
-      newlyMounted: committed.map(({ label }) => label),
+      newlyMounted: committedLabels.map(({ label }) => label),
       mountMs: performance.now() - t0,
       serializeMs,
       wasmMs,

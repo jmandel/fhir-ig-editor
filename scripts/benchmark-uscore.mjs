@@ -313,6 +313,7 @@ function summarizeOperations(operations) {
       wasmMs: 0,
       preparedColdCalls: 0,
       preparedWarmCalls: 0,
+      preparedMixedCalls: 0,
       preparedArtifactBytes: 0,
       preparedMembers: 0,
       preparedIndexedMembers: 0,
@@ -351,6 +352,7 @@ function summarizeOperations(operations) {
     if (prepared) {
       total.preparedColdCalls += prepared.mode === 'cold-prepare' ? 1 : 0;
       total.preparedWarmCalls += prepared.mode === 'warm-binary' ? 1 : 0;
+      total.preparedMixedCalls += prepared.mode === 'mixed' ? 1 : 0;
       total.preparedArtifactBytes += prepared.artifactBytes || 0;
       total.preparedMembers += prepared.preparedMembers || 0;
       total.preparedIndexedMembers += prepared.indexedMembers || 0;
@@ -645,6 +647,7 @@ async function main() {
     const warmPreparedMount = warm.operationTotals.mountPackages;
     if (!(warmPreparedMount?.preparedWarmCalls > 0)
         || warmPreparedMount.preparedColdCalls !== 0
+        || warmPreparedMount.preparedMixedCalls !== 0
         || warmPreparedMount.preparedChunksInflated !== 0
         || warmPreparedMount.preparedRawInflatedBytes !== 0) {
       throw new Error(`warm hard reload did not shallow-mount only authenticated prepared packages: ${JSON.stringify(warmPreparedMount)}`);
@@ -746,6 +749,7 @@ async function main() {
         warmPreparedMount: {
           warmCalls: warmPreparedMount.preparedWarmCalls,
           coldCalls: warmPreparedMount.preparedColdCalls,
+          mixedCalls: warmPreparedMount.preparedMixedCalls,
           chunksInflatedAtCommit: warmPreparedMount.preparedChunksInflated,
           rawInflatedBytesAtCommit: warmPreparedMount.preparedRawInflatedBytes,
           closureVerifyMs: warmClosureVerifyMs,

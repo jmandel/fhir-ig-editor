@@ -110,13 +110,27 @@ describe('prepare timing sidecar', () => {
 
   test('rejects a warm pointer whose selected artifact decodes to another label', () => {
     const stage = WORKER.slice(
-      WORKER.indexOf('for (const { pointer } of prepared)'),
-      WORKER.indexOf('result = unwrap(s.commitPreparedMount())'),
+      WORKER.indexOf('for (const item of inputs)'),
+      WORKER.indexOf('commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount())'),
     );
     expect(stage).toContain('const staged = unwrap<{ label: string }>(');
     expect(stage).toContain('if (staged.label !== pointer.label)');
     expect(WORKER.indexOf('if (staged.label !== pointer.label)')).toBeLessThan(
-      WORKER.indexOf('result = unwrap(s.commitPreparedMount())'),
+      WORKER.indexOf('commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount())'),
     );
+  });
+
+  test('stages warm and cold package carriers in one atomic ordered transaction', () => {
+    const mount = WORKER.slice(
+      WORKER.indexOf('async mountPackages(packages: PackageMountInput[])'),
+      WORKER.indexOf('async resolveProject(config, versionIndex)'),
+    );
+    expect(mount).not.toContain('requires an all-raw or all-prepared transaction');
+    expect(mount).toContain('unwrap(s.beginPreparedMount(inputs.length))');
+    expect(mount).toContain('for (const item of inputs)');
+    expect(mount).toContain("if (item.kind === 'prepared')");
+    expect(mount).toContain('const { spec, transportIdentity } = item');
+    expect(mount).toContain('s.commitPreparedMount()');
+    expect(CLIENT).not.toContain('if (hasRaw && hasPrepared)');
   });
 });

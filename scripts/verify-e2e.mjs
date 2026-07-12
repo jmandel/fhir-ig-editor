@@ -1562,6 +1562,20 @@ try {
         .filter(e => e.bytes != null)
         .map(e => ({ stage: e.stage, bytes: e.bytes, totalBytes: e.totalBytes }))
     `);
+    results.mixedPreparedTransport = await evalJs(ws, `(() => {
+      const events = (window.__igDebug?.metrics || [])
+        .slice(${JSON.stringify(openProgressMetricStart)}).map((entry) => entry.event);
+      const preparedHits = [...new Set(events
+        .filter((event) => event.stage === 'bundle-cache-hit' && event.label)
+        .map((event) => event.label))];
+      const refetched = [...new Set(events
+        .filter((event) => ['bundle-fetch', 'lazy-fetch'].includes(event.stage)
+          && preparedHits.includes(event.label))
+        .map((event) => event.label))];
+      const mixedMounts = events.filter((event) => event.stage === 'bundle-mount'
+        && event.metrics?.preparedMixed === 1).length;
+      return { preparedHits, refetched, mixedMounts };
+    })()`);
     results.usCoreResourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
     console.error('[diag] usCoreResourceCount =', results.usCoreResourceCount);
 
@@ -2405,6 +2419,13 @@ try {
     if (byteMetrics.some((event) => event.bytes > 0)
         && !(results.openProgressByteLabels || []).some((label) => /\bMB\b/.test(label))) {
       console.error('assert: byte download showed no visible MB counter:', JSON.stringify(results.openProgressByteLabels)); ok = false;
+    }
+    const mixed = results.mixedPreparedTransport || {};
+    if (!(mixed.preparedHits?.length > 0 && mixed.mixedMounts > 0)) {
+      console.error('assert: US Core did not exercise a mixed warm/cold atomic package mount:', JSON.stringify(mixed)); ok = false;
+    }
+    if (mixed.refetched?.length) {
+      console.error('assert: mixed package mount re-fetched prepared baked packages:', JSON.stringify(mixed)); ok = false;
     }
     // NOTE: US Core resource count is informational — a full compile needs
     // registry-only packages (external network), so we don't gate on it.
