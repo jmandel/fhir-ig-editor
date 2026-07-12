@@ -50,12 +50,12 @@ export function SnapshotTree({ engine, url, id }: Props) {
   }, [engine, url, id]);
 
   if (state.status === 'loading' || state.status === 'idle') {
-    return <div className="panel-empty">Generating snapshot…</div>;
+    return <div className="panel-empty">Generating full definition…</div>;
   }
   if (state.status === 'error') {
     return (
       <div className="panel-error">
-        Snapshot failed:
+        Full definition failed:
         <ul>
           {state.messages.map((m, i) => (
             <li key={i}>{m}</li>
@@ -68,6 +68,9 @@ export function SnapshotTree({ engine, url, id }: Props) {
   const elements = state.sd.snapshot?.element ?? [];
   return (
     <div className="snapshot">
+      <div className="snapshot-help">
+        FHIR calls this a snapshot: the complete definition after applying this profile&apos;s constraints to its base definitions.
+      </div>
       <div className="snapshot-meta">
         {elements.length} elements · generated in {state.ms.toFixed(0)} ms (walk engine)
       </div>

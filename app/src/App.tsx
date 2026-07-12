@@ -56,6 +56,7 @@ import {
   soleResourceDeclaredIn,
 } from './views/artifactSelection';
 import {
+  definitionsArePending,
   deriveBuildState,
   ProjectOverview,
   settledBuildStatus,
@@ -739,6 +740,7 @@ export function App() {
     hasPublishedPreview: Boolean(currentProjectPages),
     hasError: Boolean(siteError),
   });
+  const definitionsPending = definitionsArePending(buildState, resources.length);
   const statusMessage = openingSince != null
     ? null
     : openError
@@ -962,6 +964,7 @@ export function App() {
                 onKeyDown={(event) => onWorkspaceTabKeyDown(event, mode)}
               >
                 {label}
+                {mode === 'explore' && definitionsPending && <span className="tab-busy">Compiling</span>}
                 {mode === 'preview' && siteBuilding && <span className="tab-busy">Building</span>}
               </button>
             ))}
@@ -994,11 +997,15 @@ export function App() {
                   <input
                     type="search"
                     placeholder="Filter definitions…"
+                    disabled={definitionsPending}
                     value={resourceFilter}
                     onChange={(event) => setResourceFilter(event.target.value)}
                   />
                 </label>
                 <div className="resource-list">
+                  {definitionsPending && (
+                    <div className="resource-list-pending">Compiling definitions…</div>
+                  )}
                   {filteredResources.map((resource) => (
                     <button
                       key={resourceIdentity(resource)}
@@ -1014,8 +1021,10 @@ export function App() {
               </aside>
               <label className="mobile-picker">
                 Definition
-                <select value={selectedResource ?? ''} onChange={(event) => setSelectedResource(event.target.value)}>
-                  <option value="" disabled>Select a definition…</option>
+                <select disabled={definitionsPending} value={selectedResource ?? ''} onChange={(event) => setSelectedResource(event.target.value)}>
+                  <option value="" disabled>
+                    {definitionsPending ? 'Compiling definitions…' : 'Select a definition…'}
+                  </option>
                   {filteredResources.map((resource) => {
                     const identity = resourceIdentity(resource);
                     return <option key={identity} value={identity}>{resource.resourceType}/{resource.id}</option>;
@@ -1023,9 +1032,14 @@ export function App() {
                 </select>
               </label>
               <section className="definition-pane">
-                {workspaceMode === 'explore' && !siteBuilding && activeResource && engineRef.current ? (
+                {workspaceMode === 'explore' && definitionsPending ? (
+                  <div className="panel-empty definition-pending">
+                    <strong>Compiling definitions…</strong>
+                    <span>The profile in your source will appear here after the FHIR dependencies above finish loading.</span>
+                  </div>
+                ) : workspaceMode === 'explore' && activeResource && engineRef.current ? (
                   <ResourceInspector resource={activeResource} allResources={resources} engine={engineRef.current} settingsVersion={settingsVersion} />
-                ) : <div className="panel-empty">Definitions will appear as soon as compilation completes.</div>}
+                ) : <div className="panel-empty">Select a compiled definition to inspect.</div>}
               </section>
             </section>
 
@@ -1108,7 +1122,7 @@ const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   'project-unpack': 'Unpacking project',
   'project-store': 'Storing project',
   compile: 'Compiling project',
-  snapshot: 'Preparing snapshots',
+  snapshot: 'Preparing full definition',
   'site-build': 'Building site',
   'preview-publish': 'Publishing preview',
   resolve: 'Resolving packages',
@@ -1118,7 +1132,7 @@ const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
   'bundle-mount': 'Mounting packages',
   'registry-fetch': 'Fetching from registry',
   'package-blocked': 'Package unavailable',
-  'lazy-fetch': 'Fetching snapshot data',
+  'lazy-fetch': 'Loading profile dependencies',
   ready: 'Ready',
 };
 
@@ -1136,16 +1150,28 @@ function OpenProgress({ progress, since }: { progress: ProgressEvent; since: num
   const pct = presentation.fraction != null ? Math.round(presentation.fraction * 100) : null;
   return (
     <div className="open-progress" data-stage={progress.stage} role="status" aria-live="polite">
-      {pct != null && (
-        <div className="open-progress-bar" role="progressbar" aria-label="Download progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-          <div className="open-progress-fill" style={{ width: `${pct}%` }} />
-        </div>
-      )}
+      <div
+        className="open-progress-bar"
+        role={pct != null ? 'progressbar' : undefined}
+        aria-hidden={pct == null ? true : undefined}
+        aria-label={pct != null ? 'Download progress' : undefined}
+        aria-valuenow={pct ?? undefined}
+        aria-valuemin={pct != null ? 0 : undefined}
+        aria-valuemax={pct != null ? 100 : undefined}
+      >
+        <div className="open-progress-fill" style={{ width: `${pct ?? 0}%` }} />
+      </div>
       <div className="open-progress-line">
-        <span className="open-progress-stage">{OPEN_STAGE_LABEL[progress.stage]}</span>
-        {progress.fromCache && <span className="open-progress-cache">⚡ from cache</span>}
-        <span className="open-progress-msg">{progress.message}</span>
-        {presentation.byteLabel && <span className="progress-bytes">{presentation.byteLabel}</span>}
+        <span className="open-progress-heading">
+          <span className="open-progress-stage">{OPEN_STAGE_LABEL[progress.stage]}</span>
+          {progress.fromCache && <span className="open-progress-cache">⚡ from cache</span>}
+        </span>
+        <span className="open-progress-msg" title={progress.message}>{progress.message}</span>
+        {presentation.downloading && (
+          <span className="progress-bytes" data-empty={presentation.byteLabel == null ? 'true' : undefined}>
+            {presentation.byteLabel ?? '\u00a0'}
+          </span>
+        )}
         <span className="open-progress-elapsed">{elapsed}s</span>
       </div>
     </div>

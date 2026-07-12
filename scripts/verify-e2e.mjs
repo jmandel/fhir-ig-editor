@@ -113,6 +113,34 @@ async function measureMobileLayout(ws, includeGeometry = false) {
   }, id);
   await sleep(150);
   const result = await evalJs(ws, `(async () => {
+    const measureProgress = () => {
+      const fixture = document.createElement('div');
+      fixture.className = 'open-progress';
+      fixture.dataset.stage = 'lazy-fetch';
+      fixture.style.cssText = 'position:fixed;left:0;right:0;top:0;visibility:hidden;pointer-events:none';
+      fixture.innerHTML = [
+        '<div class="open-progress-bar"><div class="open-progress-fill"></div></div>',
+        '<div class="open-progress-line">',
+        '<span class="open-progress-heading"><span class="open-progress-stage">Loading profile dependencies</span></span>',
+        '<span class="open-progress-msg">Loading (profile dependency) hl7.fhir.uv.extensions.r4#5.3.0…</span>',
+        '<span class="progress-bytes" data-empty="true">&nbsp;</span>',
+        '<span class="open-progress-elapsed">9s</span>',
+        '</div>',
+      ].join('');
+      document.body.appendChild(fixture);
+      const bytes = fixture.querySelector('.progress-bytes');
+      const samples = [null, '0.00 / 0.74 MB', '0.52 / 0.74 MB', '10.0 / 120.0 MB'];
+      const heights = samples.map((label) => {
+        bytes.textContent = label || '\u00a0';
+        if (label) bytes.removeAttribute('data-empty');
+        else bytes.setAttribute('data-empty', 'true');
+        return fixture.getBoundingClientRect().height;
+      });
+      const overflow = fixture.scrollWidth > fixture.clientWidth + 1;
+      fixture.remove();
+      return { heights, range: Math.max(...heights) - Math.min(...heights), overflow };
+    };
+    const progress = measureProgress();
     const mode = (name) => document.getElementById('workspace-tab-' + name);
     const selectMode = async (name) => {
       const button = mode(name);
@@ -187,6 +215,7 @@ async function measureMobileLayout(ws, includeGeometry = false) {
       author,
       explore,
       preview,
+      progress,
       settingsClosed: settings ? !settings.open : false,
     };
   })()`);
@@ -209,6 +238,8 @@ function mobileLayoutPass(result) {
     && result.preview?.problemsPosition === 'fixed'
     && !result.preview?.closedHandleOccludes
     && !result.preview?.statusVisible
+    && result.progress?.range < 1
+    && !result.progress?.overflow
     && result.settingsClosed;
 }
 
@@ -670,6 +701,16 @@ try {
   await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[1]?.click()`);
   await waitFor(ws, `document.querySelector('#workspace-tab-explore')?.getAttribute('aria-selected') === 'true'`, 10000, 'tiny definition trail');
   results.tinyGuide.definitionMode = true;
+  // Explore intentionally becomes useful as soon as compilation returns,
+  // before the complete site catalog is published. Wait for that independent
+  // third consequence rather than relying on the old UI behavior that kept
+  // Explore blank until siteBuilding became false.
+  await waitFor(ws, `(() => {
+    const published = document.querySelectorAll('.artifact-trail-step')[2];
+    return !document.querySelector('#workspace-tab-preview .tab-busy')
+      && !!published
+      && !published.disabled;
+  })()`, 60000, 'tiny published consequence ready');
   await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[2]?.click()`);
   try {
     await waitFor(ws, `(() => {
@@ -1443,7 +1484,7 @@ try {
   await evalJs(ws, `(() => {
     window.__openProgress = {
       stages: [], appeared: false, cleared: false, lastMsgs: [], byteLabels: [],
-      duplicateStatus: false, indefiniteAnimation: false
+      duplicateStatus: false, indefiniteAnimation: false, pendingDefinitions: false
     };
     const tick = () => {
       const el = document.querySelector('.open-progress');
@@ -1457,6 +1498,17 @@ try {
         if (msg && op.lastMsgs[op.lastMsgs.length - 1] !== msg && op.lastMsgs.length < 30) op.lastMsgs.push(msg);
         const bytes = el.querySelector('.progress-bytes')?.textContent?.trim() || '';
         if (bytes && op.byteLabels[op.byteLabels.length - 1] !== bytes && op.byteLabels.length < 30) op.byteLabels.push(bytes);
+        if (['bundle-fetch', 'registry-fetch', 'lazy-fetch'].includes(s)) {
+          const profileStat = [...document.querySelectorAll('.overview-stat')]
+            .find((stat) => stat.querySelector('span')?.textContent?.trim() === 'profiles');
+          const picker = document.querySelector('.explore-workspace .mobile-picker select');
+          const waiting = document.querySelector('.overview-problems.is-pending');
+          if (profileStat?.querySelector('strong')?.textContent?.trim() === '…'
+              && picker?.disabled
+              && /waiting for compilation/i.test(waiting?.textContent || '')) {
+            op.pendingDefinitions = true;
+          }
+        }
         const status = document.querySelector('.statusline');
         if (status && (status.textContent.trim() || status.getBoundingClientRect().height > 1)) op.duplicateStatus = true;
         if (el.querySelector('.open-progress-spinner, .indeterminate, .tab-spinner')) op.indefiniteAnimation = true;
@@ -1502,6 +1554,7 @@ try {
     results.openProgressByteLabels = prog.byteLabels;
     results.openProgressDuplicateStatus = prog.duplicateStatus;
     results.openProgressIndefiniteAnimation = prog.indefiniteAnimation;
+    results.openProgressPendingDefinitions = prog.pendingDefinitions;
     results.openProgressCleared = prog.cleared && await evalJs(ws, `!document.querySelector('.open-progress')`);
     results.openProgressByteMetrics = await evalJs(ws, `
       (window.__igDebug?.metrics || []).slice(${JSON.stringify(openProgressMetricStart)})
@@ -1515,7 +1568,7 @@ try {
     // Opening a complete published guide and its Explore workspace uses only
     // the compiled differential. R5/snapshot support is an explicit tool:
     // prove it remains absent through US Core prepare, then appears only after
-    // the user presses Generate snapshot.
+    // the user requests the full definition (FHIR snapshot).
     results.usCoreR5FetchedBeforeInspector = bundleFetches.some((b) => /r5\.core/.test(b.file));
     await evalJs(ws, `(() => {
       const tab = [...document.querySelectorAll('.inspect-tab')]
@@ -1530,8 +1583,8 @@ try {
     results.usCoreR5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
     await evalJs(ws, `(() => {
       const button = [...document.querySelectorAll('.inspector-tabs .tab-btn')]
-        .find((candidate) => candidate.textContent?.trim() === 'Generate snapshot');
-      if (!button) throw new Error('Generate snapshot action is absent for US Core');
+        .find((candidate) => candidate.textContent?.trim() === 'Full definition');
+      if (!button) throw new Error('Full definition action is absent for US Core');
       button.click();
     })()`);
     await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'US Core snapshot tree');
@@ -2342,6 +2395,9 @@ try {
     if (!results.openProgressCleared) { console.error('assert: open-progress overlay did not clear after US Core open'); ok = false; }
     if (results.openProgressDuplicateStatus) { console.error('assert: statusline duplicated the project-open signal'); ok = false; }
     if (results.openProgressIndefiniteAnimation) { console.error('assert: project-open UI showed an indefinite spinner/bar'); ok = false; }
+    if (!results.openProgressPendingDefinitions) {
+      console.error('assert: pending compilation was presented as empty/zero definitions'); ok = false;
+    }
     const byteMetrics = results.openProgressByteMetrics || [];
     if (!byteMetrics.some((event) => event.bytes > 0)) {
       console.error('assert: project download emitted no consumed-byte progress:', JSON.stringify(byteMetrics)); ok = false;

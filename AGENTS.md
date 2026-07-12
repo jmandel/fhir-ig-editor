@@ -39,6 +39,25 @@ asset side channels, host callbacks, or parallel serialized build formats.
 
 ## Active performance/UX certification (2026-07-12)
 
+**MOBILE PROGRESS STABILITY FOLLOW-UP (UNCOMMITTED 2026-07-12):** the project-open
+banner now reserves its progress bar and byte-counter slots before the first
+response chunk, uses fixed grid areas, ellipsizes package detail, and gives
+mobile a stable phase/detail/bytes layout. The deferred snapshot-package copy is
+now user-facing “profile dependencies”; Explore calls the result “Full
+definition” and visibly explains that FHIR's snapshot is the complete inherited
+definition after applying the profile differential. Initial compilation no
+longer presents absent results as zero/empty: definition-derived counts are
+pending ellipses, Explore says Compiling and disables its picker, and the panel
+explains that the authored profile appears after FHIR dependencies load. Once
+compilation returns, Explore is immediately usable without waiting for site
+publication. App 96/96 (493 assertions) and the 1,135-module build pass. The
+complete browser receipt is `/tmp/fhir-pending-definitions-full2.log` (`E2E
+GATE: PASS`); it observes the pending-definition state during real package
+fetching, and its 390px regression
+measures 63/63/63/63px for empty, short, growing, and long byte labels (0px
+range, no overflow), while US Core/mCODE/scroll/restart/mobile gates remain
+green. This follow-up is not committed or deployed; do not claim it is live.
+
 The audit patch is landed and Pages run `29195715737` passed. The active
 uncommitted round keeps the four-operation architecture and makes the persistent
 package path exact and lazy. SiteBuild v2 roots the exact deterministic

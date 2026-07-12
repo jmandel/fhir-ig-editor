@@ -446,7 +446,7 @@ export class EngineClient {
     this.deferredMount = (async () => {
       const needed = this.snapshotBundles.filter((entry) => !this.mountedLabels.has(entry.label));
       const specs = await Promise.all(
-        needed.map((entry) => this.loadBundle(entry, 'Loading (snapshot data)')),
+        needed.map((entry) => this.loadBundle(entry, 'Loading (profile dependency)')),
       );
       this.progressCb?.({
         stage: 'bundle-mount',
@@ -457,7 +457,7 @@ export class EngineClient {
       this.snapshotBundles = [];
       this.progressCb?.({
         stage: 'ready',
-        message: `Snapshot data ready — ${r.mounted} packages mounted.`,
+        message: `Profile dependencies ready — ${r.mounted} packages mounted.`,
       });
     })();
     // Don't LATCH a failure: if the snapshot fetch/mount rejects (flaky network,
@@ -664,7 +664,7 @@ export class EngineClient {
     this.progressCb?.({
       stage: 'snapshot',
       label: url,
-      message: `Prepared snapshot for ${url}.`,
+      message: `Prepared full definition for ${url}.`,
       durationMs: performance.now() - started,
       metrics: { wasmSnapshotMs: res.snapshotMs },
     });

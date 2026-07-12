@@ -51,8 +51,13 @@ export function ResourceInspector({
       <div className="inspector-tabs">
         {isSd && (
           <>
-            <TabBtn id="snapshot" active={effectiveTab === 'snapshot'} onClick={() => setTab('snapshot')}>
-              Generate snapshot
+            <TabBtn
+              id="snapshot"
+              active={effectiveTab === 'snapshot'}
+              onClick={() => setTab('snapshot')}
+              title="FHIR snapshot: the complete definition after applying this profile's constraints to its base definitions"
+            >
+              Full definition
             </TabBtn>
             <TabBtn id="differential" active={effectiveTab === 'differential'} onClick={() => setTab('differential')}>
               Differential
@@ -100,11 +105,13 @@ function TabBtn({
   active,
   onClick,
   children,
+  title,
 }: {
   id: Tab;
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
+  title?: string;
 }) {
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -129,6 +136,7 @@ function TabBtn({
       className={`tab-btn${active ? ' active' : ''}`}
       onClick={onClick}
       onKeyDown={onKeyDown}
+      title={title}
     >
       {children}
     </button>

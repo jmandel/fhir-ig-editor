@@ -32,6 +32,13 @@ export function settledBuildStatus(state: BuildState, projectName: string): stri
         : 'Building preview…';
 }
 
+/** No compiled result exists yet. Zero is not a valid presentation here: it
+ * would claim compilation found no definitions when compilation has not
+ * produced an answer. Rebuilds retain their previous exact result instead. */
+export function definitionsArePending(state: BuildState, resourceCount: number): boolean {
+  return (state === 'checking' || state === 'building') && resourceCount === 0;
+}
+
 interface Props {
   projectId: string;
   projectName: string;
@@ -59,6 +66,7 @@ export function ProjectOverview({
     () => summarizeProject(paths, resources, pages, diagnostics),
     [paths, resources, pages, diagnostics],
   );
+  const definitionsPending = definitionsArePending(buildState, resources.length);
   return (
     <section className="project-overview" aria-labelledby="project-overview-title">
       <div className="overview-lead">
@@ -74,15 +82,17 @@ export function ProjectOverview({
       </div>
       <div className="overview-stats" aria-label="Project summary">
         <Stat value={summary.files} label="source files" />
-        <Stat value={summary.profiles} label="profiles" />
-        <Stat value={summary.extensions} label="extensions" />
-        <Stat value={summary.valueSets} label="value sets" />
-        <Stat value={summary.examples} label="examples" />
+        <Stat value={summary.profiles} label="profiles" pending={definitionsPending} />
+        <Stat value={summary.extensions} label="extensions" pending={definitionsPending} />
+        <Stat value={summary.valueSets} label="value sets" pending={definitionsPending} />
+        <Stat value={summary.examples} label="examples" pending={pages == null} />
         <Stat value={summary.pages} label="site pages" pending={pages == null} />
       </div>
       <div className="overview-actions">
         <button className="btn btn-primary" onClick={() => onOpenMode('author')}>Edit source</button>
-        <button className="btn" onClick={() => onOpenMode('explore')}>Explore definitions</button>
+        <button className="btn" disabled={definitionsPending} onClick={() => onOpenMode('explore')}>
+          {definitionsPending ? 'Definitions are compiling…' : 'Explore definitions'}
+        </button>
         <button className="btn" disabled={!pages?.length} onClick={() => onOpenMode('preview')}>
           {pages?.length
             ? ['stale', 'rebuilding', 'failed-preview'].includes(buildState)
@@ -90,7 +100,9 @@ export function ProjectOverview({
               : 'Open verified preview'
             : 'Preview is building…'}
         </button>
-        {summary.errors || summary.warnings ? (
+        {definitionsPending ? (
+          <span className="overview-problems is-pending">Waiting for compilation…</span>
+        ) : summary.errors || summary.warnings ? (
           <button
             type="button"
             className={summary.errors

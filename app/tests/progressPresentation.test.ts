@@ -2,6 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { presentProgress } from '../src/progressPresentation';
 
 describe('progress presentation', () => {
+  test('reserves the download row before the first response byte arrives', () => {
+    expect(presentProgress({
+      stage: 'lazy-fetch',
+      message: 'Fetching a profile dependency',
+    })).toEqual({ downloading: true, byteLabel: null, fraction: null });
+  });
+
   test('reports bytes actually downloaded against a known total', () => {
     expect(presentProgress({
       stage: 'bundle-fetch',

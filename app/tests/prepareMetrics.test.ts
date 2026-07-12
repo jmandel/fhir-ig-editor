@@ -71,7 +71,8 @@ describe('prepare timing sidecar', () => {
     expect(INSPECTOR).toContain("useState<Tab>('differential')");
     expect(INSPECTOR).toContain("effectiveTab === 'snapshot'");
     expect(INSPECTOR).toContain('<SnapshotTree');
-    expect(INSPECTOR).toContain('Generate snapshot');
+    expect(INSPECTOR).toContain('Full definition');
+    expect(INSPECTOR).toContain('FHIR snapshot: the complete definition');
   });
 
   test('uses the media type returned by Rust without re-reading the catalog', () => {

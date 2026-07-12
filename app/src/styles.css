@@ -302,6 +302,7 @@ body {
 .overview-stat span { display: block; color: var(--fg-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .overview-actions .btn { padding: 5px 10px; }
 .overview-problems { margin-left: auto; color: var(--ok); font-size: 11px; }
+.overview-problems.is-pending { color: var(--accent); }
 .overview-problems.has-warnings { color: var(--warn); }
 .overview-problems.has-errors { color: var(--error); }
 button.overview-problems {
@@ -477,6 +478,19 @@ button.overview-problems {
   font-size: 10px;
 }
 .mobile-picker { display: none; }
+.resource-list-pending {
+  padding: 12px 10px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.definition-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.definition-pending strong { color: var(--fg); }
+.definition-pending span { max-width: 52ch; line-height: 1.45; }
 
 /* ---- M2 site preview ---- */
 .preview {
@@ -735,6 +749,13 @@ button.overview-problems {
   border-bottom: 1px solid var(--border);
   font-family: var(--mono);
 }
+.snapshot-help {
+  padding: 8px 12px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--border);
+}
 .sd-table {
   width: 100%;
   border-collapse: collapse;
@@ -903,9 +924,9 @@ button.diag-source:focus-visible {
 }
 
 /* ---- project-open progress --------------------------------------------- */
-/* One live, staged banner so a multi-MB open never looks
-   hung. Mobile-safe: the message line WRAPS (flex-wrap) rather than overflowing
-   the viewport — the preview-bar clipping lesson. */
+/* One live, staged banner so a multi-MB open never looks hung. Its grid owns
+   stable slots for phase, detail, bytes, and elapsed time: growing byte counts
+   can never squeeze the detail onto another line and make the banner jump. */
 .open-progress {
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
@@ -924,19 +945,28 @@ button.diag-source:focus-visible {
   width: 100%;
 }
 .open-progress-line {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-areas: 'heading message bytes elapsed';
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 4px 8px;
+  column-gap: 8px;
   padding: 5px 12px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--fg-dim);
   min-width: 0;
 }
+.open-progress-heading {
+  grid-area: heading;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
 .open-progress-stage {
   color: var(--accent);
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .open-progress-cache {
@@ -945,21 +975,27 @@ button.diag-source:focus-visible {
   white-space: nowrap;
 }
 .open-progress-msg {
-  flex: 1 1 220px;
+  grid-area: message;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .open-progress-elapsed {
-  margin-left: auto;
+  grid-area: elapsed;
   color: var(--fg-dim);
   opacity: 0.8;
   white-space: nowrap;
 }
 .progress-bytes {
+  grid-area: bytes;
+  min-width: 19ch;
   color: var(--fg);
   font-variant-numeric: tabular-nums;
+  text-align: right;
   white-space: nowrap;
 }
+.progress-bytes[data-empty='true'] { visibility: hidden; }
 
 /* ---- tx settings (spec §6 tier 2) ------------------------------------- */
 .tx-settings {
@@ -1345,6 +1381,19 @@ button.diag-source:focus-visible {
     overflow: hidden;
   }
   .status-area { max-height: 22dvh; }
+  .open-progress-line {
+    grid-template-areas:
+      'heading elapsed'
+      'message message'
+      'bytes bytes';
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  .progress-bytes {
+    min-width: 0;
+    min-height: 1lh;
+    text-align: left;
+  }
   .topbar {
     gap: 6px 8px;
     padding: max(7px, env(safe-area-inset-top)) 8px 7px;
