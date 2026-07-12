@@ -37,6 +37,75 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Current performance slice (locally complete; dependency commits landed)
+
+Editor `6236511a` is pushed and deployed. Pages run `29175980426` passed the
+complete build, browser gate, artifact upload, and deploy jobs. The live origin
+served the new asset at 02:14 UTC and its application bundle contains the new
+self-referential guide.
+
+Dependency landing for the completed performance slice:
+
+- engine `ef8e77ac` is pushed identically to `snapshot-gen` and `main`;
+- Cycle `9246180` is pushed to `main`; and
+- the editor integration commit pins both dependency commits; its push and
+  Pages receipt are still pending in this landing sequence.
+
+The performance work composes existing contracts only:
+
+- the browser may restore the Service Worker's already-validated immutable
+  preview pointer before engine initialization, but it must remain visibly
+  previous/stale until the current `prepare` and publication succeed;
+- native Cycle may look up and publish only canonical `SiteOutput` through
+  `FileSiteOutputCache`, keyed from the verified closed `SiteBuild` and exact
+  renderer recipe/options; and
+- prose-only rebuilds may privately reuse snapshot-completed local resources
+  only under compiled-resource, exact-package-closure, resolver-order, and
+  snapshot-recipe identity. Current authored inputs must still construct a new
+  complete `PreparedGuide`.
+
+Do not add a raw-project cache authority, eagerly finalize all Publisher pages
+in the browser, or wrap legacy staged-tree `fig render` in a path-derived cache
+identity.
+
+Current measurements (fresh disposable Chrome profile, rebuilt
+WASM/app) are in `/tmp/uscore-perf-recent-compile.json`:
+
+- persistent US Core hard reload exposes the previous verified preview at
+  798 ms and serves `en/index.html` from the Service Worker at 913 ms; the exact
+  current build becomes Ready at 6.889 s (7.160 s benchmark tail). This is an
+  explicitly stale presentation fast path, not current-build authority;
+- US Core -> Cycle -> US Core is 1.820 s, down from the prior 5.348 s. The
+  one-previous exact semantic compilation makes `compileProject` 116 ms, and the
+  retained Publisher runtime hit reports the existing `siteBuildCacheHit=1`,
+  keeps the same handle/render memoization, and makes Rust preparation 182 ms.
+  The remaining floor is principally 376.7 ms catalog-project unpack, 359.5 ms
+  project persistence, 161.5 ms output-catalog transport, and UI scheduling;
+  and
+- native Cycle's exact complete-output cache receipt is
+  `/tmp/cycle-output-cache-final.log`: first render/import 1.588 s, unchanged
+  verified rebuild 0.487 s wall (153.2 ms Fig lookup/materialization), identical
+  91-file `SiteOutput`, and Liquid rendering skipped.
+
+The focused prose-successor proof is
+`/tmp/fhir-snapshot-local-warm-edit.log`: `snapshotCompletedLocalCacheHit=1`, a
+new complete PreparedGuide/SiteBuild, 37 ms PreparedGuide work, 295 ms Rust
+prepare, and 1.078 s edit-to-preview for the small first-run guide. Do not
+extrapolate that small-guide phase to US Core.
+
+The dependency-landed exact artifact passed the full fresh-profile Pages-subpath
+gate at `/tmp/fhir-perf-landed-full-gate.log` (`E2E GATE: PASS`): stock warm
+edit 1.067 s
+with a real snapshot-local hit; US Core 1,535/1,535 images, 85/85 assets, and the
+CarePlan one-shell invariant; real mCODE with no fallback/error; protocol-5
+restart and editor-close persistence; scroll 640 -> 640; and 390px Author 329,
+Explore 329, Preview 490 with no occlusion. App 66/66 (376 assertions), current
+WASM build, Pages-base production build (1,135 modules), Fig 18/18 + 4/4
+envelope, Cycle 239/239, typecheck, and focused native cache gates are green.
+The final US Core benchmark is `/tmp/uscore-perf-recent-compile.json`. The
+performance slice is complete and locally green; only the editor push and its
+Pages receipt remain.
+
 ## Current UX round
 
 The user asked to replace the odd Cycle first-run experience, make the mobile

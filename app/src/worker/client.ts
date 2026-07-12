@@ -635,6 +635,9 @@ export class EngineClient {
           packageLockMs: result.metrics.rust.packageLockMs,
           preparedGuideKeyMs: result.metrics.rust.preparedGuideKeyMs,
           preparedGuideMs: result.metrics.rust.preparedGuideMs,
+          snapshotCompletedLocalCacheHit: Number(
+            result.metrics.rust.snapshotCompletedLocalCacheHit,
+          ),
           preparedGuideCacheHit: Number(result.metrics.rust.preparedGuideCacheHit),
           siteBuildCacheHit: Number(result.metrics.rust.siteBuildCacheHit),
           templateMaterializeMs: result.metrics.rust.templateMaterializeMs,

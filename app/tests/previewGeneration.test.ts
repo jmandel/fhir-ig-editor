@@ -8,6 +8,7 @@ import {
   isSafePreviewPath,
   previewContentChanged,
   previewWorkerProtocol,
+  previewWorkerPublication,
   previewWorkerScriptPath,
   registeredPreviewPaths,
   validatePreviewSource,
@@ -224,8 +225,11 @@ test('one preview client replaces history and stale clients expire', () => {
 test('Service Worker persists a per-IG pointer and has no byte-provisioning side channel', async () => {
   const sw = await readFile(new URL('../public/preview-sw.js', import.meta.url), 'utf8');
   expect(sw).toContain('igpreview-state:v');
+  expect(sw).toContain('const PREVIEW_STORAGE_SCHEMA = 4');
   expect(sw).toContain('await writePublication(publication)');
   expect(sw).toContain('await readPublication(parsed.igId)');
+  expect(sw).toContain("message.type === 'igpreview:read'");
+  expect(sw).toContain('source: publication.source');
   expect(sw).toContain('publication.generation <= existing.generation');
   expect(sw).toContain("getDirectoryHandle(OPFS_DIR, { create: false })");
   expect(sw).toContain('await sha256Hex(bytes) !== ref.sha256) return null');
@@ -249,6 +253,43 @@ test('preview worker URL and pong bind the rolling-deployment protocol', async (
   })).toBeTrue();
   const legacy = fakePreviewWorker('https://example.test/fhir-ig-editor/preview-sw.js');
   expect(await previewWorkerProtocol(legacy, 20)).toBeNull();
+  const protocolFour = fakePreviewWorker(
+    'https://example.test/fhir-ig-editor/preview-sw.js?protocol=4',
+    4,
+  );
+  expect(await previewWorkerProtocol(protocolFour, 20)).toBeNull();
+});
+
+test('a persisted preview pointer is validated before provisional restore', async () => {
+  const publicationWorker = {
+    postMessage(message: unknown, transfer: Transferable[]) {
+      expect(message).toEqual({ type: 'igpreview:read', igId: 'uscore' });
+      const port = transfer[0] as MessagePort;
+      queueMicrotask(() => port.postMessage({
+        ok: true,
+        protocol: PREVIEW_SW_PROTOCOL,
+        generation: 42,
+        source: source(),
+      }));
+    },
+  };
+  expect(await previewWorkerPublication(publicationWorker, 'uscore', 20)).toEqual({
+    generation: 42,
+    source: source(),
+  });
+
+  const wrongIgWorker = {
+    postMessage(_message: unknown, transfer: Transferable[]) {
+      const port = transfer[0] as MessagePort;
+      queueMicrotask(() => port.postMessage({
+        ok: true,
+        protocol: PREVIEW_SW_PROTOCOL,
+        generation: 42,
+        source: { ...source(), igId: 'mcode' },
+      }));
+    },
+  };
+  expect(await previewWorkerPublication(wrongIgWorker, 'uscore', 20)).toBeNull();
 });
 
 test('an old active worker cannot win while its compatible replacement installs', async () => {

@@ -13,7 +13,7 @@ import { contentStore } from '../storage/contentStore';
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 export const PREVIEW_ROOT = `${BASE}preview/`;
 const CHANNEL_NAME = 'igpreview';
-export const PREVIEW_SW_PROTOCOL = 4;
+export const PREVIEW_SW_PROTOCOL = 5;
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_OUTPUTS = 20_000;
 const MAX_CATALOG_CHARS = 8 * 1024 * 1024;
@@ -216,6 +216,72 @@ export async function ensurePreviewServiceWorker(): Promise<boolean> {
 async function activePreviewWorker(): Promise<ServiceWorker | null> {
   if (!(await ensurePreviewServiceWorker())) return null;
   return compatibleWorker?.state === 'activated' ? compatibleWorker : null;
+}
+
+export interface PersistedPreviewPublication {
+  generation: number;
+  source: PreviewSource;
+}
+
+/** Read the Service Worker's already-validated immutable pointer. This is a
+ * presentation fast path, not a derivation cache hit: callers must keep it
+ * visibly stale until prepare reproduces a current closed SiteBuild. */
+export async function previewWorkerPublication(
+  worker: Pick<ServiceWorker, 'postMessage'>,
+  igId: string,
+  timeoutMs = 1_500,
+): Promise<PersistedPreviewPublication | null> {
+  const channel = new MessageChannel();
+  return new Promise<PersistedPreviewPublication | null>((resolve) => {
+    let settled = false;
+    const finish = (publication: PersistedPreviewPublication | null) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timer);
+      channel.port1.close();
+      resolve(publication);
+    };
+    const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
+    channel.port1.onmessage = (event) => {
+      const reply = event.data as Record<string, unknown> | null;
+      if (!reply?.ok || reply.protocol !== PREVIEW_SW_PROTOCOL) {
+        finish(null);
+        return;
+      }
+      try {
+        if (!Number.isSafeInteger(reply.generation) || (reply.generation as number) < 0) {
+          throw new Error('invalid persisted preview generation');
+        }
+        const restored = validatePreviewSource(reply.source as PreviewSource);
+        if (restored.igId !== igId) throw new Error('persisted preview belongs to another IG');
+        finish({ generation: reply.generation as number, source: restored });
+      } catch {
+        finish(null);
+      }
+    };
+    try {
+      worker.postMessage({ type: 'igpreview:read', igId }, [channel.port2]);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/** Restore a previously committed preview before compiler readiness. Ready
+ * ContentRefs are still served only after the Service Worker/ContentStore
+ * verifies their exact digest and length; unresolved pages may use its equally
+ * verified per-build response cache. */
+export async function restorePersistedPreviewSource(
+  igId: string,
+): Promise<PersistedPreviewPublication | null> {
+  const worker = await activePreviewWorker();
+  if (!worker) return null;
+  const publication = await previewWorkerPublication(worker, igId);
+  if (!publication || publication.generation < sourceGeneration) return null;
+  source = publication.source;
+  sourceGeneration = publication.generation;
+  lastPublicationOrder = Math.max(lastPublicationOrder, publication.generation);
+  return publication;
 }
 
 async function commitToPreviewWorker(

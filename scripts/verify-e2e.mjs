@@ -18,7 +18,7 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
-const PREVIEW_SW_PROTOCOL = 4;
+const PREVIEW_SW_PROTOCOL = 5;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
@@ -1951,7 +1951,7 @@ try {
       console.error('assert: profile page did not contain exactly one correctly-scoped hot-reload control block —', JSON.stringify(pw.profileHotReloadPayloads)); ok = false;
     }
     if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
-    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=4(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
+    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=5(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
       console.error('assert: preview worker did not restart at the current module protocol —', pw.previewWorkerRestart); ok = false;
     }
     if (!(pw.persistedAfterRestart

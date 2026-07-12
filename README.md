@@ -25,6 +25,9 @@ Live site: <https://joshuamandel.com/fhir-ig-editor/>
     package-template versions and typed on-demand fragment generation.
 - One preview URL scheme for the embedded iframe and independent tabs, with
   normal links, reload, back/forward, scoped hot reload, and cached fallback.
+  A hard reload can show the prior digest-verified page immediately while the
+  current exact build runs; the UI labels it as previous until current
+  publication succeeds.
 - Complete, provenanced Publisher-owned runtime outputs. The browser gate checks
   missing assets, decoded images, required runtime globals, compatibility-shim
   activation, and uncaught exceptions.
@@ -126,7 +129,8 @@ cd ../..
 BASE_PATH=/fhir-ig-editor/ bash scripts/run-browser-gates.sh app/dist
 ```
 
-Measure US Core cold start, persistent-OPFS hard reload, and same-worker reopen:
+Measure US Core cold start, persistent-OPFS hard reload (including prior-page
+and current-ready milestones), and same-worker reopen:
 
 ```sh
 BASE_PATH=/fhir-ig-editor/ \

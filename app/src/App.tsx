@@ -13,6 +13,7 @@ import {
   ensurePreviewServiceWorker,
   wirePreviewResponder,
   publishPreviewSource,
+  restorePersistedPreviewSource,
 } from './preview/previewWindow';
 import { LatestTaskQueue, type TaskLease } from './build/latestTaskQueue';
 import { getCuratedCatalogs, type TemplateCatalog } from './adapters/templateCatalog';
@@ -240,6 +241,28 @@ export function App() {
       storeRef.current = st;
       st.listeners.add(() => setPaths(st.list()));
       setPaths(st.list());
+
+      // The preview host survives editor/worker restarts. Restore its validated
+      // immutable pointer immediately so a persisted project can display the
+      // last verified response while exact package resolution + prepare run.
+      // This remains explicitly stale: only the successor prepare/publication
+      // below can establish that today's closed input identity is unchanged.
+      if (st.list().length > 0) {
+        void restorePersistedPreviewSource(projectIdRef.current).then((publication) => {
+          if (cancelled || !publication || projectIdRef.current !== publication.source.igId) return;
+          const pages = publication.source.catalog.outputs.filter((output) => output.kind === 'page');
+          if (pages.length === 0) return;
+          siteGenerationRef.current = Math.max(siteGenerationRef.current, publication.generation);
+          setSiteIgId(publication.source.igId);
+          setSitePages(pages);
+          setSelectedSitePage((current) => {
+            if (pages.some((page) => page.path === current)) return current;
+            return pages.find((page) => page.path === 'en/index.html' || page.path === 'index.html')?.path
+              ?? pages[0].path;
+          });
+          setPreviewStale(true);
+        });
+      }
 
       const res = await engine.init((ev) => {
         recordRuntimeMetric(ev);

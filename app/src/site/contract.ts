@@ -45,6 +45,7 @@ export interface RustPrepareMetrics {
   packageLockMs: number;
   preparedGuideKeyMs: number;
   preparedGuideMs: number;
+  snapshotCompletedLocalCacheHit: boolean;
   preparedGuideCacheHit: boolean;
   siteBuildCacheHit: boolean;
   templateMaterializeMs: number;

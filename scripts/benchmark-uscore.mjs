@@ -3,7 +3,8 @@
 //
 // The benchmark deliberately clears storage for the target origin, then measures:
 //   1. a cold app boot followed by a cold US Core open;
-//   2. a hard reload in the same persistent browser profile (OPFS/CAS warm);
+//   2. a hard reload in the same persistent browser profile (OPFS/CAS warm),
+//      including prior-preview UI/page and current-ready milestones;
 //   3. Cycle -> US Core in the same page/worker (packages already resident).
 //
 // Recommended one-command local run (launches its own server and Chrome):
@@ -178,6 +179,7 @@ const INSTRUMENTATION = String.raw`(() => {
     progress: [],
     longTasks: [],
     seenOpenProgress: false,
+    milestones: {},
   };
   const originalPostMessage = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function(message, ...rest) {
@@ -236,6 +238,26 @@ const INSTRUMENTATION = String.raw`(() => {
     ).replace(/\s+/g, ' ').trim().slice(0, 240);
     const signature = kind + '|' + stage + '|' + message;
     const current = window.__usCoreBenchmark;
+    const state = document.querySelector('.project-state')?.textContent || '';
+    if (!current.milestones.previousPreviewUiAt && state.includes('showing previous preview')) {
+      current.milestones.previousPreviewUiAt = performance.now();
+    }
+    const frame = document.querySelector('iframe.preview-frame');
+    try {
+      const framePath = frame?.contentWindow?.location?.pathname || '';
+      const frameText = frame?.contentDocument?.body?.textContent?.trim() || '';
+      if (!current.milestones.previousPreviewPageAt
+          && current.milestones.previousPreviewUiAt
+          && framePath.includes('/preview/uscore/')
+          && frameText.length > 0) {
+        current.milestones.previousPreviewPageAt = performance.now();
+      }
+    } catch {}
+    if (!current.milestones.currentReadyAt
+        && current.milestones.previousPreviewUiAt
+        && state.trim() === 'Ready') {
+      current.milestones.currentReadyAt = performance.now();
+    }
     if (signature !== current.lastProgressSignature) {
       current.lastProgressSignature = signature;
       current.progress.push({ time: performance.now(), kind, stage, message });
@@ -429,6 +451,7 @@ async function resetTrace(target) {
     trace.progress.length = 0;
     trace.longTasks.length = 0;
     trace.seenOpenProgress = false;
+    trace.milestones = {};
     trace.lastProgressSignature = '';
     if (window.__igDebug?.metrics) window.__igDebug.metrics.length = 0;
     return trace.phaseStart;
@@ -444,11 +467,14 @@ async function traceSnapshot(target, phaseStart) {
       progress: trace.progress,
       longTasks: trace.longTasks,
       runtimeMetrics: window.__igDebug?.metrics || [],
+      milestones: trace.milestones,
       resourceCount: document.querySelectorAll('.res-row').length,
       siteError: document.querySelector('.site-error')?.textContent || '',
     };
   })()`);
   const end = raw.now;
+  const milestones = Object.fromEntries(Object.entries(raw.milestones || {})
+    .map(([name, at]) => [name, round(at - phaseStart)]));
   const operations = raw.operations.map((operation) => ({
     op: operation.op,
     startMs: round(operation.start - phaseStart),
@@ -489,6 +515,7 @@ async function traceSnapshot(target, phaseStart) {
     durationMs: round(end - phaseStart),
     resourceCount: raw.resourceCount,
     siteError: raw.siteError,
+    milestones,
     progress: progressEntries,
     operations,
     operationTotals: summarizeOperations(operations),
@@ -586,6 +613,18 @@ async function main() {
     progress('warm hard reload (same persistent OPFS/CAS)');
     target.phase = 'warmHardReload';
     await target.call('Page.reload', { ignoreCache: false });
+    await target.waitFor(
+      `window.__usCoreBenchmark?.milestones?.previousPreviewUiAt != null`,
+      'previous verified US Core preview pointer',
+    );
+    // Published guides default to Explore. Activate Preview as soon as the
+    // persisted catalog is available so this phase measures the useful prior
+    // page, not merely the stale-state badge while an unmounted iframe waits.
+    await target.evaluate(`document.querySelector('#workspace-tab-preview')?.click()`);
+    await target.waitFor(
+      `window.__usCoreBenchmark?.milestones?.previousPreviewPageAt != null`,
+      'previous verified US Core preview page',
+    );
     await target.waitFor(
       `!!window.__usCoreBenchmark && !!window.__igDebug?.engine?.initialized`,
       'warm engine boot',

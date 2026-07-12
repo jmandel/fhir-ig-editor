@@ -99,15 +99,26 @@ implementation recipe, options, and addressed content. Cache keys are private
 indexes for those identities. A cache hit reconstructs and verifies the same
 domain value; it never authorizes a parallel cached representation.
 
-Warm preview may publish a previously verified `SiteOutput` before the compiler
-is ready for new edits. This is scheduling over the same value, not a
-`PreviewManifest` domain layer. Lazy output caches store `ContentRef`s belonging
-to the current `SiteBuild`; a complete inventory becomes `SiteOutput` only via
+Warm preview may expose the prior immutable publication pointer/catalog and its
+individually verified `ContentRef`s before the compiler is ready for the current
+inputs. The UI must identify that presentation as previous/stale until current
+`prepare` and publication succeed. This is scheduling over the existing
+`SiteBuild`/output references, not a derivation cache hit and not a
+`PreviewManifest` domain layer. The lazy publication need not be a complete
+site; a complete authenticated inventory becomes `SiteOutput` only via
 `finalize`.
 
 Numeric UI generations order commits but never identify semantic content. The
 Service Worker serves immutable output content and atomically follows a small
 current-output pointer. Its in-memory state is an optimization, not authority.
+
+A native external builder may probe `SiteOutputCache` from the verified closed
+`SiteBuild`, exact renderer implementation/recipe, output schema, and options;
+on a miss it publishes the ordinary canonical `SiteOutput` and addressed bytes
+after rendering. Materialization is into the host's existing private atomic
+publication transaction and is re-verified there. A staged mutable tree without
+a closed `SiteBuild` (including legacy `fig render`) has no truthful pre-render
+key and is not covered by this seam.
 
 ## Ownership
 

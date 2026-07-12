@@ -69,7 +69,11 @@ export function ProjectOverview({
         <button className="btn btn-primary" onClick={() => onOpenMode('author')}>Edit source</button>
         <button className="btn" onClick={() => onOpenMode('explore')}>Explore definitions</button>
         <button className="btn" disabled={!pages?.length} onClick={() => onOpenMode('preview')}>
-          {pages?.length ? 'Open verified preview' : 'Preview is building…'}
+          {pages?.length
+            ? ['stale', 'rebuilding', 'failed-preview'].includes(buildState)
+              ? 'Open previous preview'
+              : 'Open verified preview'
+            : 'Preview is building…'}
         </button>
         <span className={summary.errors ? 'overview-problems has-errors' : 'overview-problems'}>
           {summary.errors

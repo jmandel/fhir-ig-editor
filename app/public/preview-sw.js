@@ -6,9 +6,13 @@ import { preparePreviewHtml } from './preview-controls.js';
 
 const BASE = new URL('./', self.location).pathname;
 const PREVIEW_ROOT = BASE + 'preview/';
-const PREVIEW_SW_PROTOCOL = 4;
-const STATE_CACHE = `igpreview-state:v${PREVIEW_SW_PROTOCOL}`;
-const OUTPUT_CACHE_PREFIX = `igpreview-output:v${PREVIEW_SW_PROTOCOL}:`;
+const PREVIEW_SW_PROTOCOL = 5;
+// Protocol 5 adds read-only pointer restoration. The persisted pointer and
+// rendered-response schemas are unchanged from v4, so retain those namespaces
+// across the worker replacement instead of throwing away verified warm state.
+const PREVIEW_STORAGE_SCHEMA = 4;
+const STATE_CACHE = `igpreview-state:v${PREVIEW_STORAGE_SCHEMA}`;
+const OUTPUT_CACHE_PREFIX = `igpreview-output:v${PREVIEW_STORAGE_SCHEMA}:`;
 const LEGACY_CACHE_PREFIXES = ['igpreview::', 'igpreview:v2::', 'igpreview:v3::'];
 const OPFS_DIR = 'fhir-ig-editor-content-v1';
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -26,6 +30,32 @@ self.addEventListener('message', (event) => {
   if (!message || typeof message !== 'object') return;
   if (message.type === 'igpreview:ping') {
     event.ports[0]?.postMessage({ type: 'igpreview:pong', protocol: PREVIEW_SW_PROTOCOL });
+    return;
+  }
+  if (message.type === 'igpreview:read') {
+    const port = event.ports[0];
+    const read = (async () => {
+      if (typeof message.igId !== 'string' || !message.igId || message.igId.length > 256 || /[\\/\0]/.test(message.igId)) {
+        throw new Error('invalid preview IG id');
+      }
+      const publication = publications.get(message.igId) || await readPublication(message.igId);
+      if (!publication) {
+        port?.postMessage({ ok: false, protocol: PREVIEW_SW_PROTOCOL, errorCode: 'not-found' });
+        return;
+      }
+      // readPublication re-runs the same validation as commit. Return the
+      // declarative pointer only; response bytes remain behind the verified
+      // ContentStore/build-cache read path below.
+      port?.postMessage({
+        ok: true,
+        protocol: PREVIEW_SW_PROTOCOL,
+        generation: publication.generation,
+        source: publication.source,
+      });
+    })();
+    event.waitUntil(read.catch((error) => {
+      port?.postMessage({ ok: false, protocol: PREVIEW_SW_PROTOCOL, error: String(error) });
+    }));
     return;
   }
   if (message.type !== 'igpreview:commit') return;
