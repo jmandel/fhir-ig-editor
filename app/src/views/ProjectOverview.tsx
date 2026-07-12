@@ -91,7 +91,7 @@ export function ProjectOverview({
       <div className="overview-actions">
         <button className="btn btn-primary" onClick={() => onOpenMode('author')}>Edit source</button>
         <button className="btn" disabled={definitionsPending} onClick={() => onOpenMode('explore')}>
-          {definitionsPending ? 'Definitions are compiling…' : 'Explore definitions'}
+          {definitionsPending ? 'Preparing definitions…' : 'Explore definitions'}
         </button>
         <button className="btn" disabled={!pages?.length} onClick={() => onOpenMode('preview')}>
           {pages?.length

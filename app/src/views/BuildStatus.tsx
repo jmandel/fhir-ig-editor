@@ -35,7 +35,7 @@ export function BuildStatus({
       <div className="bs-group">
         <span className="bs-label">compile</span>
         <span className={`bs-val${compiling ? ' pulse' : ''}`}>
-          {compiling ? 'compiling…' : buildMs != null ? `${buildMs.toFixed(0)} ms` : '—'}
+          {compiling ? 'preparing…' : buildMs != null ? `${buildMs.toFixed(0)} ms` : '—'}
         </span>
       </div>
       <div className="bs-group">

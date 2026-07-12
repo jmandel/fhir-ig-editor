@@ -22,6 +22,7 @@ import type {
   MissingPackage,
   MutableVersionRequest,
   PackageMountInput,
+  ProgressEvent,
   ResolutionStep,
   VersionIndex,
 } from './protocol';
@@ -55,14 +56,9 @@ export interface ResolveOutcome {
   versionIndex: VersionIndex;
 }
 
-/** How the loop reports progress (reuses the worker ProgressEvent stages). */
-export type ResolveProgress = (ev: {
-  stage: 'resolve' | 'registry-fetch' | 'bundle-fetch' | 'bundle-cache-hit' | 'bundle-unpack' | 'package-blocked';
-  label?: string;
-  bytes?: number;
-  totalBytes?: number;
-  message: string;
-}) => void;
+/** How the loop reports progress (the resolver emits a subset of the shared
+ * progress vocabulary; baked transport adds timing/cache metadata). */
+export type ResolveProgress = (ev: ProgressEvent) => void;
 
 /** The seams the loop needs from its host (EngineClient supplies these). */
 export interface ResolverHost {
@@ -73,10 +69,50 @@ export interface ResolverHost {
   /** The baked same-origin manifest's exact transport entry (source a). */
   bakedBundle(label: string): BakedBundleEntry | undefined;
   /** Fetch, verify, and inflate one exact same-origin baked bundle (source a). */
-  fetchBaked(bundle: BakedBundleEntry): Promise<PackageMountInput>;
+  fetchBaked(bundle: BakedBundleEntry, onProgress: ResolveProgress): Promise<PackageMountInput>;
 }
 
 const MAX_ROUNDS = 24; // fixpoint guard: a closure this deep is pathological.
+
+/** Keep bounded parallel package I/O while presenting it as one stable batch.
+ * Individual streams still contribute their actual consumed bytes, but they
+ * cannot race to replace the banner with four alternating package names or
+ * incompatible per-file denominators. A one-package batch preserves the more
+ * specific message and determinate byte total. */
+export function packageBatchProgress(labels: readonly string[], emit: ResolveProgress) {
+  const unique = [...new Set(labels)];
+  if (unique.length <= 1) {
+    return { report: emit, complete: (_label: string) => {} };
+  }
+  const members = new Set(unique);
+  const completed = new Set<string>();
+  const bytesByLabel = new Map<string, number>();
+  const reportAggregate = () => {
+    const bytes = [...bytesByLabel.values()].reduce((sum, value) => sum + value, 0);
+    const done = completed.size === unique.length;
+    emit({
+      stage: 'bundle-fetch',
+      message: `${done ? 'Loaded' : 'Loading'} ${completed.size} of ${unique.length} dependencies${done ? '.' : '…'}`,
+      ...(bytesByLabel.size > 0 ? { bytes } : {}),
+    });
+  };
+  return {
+    report(event: ProgressEvent) {
+      if (event.stage === 'package-blocked' || !event.label || !members.has(event.label)) {
+        emit(event);
+        return;
+      }
+      if (event.bytes != null) {
+        bytesByLabel.set(event.label, Math.max(bytesByLabel.get(event.label) ?? 0, event.bytes));
+      }
+      reportAggregate();
+    },
+    complete(label: string) {
+      completed.add(label);
+      reportAggregate();
+    },
+  };
+}
 
 /**
  * Drive the resolve → fetch → mount → resolve loop until the engine reports
@@ -159,6 +195,8 @@ export async function acquireForProject(
     // requests and form one atomic engine mount batch. Read/fetch them with
     // bounded concurrency instead of serializing large OPFS operations.
     const specs: Array<PackageMountInput | undefined> = [];
+    const labels = toFetch.map((m) => `${m.package_id}#${m.version}`);
+    const batch = packageBatchProgress(labels, onProgress);
     let nextFetch = 0;
     const fetchers = Array.from({ length: Math.min(4, toFetch.length) }, async () => {
       for (;;) {
@@ -166,8 +204,11 @@ export async function acquireForProject(
         if (index >= toFetch.length) return;
         const m = toFetch[index];
         const label = `${m.package_id}#${m.version}`;
-        const spec = await obtainPackage(host, label, m, onProgress, blocked);
-        if (spec) specs[index] = spec;
+        const spec = await obtainPackage(host, label, m, batch.report, blocked);
+        if (spec) {
+          specs[index] = spec;
+          batch.complete(label);
+        }
       }
     });
     await Promise.all(fetchers);
@@ -249,6 +290,7 @@ export async function obtainLockedPackages(
 ): Promise<{ packages: PackageMountInput[]; blocked: BlockedPackage[] }> {
   const blocked: BlockedPackage[] = [];
   const packages: Array<PackageMountInput | undefined> = new Array(labels.length);
+  const batch = packageBatchProgress(labels, onProgress);
   let next = 0;
   const readers = Array.from({ length: Math.min(4, labels.length) }, async () => {
     for (;;) {
@@ -271,8 +313,11 @@ export async function obtainLockedPackages(
         reason: { kind: 'not_mounted' },
         set: 'context',
       };
-      const obtained = await obtainPackage(host, label, missing, onProgress, blocked);
-      if (obtained) packages[index] = obtained;
+      const obtained = await obtainPackage(host, label, missing, batch.report, blocked);
+      if (obtained) {
+        packages[index] = obtained;
+        batch.complete(label);
+      }
     }
   });
   await Promise.all(readers);
@@ -296,7 +341,7 @@ async function obtainPackage(
   // the host select the authenticated prepared artifact or original transport.
   if (baked) {
     try {
-      return await host.fetchBaked(baked);
+      return await host.fetchBaked(baked, onProgress);
     } catch (error) {
       // A mobile connection can drop a large same-origin response midway. Give
       // the exact immutable artifact one immediate retry before considering a
@@ -309,7 +354,7 @@ async function obtainPackage(
         message: `Retrying ${label} from this app after a transport interruption…`,
       });
       try {
-        return await host.fetchBaked(baked);
+        return await host.fetchBaked(baked, onProgress);
       } catch (retryError) {
         if (!(retryError instanceof BakedBundleTransportError)) throw retryError;
         onProgress({

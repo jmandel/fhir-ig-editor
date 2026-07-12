@@ -33,8 +33,11 @@ body {
 }
 
 .app {
+  width: 100%;
+  min-width: 0;
   height: 100dvh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 .status-area { min-height: 0; max-height: 34vh; overflow-y: auto; }
@@ -262,13 +265,22 @@ body {
 
 /* ---- focused workspace shell ---- */
 .workspace-shell {
+  min-width: 0;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);
 }
+.project-overview,
+.artifact-trail,
+.workspace-tabs,
+.workspace-views {
+  min-width: 0;
+  max-width: 100%;
+}
 .project-overview {
+  overflow: hidden;
   padding: 12px 16px 10px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(120deg, var(--bg-2), var(--bg));
@@ -1395,17 +1407,25 @@ button.diag-source:focus-visible {
     text-align: left;
   }
   .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px 8px;
     padding: max(7px, env(safe-area-inset-top)) 8px 7px;
   }
-  .brand { font-size: 12px; }
+  .brand { grid-row: 1; font-size: 12px; }
   .topbar-project {
-    order: 3;
-    flex: 1 1 100%;
+    grid-row: 3;
+    width: 100%;
     max-width: none;
     font-size: 11px;
   }
-  .topbar-actions { gap: 6px; }
+  .topbar-actions {
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+    gap: 6px;
+  }
   .topbar-actions .open-ig-select { max-width: 132px; }
   .statusline { padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .welcome { align-items: flex-start; }
@@ -1449,8 +1469,24 @@ button.diag-source:focus-visible {
   .artifact-trail { padding: 5px 6px; }
   .artifact-trail-subject { min-width: 110px; max-width: 150px; }
   .artifact-trail-step { min-width: 112px; }
-  .workspace-tabs { overflow-x: auto; padding-left: 2px; }
-  .inspect-tab { flex: 1 0 auto; min-height: 42px; justify-content: center; }
+  .workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: hidden;
+    padding-left: 0;
+  }
+  .workspace-tabs .inspect-tab {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding-inline: 4px;
+    justify-content: center;
+    white-space: nowrap;
+  }
+  /* The build banner already owns progress detail. Keep all three navigation
+     targets physically reachable instead of letting status text push Preview
+     beyond the fixed mobile shell. */
+  .workspace-tabs .tab-busy { display: none; }
 
   /* Mobile is one surface at a time. Once Preview is selected, its own page
      picker is the relevant context; retaining the overview and artifact trail

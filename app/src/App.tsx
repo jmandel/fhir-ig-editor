@@ -623,7 +623,7 @@ export function App() {
       setGeneratorId(defaultGen);
       setProjectName(meta.name || projectDisplayName(projectId));
       setProjectLoaded(true);
-      emit({ stage: 'bundle-mount', message: `Loaded ${meta.name} — ${meta.fileCount} files. Compiling…` });
+      emit({ stage: 'bundle-mount', message: `Loaded ${meta.name} — ${meta.fileCount} files. Preparing guide…` });
       // Open the first FSH file (or first pagecontent md for FSH-less projects).
       const first = initialSourcePath(nextWorkspace);
       if (first) {
@@ -968,7 +968,7 @@ export function App() {
                 onKeyDown={(event) => onWorkspaceTabKeyDown(event, mode)}
               >
                 {label}
-                {mode === 'explore' && definitionsPending && <span className="tab-busy">Compiling</span>}
+                {mode === 'explore' && definitionsPending && <span className="tab-busy">Preparing</span>}
                 {mode === 'preview' && siteBuilding && <span className="tab-busy">Building</span>}
               </button>
             ))}
@@ -1008,7 +1008,7 @@ export function App() {
                 </label>
                 <div className="resource-list">
                   {definitionsPending && (
-                    <div className="resource-list-pending">Compiling definitions…</div>
+                    <div className="resource-list-pending">Preparing definitions…</div>
                   )}
                   {filteredResources.map((resource) => (
                     <button
@@ -1027,7 +1027,7 @@ export function App() {
                 Definition
                 <select disabled={definitionsPending} value={selectedResource ?? ''} onChange={(event) => setSelectedResource(event.target.value)}>
                   <option value="" disabled>
-                    {definitionsPending ? 'Compiling definitions…' : 'Select a definition…'}
+                    {definitionsPending ? 'Preparing definitions…' : 'Select a definition…'}
                   </option>
                   {filteredResources.map((resource) => {
                     const identity = resourceIdentity(resource);
@@ -1038,7 +1038,7 @@ export function App() {
               <section className="definition-pane">
                 {workspaceMode === 'explore' && definitionsPending ? (
                   <div className="panel-empty definition-pending">
-                    <strong>Compiling definitions…</strong>
+                    <strong>Preparing definitions…</strong>
                     <span>The profile in your source will appear here after the FHIR dependencies above finish loading.</span>
                   </div>
                 ) : workspaceMode === 'explore' && activeResource && engineRef.current ? (

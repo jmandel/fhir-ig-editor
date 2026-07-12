@@ -141,11 +141,59 @@ async function measureMobileLayout(ws, includeGeometry = false) {
       return { heights, range: Math.max(...heights) - Math.min(...heights), overflow };
     };
     const progress = measureProgress();
+    const measureNarrowBusyTabs = () => {
+      const fixture = document.createElement('nav');
+      fixture.className = 'inspect-tabs workspace-tabs';
+      fixture.style.cssText = 'position:fixed;left:0;top:0;width:320px;visibility:hidden;pointer-events:none';
+      fixture.innerHTML = [
+        '<button class="inspect-tab active">Author</button>',
+        '<button class="inspect-tab">Explore<span class="tab-busy">Preparing</span></button>',
+        '<button class="inspect-tab">Site preview<span class="tab-busy">Building</span></button>',
+      ].join('');
+      document.body.appendChild(fixture);
+      const result = {
+        clientWidth: fixture.clientWidth,
+        scrollWidth: fixture.scrollWidth,
+        overflow: fixture.scrollWidth > fixture.clientWidth + 1,
+        widths: [...fixture.querySelectorAll('.inspect-tab')]
+          .map((tab) => tab.getBoundingClientRect().width),
+      };
+      fixture.remove();
+      return result;
+    };
+    const narrowBusyTabs = measureNarrowBusyTabs();
     const mode = (name) => document.getElementById('workspace-tab-' + name);
+    const tabReachability = () => Object.fromEntries(['author', 'explore', 'preview'].map((name) => {
+      const button = mode(name);
+      if (!button) return [name, { present: false }];
+      const rect = button.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return [name, {
+        present: true,
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        withinViewport: rect.left >= -1 && rect.right <= innerWidth + 1,
+        hitTarget: hit === button || button.contains(hit),
+      }];
+    }));
+    const tabs = tabReachability();
     const selectMode = async (name) => {
       const button = mode(name);
       if (!button) throw new Error('missing workspace tab ' + name);
-      button.click();
+      const rect = button.getBoundingClientRect();
+      const target = document.elementFromPoint(
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2,
+      );
+      if (!target || !(target === button || button.contains(target))) {
+        throw new Error('workspace tab is not physically reachable: ' + name
+          + ' rect=' + JSON.stringify({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom })
+          + ' hit=' + (target ? target.tagName + '.' + target.className : 'null'));
+      }
+      target.click();
       for (let frame = 0; frame < 10; frame++) {
         await new Promise(requestAnimationFrame);
         if (button.getAttribute('aria-selected') === 'true') return;
@@ -216,6 +264,8 @@ async function measureMobileLayout(ws, includeGeometry = false) {
       explore,
       preview,
       progress,
+      tabs,
+      narrowBusyTabs,
       settingsClosed: settings ? !settings.open : false,
     };
   })()`);
@@ -227,6 +277,9 @@ function mobileLayoutPass(result) {
   return result?.width === 390
     && !result.overflow
     && result.visibleWorkspaces === 1
+    && ['author', 'explore', 'preview'].every((name) => result.tabs?.[name]?.withinViewport
+      && result.tabs?.[name]?.hitTarget
+      && result.tabs?.[name]?.width >= 44)
     && result.author?.sidebar === 'none'
     && result.author?.picker !== 'none'
     && result.author?.height > 100
@@ -240,6 +293,9 @@ function mobileLayoutPass(result) {
     && !result.preview?.statusVisible
     && result.progress?.range < 1
     && !result.progress?.overflow
+    && result.narrowBusyTabs?.clientWidth === 320
+    && !result.narrowBusyTabs?.overflow
+    && result.narrowBusyTabs?.widths?.every((width) => width >= 44)
     && result.settingsClosed;
 }
 
@@ -655,6 +711,7 @@ try {
   // 2. Open the tiny guide.
   // A different valid Publisher preference must survive the Tiny-only pin.
   await evalJs(ws, `localStorage.setItem('igEditor.templateCoord', 'hl7.fhir.template#0.10.1')`);
+  const tinyOpenStarted = performance.now();
   await evalJs(ws, `document.querySelector('.welcome-card button').click()`);
 
   // 3. Wait for compile to finish (build status shows a ms value + resources).
@@ -711,6 +768,15 @@ try {
       && !!published
       && !published.disabled;
   })()`, 60000, 'tiny published consequence ready');
+  results.tinyReadyMs = performance.now() - tinyOpenStarted;
+  results.tinyCompileMs = await evalJs(
+    ws,
+    `(document.querySelectorAll('.bs-val')[2]?.textContent||'').trim()`,
+  );
+  results.packageBatchProgress = await evalJs(ws, `(() => (window.__igDebug?.metrics || [])
+    .map((entry) => entry.event)
+    .filter((event) => /(?:Loading|Loaded) \\d+ of \\d+ dependencies/.test(event.message || ''))
+    .map((event) => ({ message: event.message, bytes: event.bytes ?? null, totalBytes: event.totalBytes ?? null })))()`);
   await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[2]?.click()`);
   try {
     await waitFor(ws, `(() => {
@@ -792,7 +858,17 @@ try {
     await evalJs(ws, `document.querySelector('#workspace-tab-preview')?.click()`);
     await waitFor(ws, `!!document.querySelector('.preview-frame')`, 30000, 'persisted Tiny preview after reload');
     results.mobile390 = await measureMobileLayout(ws, true);
-    console.log(JSON.stringify({ tinyReload: results.tinyReload, mobile390: results.mobile390 }, null, 2));
+    console.log(JSON.stringify({
+      tinyReadyMs: results.tinyReadyMs,
+      tinyCompileMs: results.tinyCompileMs,
+      packageBatchProgress: results.packageBatchProgress,
+      tinyReload: results.tinyReload,
+      mobile390: results.mobile390,
+    }, null, 2));
+    if (!results.packageBatchProgress.some((event) => /of [2-9] dependencies/.test(event.message))
+      || results.packageBatchProgress.some((event) => event.totalBytes != null)) {
+      throw new Error('parallel package progress was not presented as one honest aggregate');
+    }
     if (!mobileLayoutPass(results.mobile390)) throw new Error('390px single-surface layout failed');
     console.log('\nMOBILE LAYOUT GATE: PASS');
     ws.close();

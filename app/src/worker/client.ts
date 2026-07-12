@@ -202,6 +202,7 @@ export class EngineClient {
     entry: BakedBundleEntry,
     stageLabel: string,
     forceRaw = false,
+    report: ProgressCb | null = this.progressCb,
   ): Promise<PackageMountInput> {
     const started = performance.now();
     const transportIdentity = `tgz-${entry.sha256}`;
@@ -213,7 +214,7 @@ export class EngineClient {
       const pointer = await findPreparedPackage(entry.label, transportIdentity);
       if (pointer) {
         this.preparedFallbacks.set(entry.label, () => this.loadBundle(entry, stageLabel, true));
-        this.progressCb?.({
+        report?.({
           stage: 'bundle-cache-hit',
           label: entry.label,
           message: `${stageLabel} ${entry.label} (prepared binary)`,
@@ -224,7 +225,7 @@ export class EngineClient {
         return { kind: 'prepared', pointer };
       }
     }
-    this.progressCb?.({
+    report?.({
       stage: stageLabel === 'Loading' ? 'bundle-fetch' : 'lazy-fetch',
       label: entry.label,
       bytes: 0,
@@ -250,7 +251,7 @@ export class EngineClient {
       resp,
       entry,
       (bytes, totalBytes) => {
-        this.progressCb?.({
+        report?.({
           stage: transportStage,
           label: entry.label,
           bytes,
@@ -258,7 +259,7 @@ export class EngineClient {
           message: `${stageLabel} ${entry.label}…`,
         });
       },
-      () => this.progressCb?.({
+      () => report?.({
         stage: 'bundle-unpack',
         label: entry.label,
         message: `Verifying and unpacking ${entry.label}…`,
@@ -268,7 +269,7 @@ export class EngineClient {
     const { inflateBundle } = await import('./inflate');
     const files = await inflateBundle(compressed);
     const spec: BundleSpec = { label: entry.label, files };
-    this.progressCb?.({
+    report?.({
       stage: 'bundle-unpack',
       label: entry.label,
       message: `${stageLabel} ${entry.label} loaded and inflated.`,
@@ -448,9 +449,13 @@ export class EngineClient {
     if (this.deferredMount) return this.deferredMount;
     this.deferredMount = (async () => {
       const needed = this.snapshotBundles.filter((entry) => !this.mountedLabels.has(entry.label));
-      const specs = await Promise.all(
-        needed.map((entry) => this.loadBundle(entry, 'Loading (profile dependency)')),
-      );
+      const { packageBatchProgress } = await import('./packageResolver');
+      const batch = packageBatchProgress(needed.map((entry) => entry.label), (event) => this.progressCb?.(event));
+      const specs = await Promise.all(needed.map(async (entry) => {
+        const spec = await this.loadBundle(entry, 'Loading (profile dependency)', false, batch.report);
+        batch.complete(entry.label);
+        return spec;
+      }));
       this.progressCb?.({
         stage: 'bundle-mount',
         message: `Mounting ${specs.map((item) => item.kind === 'raw' ? item.spec.label : item.pointer.label).join(', ')}…`,
@@ -529,7 +534,7 @@ export class EngineClient {
         await this.mountPackages(bundles);
       },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
-      fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (dependency)'),
+      fetchBaked: (bundle: BakedBundleEntry, report: ProgressCb) => this.loadBundle(bundle, 'Loading (dependency)', false, report),
     };
 
     // Persistent locks are prefetch plans, never authority. Refresh mutable
@@ -771,7 +776,7 @@ export class EngineClient {
       resolveStep: (config: string, index?: VersionIndex) => this.resolveStep(config, index),
       mount: async (packages: PackageMountInput[]) => { await this.mountPackages(packages); },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
-      fetchBaked: (bundle: BakedBundleEntry) => this.loadBundle(bundle, 'Loading (template)'),
+      fetchBaked: (bundle: BakedBundleEntry, report: ProgressCb) => this.loadBundle(bundle, 'Loading (template)', false, report),
     };
     for (let round = 0; round < 24; round += 1) {
       const step: TemplateResolution = await this.call('resolveTemplate', coordinate);

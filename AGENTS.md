@@ -39,6 +39,32 @@ asset side channels, host callbacks, or parallel serialized build formats.
 
 ## Active performance/UX certification (2026-07-12)
 
+**MOBILE REACHABILITY + AGGREGATE PACKAGE PROGRESS (LANDING 2026-07-12):** a real
+phone report exposed two gaps in the prior gate. Before Preview was selected,
+the six-card overview's intrinsic width expanded the fixed app to 492px inside
+a 390px visual viewport; the gate then invoked the stranded Preview tab with
+JavaScript. The app and workspace now use zero-minimum grid columns/children,
+the mobile top bar has explicit rows, and Author/Explore/Site preview are three
+equal viewport-bound columns. The gate now center-point hit-tests every real tab
+before clicking it and also renders the exact busy tab DOM at 320px, where
+clientWidth == scrollWidth == 320 and each target is 105px. At 390px all three
+targets are 128.7px and Preview exposes a 467px iframe.
+
+The resolver still retains bounded four-way I/O, but packages in one atomic
+mount batch now report one aggregate completed/total count and cumulative bytes
+instead of racing individual names and denominators into the banner. A cold
+Tiny receipt measured 20.693s open-to-published versus only 1.578s compiler
+time, so pending UI now says “Preparing” and no longer attributes package,
+template, SiteBuild, and publication work to compilation. Focused receipt:
+`/tmp/fhir-mobile-reachability-progress-final.log` (`MOBILE LAYOUT GATE: PASS`).
+The exact complete Pages-subpath receipt is
+`/tmp/fhir-mobile-progress-full.log` (`E2E GATE: PASS`): real US Core displayed
+stable 8-, 6-, and 2-package batches, retained 1,535/1,535 images, 85/85 assets,
+and one shell; real mCODE, persistence/restart, scroll/hot reload, and every
+prior gate remain green. App 102/102 (518 assertions), TypeScript, the 1,135-
+module Pages build, and diff integrity pass. Commit/push/Pages deployment are
+the remaining landing steps.
+
 **MOBILE PROGRESS STABILITY FOLLOW-UP (`36a20f1`, PUSHED 2026-07-12):** the project-open
 banner now reserves its progress bar and byte-counter slots before the first
 response chunk, uses fixed grid areas, ellipsizes package detail, and gives
