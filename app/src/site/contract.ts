@@ -51,12 +51,13 @@ export interface RustPrepareMetrics {
   templateMaterializeMs: number;
   publisherRuntimeMs: number;
   publisherModelMs: number;
+  renderSemanticsCacheHit: boolean;
   renderModelMs: number;
   catalogMs: number;
 }
 
 /** Measurements across the worker's one prepare request. `rustPrepareMs`
- * includes the envelope boundary around the detailed Rust phases;
+ * measures the combined Rust call boundary minus `compileProjectMs`, while
  * `hostPrepareMs` is target-specific worker work after Rust returns. */
 export interface PrepareMetrics {
   compileProjectMs: number;

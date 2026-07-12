@@ -196,7 +196,6 @@ jobs:
             bun "$WORK/ig/scripts/gen-example.ts"
           SOURCE_DATE_EPOCH=1783555200 "$FIG_BIN" prepare "$WORK/ig" \
             --target cycle-site/v2 \
-            --sushi-out "$WORK/fig-sushi-v2" \
             --cache "$FHIR_CACHE" \
             --out "$WORK/closed-v2"
           OUT_DIR="$WORK/out-v2" SITE_BUILD_DIR="$WORK/closed-v2" bun site-gen/build.tsx

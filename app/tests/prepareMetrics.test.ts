@@ -19,6 +19,7 @@ describe('prepare timing sidecar', () => {
       'templateMaterializeMs',
       'publisherRuntimeMs',
       'publisherModelMs',
+      'renderSemanticsCacheHit',
       'renderModelMs',
       'catalogMs',
     ]) {
@@ -31,12 +32,24 @@ describe('prepare timing sidecar', () => {
 
   test('separates compiler, Rust preparation, and post-Rust host work', () => {
     expect(WORKER).toContain('compileProjectMs: compiled.buildMs');
-    expect(WORKER).toContain('const rustPrepareStarted = performance.now()');
+    expect(WORKER).toContain('const rustBoundaryStarted = performance.now()');
+    expect(WORKER).toContain('Math.max(0, rustBoundaryMs - compiled.buildMs)');
     expect(WORKER).toContain('const hostPrepareStarted = performance.now()');
     expect(WORKER).toContain('rust: prepared.metrics');
     expect(CONTRACT).toContain('compileProjectMs: number');
     expect(CONTRACT).toContain('rustPrepareMs: number');
     expect(CONTRACT).toContain('hostPrepareMs: number');
+  });
+
+  test('preserves a typed successful compile across later preparation failure', () => {
+    expect(WORKER).toContain("status: 'siteFailed'");
+    expect(WORKER).toContain("result.status === 'siteFailed'");
+    expect(WORKER).toContain("new PrepareOperationError(result.error, 'site', compiled)");
+    expect(WORKER).toContain("throw new PrepareOperationError(String(error), 'compile')");
+    expect(WORKER).toContain("throw new PrepareOperationError(String(error), 'site', compiled)");
+    expect(WORKER).not.toContain("message.includes('compile')");
+    expect(WORKER).not.toContain('compileProject(filesJson:');
+    expect(PROTOCOL).toContain("{ operation: 'prepare'; stage: 'site'; compiled: CompileResult }");
   });
 
   test('keeps the deferred R5 bundle off the site-preparation path', () => {

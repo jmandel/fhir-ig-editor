@@ -31,7 +31,6 @@ import type {
   ContentRef,
   OutputCatalog,
   OutputDescriptor,
-  ProjectRevision,
   RenderedOutput,
   RustPrepareMetrics,
   SiteOutput,
@@ -54,18 +53,17 @@ interface WasmSession {
   commitPreparedMount(): string;
   abortPreparedMount(): string;
   packageStorageMetrics(): string;
+  prepareArtifacts(bundlesJson: string): string;
   prepareAndMount(bundlesJson: string): string;
   takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
   resolveTemplate(coordinate: string): string;
-  compileProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string): string;
+  prepareProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string, generatorSpecJson: string): string;
   snapshot(input: string): string;
-  prepare(generatorSpecJson: string): string;
   outputs(handle: string): string;
   render(handle: string, path: string): string;
-  finalize(handle: string): string;
+  finalize(handle: string, externalInputJson?: string): string;
   readContent(handle: string, sha256: string): Uint8Array;
-  finalizeExternal(handle: string, inputJson: string): string;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
 }
 
@@ -155,6 +153,20 @@ interface RustPrepareResult {
   metrics: RustPrepareMetrics;
 }
 
+type RustPreparedProjectWire =
+  | {
+      status: 'prepared';
+      compiled: Record<string, unknown>;
+      site: RustPrepareResult;
+      compileMs: number;
+    }
+  | {
+      status: 'siteFailed';
+      compiled: Record<string, unknown>;
+      compileMs: number;
+      error: string;
+    };
+
 interface LoadedCycleRendererPackage {
   package: CycleRendererPackage;
   manifest: CycleRendererPackageManifest;
@@ -242,22 +254,6 @@ function publicCycleDescriptor(
   };
 }
 
-async function compileProject(session: WasmSession, project: ProjectRevision): Promise<CompileResult> {
-  const started = performance.now();
-  const result = unwrap<Record<string, unknown>>(session.compileProject(
-    JSON.stringify(project.files),
-    project.config,
-    JSON.stringify(project.predefined),
-    JSON.stringify(project.siteFiles),
-  ));
-  return {
-    ...result,
-    buildMs: performance.now() - started,
-    fileCount: Object.keys(project.files).length,
-    packageStorage: unwrap(session.packageStorageMetrics()),
-  } as CompileResult;
-}
-
 async function renderCycleOutput(runtime: CycleBuildRuntime, path: string): Promise<RenderedOutput> {
   const prior = runtime.rendered.get(path);
   if (prior) return prior;
@@ -293,7 +289,7 @@ async function finalizeCycleOutput(
       content: rendered.content,
     });
   }
-  return unwrap<SiteOutput>(session.finalizeExternal(handle, JSON.stringify({
+  return unwrap<SiteOutput>(session.finalize(handle, JSON.stringify({
     renderer: { ...CYCLE_RENDERER_IDENTITY, recipeSha256: __CYCLE_RENDER_RECIPE__ },
     outputSchema: CYCLE_OUTPUT_SCHEMA,
     options: { rendererPackageId: runtime.rendererPackageId },
@@ -411,13 +407,23 @@ const handlers: Handlers = {
         engineMountMs: result.mountMs,
       };
     } else {
-      const serializeStarted = performance.now();
-      const input = JSON.stringify(raw.map(({ spec }) => spec));
-      serializeMs = performance.now() - serializeStarted;
+      const cache = await import('./preparedPackageCache');
       const wasmStarted = performance.now();
-      const result = unwrap<{
-        mounted: number;
-        added: number;
+      const totals = {
+        artifactBytes: 0,
+        preparedMembers: 0,
+        inputJsonBytes: 0,
+        base64Bytes: 0,
+        decodedSourceBytes: 0,
+        normalizedBytes: 0,
+        decodeValidatePrepareMs: 0,
+        jsonParseMs: 0,
+        base64DecodeMs: 0,
+        normalizationMs: 0,
+        indexingMs: 0,
+        artifactEncodeMs: 0,
+      };
+      type ColdArtifactResult = {
         artifacts: Array<{ label: string; cacheKey: string; artifactSha256: string; bytes: number }>;
         artifactBytes: number;
         preparedMembers: number;
@@ -432,46 +438,106 @@ const handlers: Handlers = {
         normalizationMs: number;
         indexingMs: number;
         artifactEncodeMs: number;
+      };
+      type PreparedCommitResult = {
+        mounted: number;
+        added: number;
+        packages: number;
+        manifestJsonBytes: number;
+        artifactBytes: number;
+        retainedBlobBytes: number;
+        indexedMembers: number;
+        memberBodyCopies: number;
+        manifestParseMs: number;
+        decodeValidateMs: number;
         mountMs: number;
-      }>(s.prepareAndMount(input));
-      inputBytes = result.inputJsonBytes;
+        compressedRetainedBytes: number;
+        declaredRawBytes: number;
+        chunksInflated: number;
+        rawInflatedBytes: number;
+        cacheHits: number;
+        cachedRawBytes: number;
+      };
+      let commitResult!: PreparedCommitResult;
+      let committed = false;
+      let maxStagedArtifactBytes = 0;
+      unwrap(s.beginPreparedMount(raw.length));
+      try {
+        for (const { spec, transportIdentity } of raw) {
+          const serializeStarted = performance.now();
+          const input = JSON.stringify([spec]);
+          serializeMs += performance.now() - serializeStarted;
+          const result = unwrap<ColdArtifactResult>(s.prepareArtifacts(input));
+          if (result.artifacts.length !== 1 || result.artifacts[0].label !== spec.label) {
+            throw new Error(`prepareArtifacts returned the wrong artifact for ${spec.label}`);
+          }
+          totals.artifactBytes += result.artifactBytes;
+          totals.preparedMembers += result.preparedMembers;
+          totals.inputJsonBytes += result.inputJsonBytes;
+          totals.base64Bytes += result.base64Bytes;
+          totals.decodedSourceBytes += result.decodedSourceBytes;
+          totals.normalizedBytes += result.normalizedBytes;
+          totals.decodeValidatePrepareMs += result.decodeValidatePrepareMs;
+          totals.jsonParseMs += result.jsonParseMs;
+          totals.base64DecodeMs += result.base64DecodeMs;
+          totals.normalizationMs += result.normalizationMs;
+          totals.indexingMs += result.indexingMs;
+          totals.artifactEncodeMs += result.artifactEncodeMs;
+
+          const artifact = result.artifacts[0];
+          const bytes = s.takePrepared(artifact.label);
+          maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
+          await cache.writePreparedPackage({
+            schema: 2,
+            label: artifact.label,
+            transportIdentity,
+            cacheKey: artifact.cacheKey,
+            artifactSha256: artifact.artifactSha256,
+            bytes: artifact.bytes,
+          }, bytes).catch(() => {});
+          unwrap(s.stagePreparedMount(bytes, artifact.cacheKey));
+        }
+        commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount());
+        committed = true;
+      } finally {
+        if (!committed) {
+          try { unwrap(s.abortPreparedMount()); } catch { /* preserve the original preparation error */ }
+        }
+      }
+      inputBytes = totals.inputJsonBytes;
       wasmMs = performance.now() - wasmStarted;
-      mounted = result.mounted;
+      mounted = commitResult.mounted;
       preparedMetrics = {
         mode: 'cold-prepare',
-        added: result.added,
-        artifactBytes: result.artifactBytes,
-        preparedMembers: result.preparedMembers,
-        inputJsonBytes: result.inputJsonBytes,
-        base64Bytes: result.base64Bytes,
-        decodedSourceBytes: result.decodedSourceBytes,
-        normalizedBytes: result.normalizedBytes,
-        mountMemberBodyCopies: result.mountMemberBodyCopies,
-        decodeValidatePrepareMs: result.decodeValidatePrepareMs,
-        jsonParseMs: result.jsonParseMs,
-        base64DecodeMs: result.base64DecodeMs,
-        normalizationMs: result.normalizationMs,
-        indexingMs: result.indexingMs,
-        artifactEncodeMs: result.artifactEncodeMs,
-        engineMountMs: result.mountMs,
+        added: commitResult.added,
+        artifactBytes: totals.artifactBytes,
+        preparedMembers: totals.preparedMembers,
+        inputJsonBytes: totals.inputJsonBytes,
+        base64Bytes: totals.base64Bytes,
+        decodedSourceBytes: totals.decodedSourceBytes,
+        normalizedBytes: totals.normalizedBytes,
+        mountMemberBodyCopies: commitResult.memberBodyCopies,
+        decodeValidatePrepareMs: totals.decodeValidatePrepareMs,
+        jsonParseMs: totals.jsonParseMs,
+        base64DecodeMs: totals.base64DecodeMs,
+        normalizationMs: totals.normalizationMs,
+        indexingMs: totals.indexingMs,
+        artifactEncodeMs: totals.artifactEncodeMs,
+        engineMountMs: commitResult.mountMs,
+        maxStagedArtifactBytes,
+        jsBatchBytes: 0,
+        compressedRetainedBytes: commitResult.compressedRetainedBytes,
+        declaredRawBytes: commitResult.declaredRawBytes,
+        chunksInflated: commitResult.chunksInflated,
+        rawInflatedBytes: commitResult.rawInflatedBytes,
+        chunkCacheHits: commitResult.cacheHits,
+        cachedRawBytes: commitResult.cachedRawBytes,
+        indexedMembers: commitResult.indexedMembers,
+        memberBodyCopies: commitResult.memberBodyCopies,
+        manifestJsonBytes: commitResult.manifestJsonBytes,
+        manifestParseMs: commitResult.manifestParseMs,
+        decodeValidateMs: commitResult.decodeValidateMs,
       };
-      const cache = await import('./preparedPackageCache');
-      const transportByLabel = new Map(raw.map(({ spec, transportIdentity }) => [spec.label, transportIdentity]));
-      for (const artifact of result.artifacts) {
-        // Always drain the Rust export, even if OPFS is unavailable; exports are
-        // deliberately one-shot and should not retain duplicate package bytes.
-        const bytes = s.takePrepared(artifact.label);
-        const transportIdentity = transportByLabel.get(artifact.label);
-        if (!transportIdentity) throw new Error(`missing transport identity for ${artifact.label}`);
-        await cache.writePreparedPackage({
-          schema: 2,
-          label: artifact.label,
-          transportIdentity,
-          cacheKey: artifact.cacheKey,
-          artifactSha256: artifact.artifactSha256,
-          bytes: artifact.bytes,
-        }, bytes).catch(() => {});
-      }
     }
     const committed = fresh.map(({ label }) => ({ label }));
     mountedLabels.add(committed);
@@ -535,17 +601,34 @@ const handlers: Handlers = {
 
   async prepare(project, spec) {
     const s = await ensureSession();
-    let compiled: CompileResult;
+    const rustSpec = { ...spec, buildEpochSecs: project.buildEpochSecs };
+    const rustBoundaryStarted = performance.now();
+    let result: RustPreparedProjectWire;
     try {
-      compiled = await compileProject(s, project);
+      result = unwrap<RustPreparedProjectWire>(s.prepareProject(
+        JSON.stringify(project.files),
+        project.config,
+        JSON.stringify(project.predefined),
+        JSON.stringify(project.siteFiles),
+        JSON.stringify(rustSpec),
+      ));
     } catch (error) {
+      // A failed outer envelope means Rust never reported a successful compile.
+      // Site failures use the typed `siteFailed` result below.
       throw new PrepareOperationError(String(error), 'compile');
     }
+    const rustBoundaryMs = performance.now() - rustBoundaryStarted;
+    const compiled = {
+      ...result.compiled,
+      buildMs: result.compileMs,
+      fileCount: Object.keys(project.files).length,
+    } as CompileResult;
+    if (result.status === 'siteFailed') {
+      throw new PrepareOperationError(result.error, 'site', compiled);
+    }
+    const prepared = result.site;
     try {
-      const rustSpec = { ...spec, buildEpochSecs: project.buildEpochSecs };
-      const rustPrepareStarted = performance.now();
-      const prepared = unwrap<RustPrepareResult>(s.prepare(JSON.stringify(rustSpec)));
-      const rustPrepareMs = performance.now() - rustPrepareStarted;
+      compiled.packageStorage = unwrap(s.packageStorageMetrics());
       if (prepared.generator !== spec.generator || prepared.handle !== prepared.buildId) {
         throw new Error('prepare: Rust returned an inconsistent immutable build handle');
       }
@@ -594,7 +677,9 @@ const handlers: Handlers = {
         compiled,
         metrics: {
           compileProjectMs: compiled.buildMs,
-          rustPrepareMs,
+          // The combined Rust boundary includes compilation. Report only the
+          // remaining site-preparation boundary under this metric's name.
+          rustPrepareMs: Math.max(0, rustBoundaryMs - compiled.buildMs),
           hostPrepareMs: performance.now() - hostPrepareStarted,
           rust: prepared.metrics,
         },

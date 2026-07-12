@@ -23,7 +23,10 @@ const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
 // run scales the wall-clock allowance with the emulated CPU slowdown.
-const STOCK_WARM_EDIT_BUDGET_MS = 1500 * timeoutScale;
+// End-to-end source edit -> rebuilt/published iframe. The Rust semantic-overlay
+// reuse gate below is separately asserted through its metrics; 2s leaves normal
+// browser scheduling headroom while still failing a lost-reuse regression (~3s).
+const STOCK_WARM_EDIT_BUDGET_MS = 2000 * timeoutScale;
 
 async function cdp(ws, method, params = {}, id = { n: 1 }) {
   return new Promise((resolve, reject) => {
@@ -816,7 +819,9 @@ try {
   results.injectedRefusal = injectedRefusal;
   if (injectedRefusal === 'ok') {
     // Wait for the recompile, then select the new VS + open its Expansion tab.
-    await sleep(1500);
+    await waitFor(ws, `[...document.querySelectorAll('.res-row')]
+      .some(r => /e2e-external-filter|E2EExternalFilter/i.test(r.textContent || ''))`,
+      15000, 'external-filter ValueSet compiled');
     const pickedRefusalVs = await evalJs(ws, `(() => {
       const rows = [...document.querySelectorAll('.res-row')];
       const vs = rows.find(r => /e2e-external-filter|E2EExternalFilter/i.test(r.textContent));
@@ -1674,6 +1679,12 @@ try {
     // re-open the Cycle fixture, switch its preview generator to the stock template,
     // and wait for its page list + index render. (Opening catalog IGs switched the
     // project and its default generator.)
+    results.engineLifecycleBeforeCycle = await evalJs(ws, `(() => ({
+      preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+      lastCompiledResourceCount: window.__igDebug?.engine?.lastCompiledResourceCount ?? -1,
+      recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+    }))()`);
+    console.error('[diag] engine lifecycle before Cycle =', results.engineLifecycleBeforeCycle);
     await evalJs(ws, `(() => {
       const select = document.querySelector('.open-ig-select');
       if (!select) throw new Error('Switch guide selector is absent');
@@ -1682,7 +1693,37 @@ try {
       select.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    await waitForStable(ws, `document.querySelectorAll('.res-row').length === ${Number(results.resourceCount)} && !document.querySelector('.open-progress')`, 120000, 'Cycle resources replaced US Core');
+    await waitForStable(ws, `localStorage.getItem('igEditor.project') === 'cycle' && !document.querySelector('.open-progress')`, 120000, 'Cycle project replaced mCODE');
+    // Resource rows only exist while Explore is mounted. The catalog checks above
+    // intentionally leave the single-surface UI on Site preview, so assert the
+    // compiled Cycle resources after selecting their owning surface instead of
+    // treating an unmounted inspector as a project-open race.
+    await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/explore/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+    try {
+      await waitForStable(ws, `(() => localStorage.getItem('igEditor.project') === 'cycle'
+        && [...document.querySelectorAll('.res-row')]
+          .some(row => /ValueSet/.test(row.querySelector('.res-type')?.textContent || '')))()`, 30000, 'Cycle compiled resources restored');
+    } catch (error) {
+      const dump = await evalJs(ws, `(() => ({
+        project: localStorage.getItem('igEditor.project'),
+        mode: document.querySelector('.workspace-views')?.dataset.mode || '',
+        rows: [...document.querySelectorAll('.res-row')].slice(0, 20).map(row => row.textContent?.trim() || ''),
+        state: document.querySelector('.project-state')?.textContent || '',
+        openError: document.querySelector('.open-error')?.textContent || '',
+        previewError: document.querySelector('.preview-error')?.textContent || '',
+        status: document.querySelector('.statusline')?.textContent || '',
+        progress: document.querySelector('.open-progress')?.textContent || '',
+        diagnostics: [...document.querySelectorAll('.diag')].slice(0, 20).map(diag => diag.textContent || ''),
+        metrics: (window.__igDebug?.metrics || []).slice(-30),
+        lifecycle: {
+          preparedConfigCount: window.__igDebug?.engine?.preparedConfigs?.length ?? -1,
+          lastCompiledResourceCount: window.__igDebug?.engine?.lastCompiledResourceCount ?? -1,
+          recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
+        },
+      }))()`);
+      console.error('[diag] Cycle reopen after catalog guides:', JSON.stringify(dump, null, 2));
+      throw error;
+    }
     // Ensure we're on the Site preview tab, then re-select the stock-template generator.
     await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
     await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'preview generator select present');

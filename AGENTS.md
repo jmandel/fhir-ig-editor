@@ -37,7 +37,76 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Landing-ready architecture receipt (2026-07-12)
+
+The deletion-first overhaul is locally complete. The exact current browser
+receipt is `/tmp/fhir-architecture-overhaul-browser-final18.log` (`E2E GATE:
+PASS`). It proves Tiny, Cycle, US Core (212 resources, 1,535/1,535 images,
+85/85 assets, one-shell CarePlan), real mCODE with no fallback, mCODE -> Cycle
+reopening, terminology refusal, persistence, scroll, and mobile geometry.
+
+Browser hardening is part of the architecture: cold raw packages are prepared
+one at a time into authenticated `.fpp` artifacts and staged into one atomic
+Rust mount transaction; long decode/normalize work never holds the Session
+borrow; and the Worker owner recycles before a third distinct project (or after
+a package-only generation), while OPFS and the Service Worker retain authority.
+Publisher prose edits reuse exact keyed RenderSemantics/package artifacts and
+layer an `Rc` site map without copying the mounted tree. Measured edit: 1.64s
+end to end, Rust prepare ~0.85s, render-model 2ms (from ~3.0s / 1.35s).
+
+Focused gates: app 78/78 (422 assertions), Cycle 236/236 (651 assertions),
+SiteEngine 17 pass/1 fixture ignored, WASM 3+5+8, Fig 17+4, Pages build 1,135
+modules, and renderer/entrypoint type+bundle checks. Engine `43f56b99` is pushed
+identically to `snapshot-gen` and `main`; Cycle `0837fcc` is pushed to `main`.
+The editor pins both and awaits its final commit/push/Pages deployment.
+
 ## Architecture convergence checkpoint (2026-07-11)
+
+**NATIVE FIG FOUR-OP MIGRATION ACTIVE (2026-07-12):** uncommitted engine work
+now provides atomic `SiteEngine::prepare_project`, fresh-process Publisher
+restoration from only `ClosedSiteBuild + ContentStore`, and native Fig
+`prepare/outputs/render/finalize`. The old Fig staged engine, fragment(s),
+produce, template materializer, watch server/benchmark, CLI routes, and direct
+dependencies are deleted. A real Tiny guide gate against the complete baked
+R4 core produced a 1,799-file canonical SiteOutput from a fresh restored
+process; receipt `so1-sha256:5409669b...`, 36,752,344 output bytes. Captured
+predefined JSON/XML now has disk-parity ordering and rejects unsafe entry
+paths; four focused tests pass. Generic strict restoration now admits Cycle v2;
+LiquidJS still owns outputs/render while Rust `finalize` alone constructs and
+caches SiteOutput for both the ordinary Cycle site and its outer QA/viewer
+publication. The public `output-cache publish`, TypeScript receipt constructors
+and sealing, site-producer filesystem seam, and unused SiteBuild successor/
+resolution protocol are deleted. A real two-pass native run produced the same
+91-file receipt and skipped Liquid rendering on its verified cache hit. Full
+current-WASM Chromium certification is still running. This checkpoint is not
+committed or pushed.
+
+Native Cycle external finalization now carries the exact renderer-opened
+`inputBuildId`; Fig rejects a different independently restored build before
+staged-tree authentication, and Cycle validates the build id Fig returns. The
+outer wrapper propagates the inherited receipt's input id.
+
+Cycle's independent regression floor now mutates the known Rust receipt across
+unsafe/reserved/duplicate/unordered/owner-open/content-reference cases and
+exercises adoption against missing, extra, symlinked, and post-adoption changed
+trees. Atomic publication requires an adopted Rust receipt. Native renderer
+recipe inputs are re-hashed around fresh finalization and immediately before a
+cache-hit rename; drift aborts. Cycle's complete current gate is 236/236 tests
+(651 assertions), configured renderer typecheck, and both native entrypoint
+bundles.
+
+## Historical checkpoints (superseded by the current block above)
+
+The next deletion pass is active in the engine worktree. Publisher
+`ClosedSiteBuild + ContentStore` can now reconstruct a fresh SiteEngine handle
+and runs through the same runtime/model/render/catalog helpers as live prepare;
+the focused parity fixture compares complete catalogs, reverse-order page bytes,
+and canonical SiteOutput. The closure now explicitly roots each compile
+package's optional `other/spec.internals`, including proof of absence, and live
+rendering uses the same narrowed package view instead of ambient nested package
+bytes. This state is uncommitted and not yet a completion claim: migrate native
+Fig prepare/outputs/render/finalize next, then delete its staged engine/watch/
+fragment/materialization surface and update docs/gates.
 
 The target-neutral `crates/site_engine` crate now owns resolver-scoped package
 views, exact semantic compilation, complete PreparedGuide construction, Cycle

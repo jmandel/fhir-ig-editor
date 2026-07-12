@@ -92,10 +92,19 @@ export class EngineClient {
   private readonly engineRecipe = typeof __ENGINE_RECIPE__ === 'undefined'
     ? `unavailable-${performance.timeOrigin}`
     : __ENGINE_RECIPE__;
-
+  /** The Rust executor retains exactly two semantic generations. Mirror that
+   * identity at the Worker owner so A -> B -> A stays warm, while a third
+   * distinct project recycles before attempting a third allocation graph. */
+  private preparedConfigs: string[] = [];
+  private lastCompiledResourceCount: number | null = null;
+  private recycleCount = 0;
   constructor() {
-    this.worker = new EngineWorker();
-    this.worker.onmessage = (e: MessageEvent<WorkerReply>) => {
+    this.worker = this.createWorker();
+  }
+
+  private createWorker(): Worker {
+    const worker = new EngineWorker();
+    worker.onmessage = (e: MessageEvent<WorkerReply>) => {
       const { id } = e.data;
       const p = this.pending.get(id);
       if (!p) return;
@@ -111,6 +120,44 @@ export class EngineClient {
         p.reject(new Error(e.data.error));
       }
     };
+    return worker;
+  }
+
+  private async recycleWorker(): Promise<void> {
+    if (this.pending.size !== 0) {
+      throw new Error('cannot recycle the engine while another operation is pending');
+    }
+    const retired = this.worker;
+    retired.onmessage = null;
+    retired.terminate();
+    // Worker termination is asynchronous below the DOM API. Yield before
+    // creating another WASM instance so Chromium can retire the old thread and
+    // linear memory instead of briefly overlapping both multi-GB heaps.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    this.worker = this.createWorker();
+    this.inited = false;
+    this.engineCommit = 'unknown';
+    this.mountedLabels.clear();
+    this.preparedFallbacks.clear();
+    this.resolutionCache.clear();
+    this.snapshotCache.clear();
+    this.deferredMount = null;
+    this.snapshotBundles = [...this.bakedByLabel.values()]
+      .filter((bundle) => bundle.loadPhase === 'snapshot');
+    this.preparedConfigs = [];
+    this.lastCompiledResourceCount = null;
+    this.recycleCount += 1;
+    this.progressCb?.({
+      stage: 'wasm',
+      message: 'Reclaiming compiler memory before opening another large guide…',
+    });
+    const res: InitResult = await this.call('init');
+    this.engineCommit = res.version?.commit || 'unknown';
+    assertCompatibleEngineCommit(
+      typeof __ENGINE_COMMIT__ === 'undefined' ? undefined : __ENGINE_COMMIT__,
+      this.engineCommit,
+    );
+    this.inited = true;
   }
 
   /** ONE call path for every engine operation (ledger #2): the op table in
@@ -614,6 +661,11 @@ export class EngineClient {
   async prepare(project: ProjectRevision, spec: GeneratorSpec): Promise<PrepareResult> {
     const started = performance.now();
     try {
+      const switchingProject = !this.preparedConfigs.includes(project.config);
+      if (switchingProject
+        && (this.preparedConfigs.length >= 2 || this.lastCompiledResourceCount === 0)) {
+        await this.recycleWorker();
+      }
       await this.acquireForProject(project.config);
       if (spec.generator === 'publisher') {
         await this.ensureTemplatePackages(spec.templateCoordinate);
@@ -643,10 +695,16 @@ export class EngineClient {
           templateMaterializeMs: result.metrics.rust.templateMaterializeMs,
           publisherRuntimeMs: result.metrics.rust.publisherRuntimeMs,
           publisherModelMs: result.metrics.rust.publisherModelMs,
+          renderSemanticsCacheHit: Number(result.metrics.rust.renderSemanticsCacheHit),
           renderModelMs: result.metrics.rust.renderModelMs,
           catalogMs: result.metrics.rust.catalogMs,
         },
       });
+      this.preparedConfigs = this.preparedConfigs
+        .filter((config) => config !== project.config);
+      this.preparedConfigs.push(project.config);
+      if (this.preparedConfigs.length > 2) this.preparedConfigs.shift();
+      this.lastCompiledResourceCount = result.compiled.resources.length;
       return result;
     } catch (error) {
       if (error instanceof PrepareError) throw error;

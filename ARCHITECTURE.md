@@ -29,7 +29,7 @@ storage plumbing shared by all three values, not a semantic database or a
 fourth build representation.
 
 Project snapshots, package locks, compiled state, template file trees,
-fragment requests, resolution batches, cache records, preview sequence numbers,
+fragment requests, cache records, preview sequence numbers,
 and opaque handles are inputs or private execution details. They may contribute
 to an identity, but they must not become alternative handoffs.
 
@@ -48,9 +48,9 @@ host supplies an explicit resolver-scoped `PackageEnvironment`; `wasm_api`
 only parses and serializes transport and has no parallel preparation path.
 Publisher `SiteBuild` artifacts root semantic documents, all authored roles,
 the materialized template tree, assembled runtime tree, exact source revision,
-and package lock. Current live handles retain the constructed Rust render state;
-reconstructing that private state from the closed build and `ContentStore` is a
-future executor operation, not a second handoff value.
+and package lock. `SiteEngine::restore(ClosedSiteBuild, ContentStore)` strictly
+reconstructs either target's ordinary bounded runtime in a fresh process. This
+is handle lifecycle admission, not a fifth host operation or another value.
 
 ## The only host API
 
@@ -91,8 +91,16 @@ Cycle and Publisher templates share the host contract, not an implementation.
 
 Cycle receives a callback-free, eagerly closed `cycle-site/v2` `SiteBuild` and
 renders through the one shared LiquidJS/React implementation used by browser
-and CLI. `cycle-site/v1`, `site.db`, row projections, SQL capabilities, and
-dual v1/v2 dispatch are removed.
+and CLI. LiquidJS implements `outputs` and `render`; Rust admits the closed
+handle and implements `finalize`, so Rust is the sole production constructor of
+the canonical `SiteOutput`. TypeScript independently validates the receipt and
+every staged byte before atomic publication. Native external finalization names
+the exact renderer-opened `inputBuildId`; Rust must restore that same identity
+before it authenticates the staged tree, and the caller must verify the returned
+build id. Native execution re-hashes the renderer recipe around fresh
+finalization and immediately before cached publication, and the atomic rename
+requires an adopted Rust receipt. `cycle-site/v1`, `site.db`, row
+projections, SQL capabilities, and dual v1/v2 dispatch are removed.
 
 Publisher templates render with the Rust Liquid implementation. Registered
 generated-fragment names resolve synchronously through the immutable typed
@@ -131,10 +139,11 @@ Numeric UI generations order commits but never identify semantic content. The
 Service Worker serves immutable output content and atomically follows a small
 current-output pointer. Its in-memory state is an optimization, not authority.
 
-A native external builder may probe `SiteOutputCache` from the verified closed
+A native external builder may probe `SiteOutputCache` within `outputs` from the verified closed
 `SiteBuild`, exact renderer implementation/recipe, output schema, and options;
-on a miss it publishes the ordinary canonical `SiteOutput` and addressed bytes
-after rendering. Materialization is into the host's existing private atomic
+on a miss Rust `finalize` authenticates the complete renderer tree, constructs
+the ordinary canonical `SiteOutput`, and publishes its addressed bytes.
+Materialization is into the host's existing private atomic
 publication transaction and is re-verified there. A staged mutable tree without
 a closed `SiteBuild` (including legacy `fig render`) has no truthful pre-render
 key and is not covered by this seam.
@@ -143,7 +152,7 @@ key and is not covered by this seam.
 
 - Rust owns source capture, package resolution, compilation, `PreparedGuide`,
   target projection, Publisher need resolution, runtime construction, and
-  canonical contract validation through `SiteEngine`.
+  canonical `SiteOutput` construction/validation through `SiteEngine`.
 - A renderer owns its declared output namespace and all output bytes.
 - The host owns `ContentStore`, scheduling, private caches, handle lifetimes,
   and atomic publication.
@@ -164,11 +173,13 @@ place.
 | ambient `renderPage`, `renderFragment`, `listSitePages`, and mutable worker renderer globals | handle-scoped `outputs`, `render`, and `finalize` |
 | mutable singleton `SiteGeneratorAdapter` registry | immutable opened build handles selected by generator specification |
 | stock affine successor containing all previously rendered pages | independent path rendering against one immutable build |
+| `SiteBuildSuccessor`, `ResolutionBatch`, and public artifact-promotion protocol | one immutable closed SiteBuild plus private per-handle output memoization |
 | `StockAssetCatalog`, `assetBytes`, optional `assetManifest`, `baseHref`, and base64 asset maps | assets declared by `outputs` and stored as ordinary `ContentRef`s |
 | editor-only HTML patches and dynamically supplied table backgrounds/runtime shims | renderer-owned outputs/transforms included in recipe and `SiteOutput` |
 | Cycle `cycle-site/v1`, `compat.site_db/rows.json`, `JsonSiteBuildView`, `SqliteSiteBuildView`, `SITE_DB`, SQL Liquid capability, and v1/v2 dispatch | one strict `cycle-site/v2` closed `SiteBuild` view |
 | reverse `site.db -> PreparedGuide` and v1 SiteBuild projections/features | direct `PreparedGuide -> cycle-site/v2 SiteBuild` only |
-| duplicate Rust/TypeScript receipt authority | one canonical contract implementation plus independent conformance fixtures |
+| TypeScript receipt sealing/creation and public `fig output-cache publish` | Rust `finalize` constructs/publishes the receipt; TypeScript independently validates it |
+| native Fig staged `engine`, `fragment(s)`, `produce`, build-root `render`, template-dir materialization, and `watch` | closed-bundle `fig prepare/outputs/render/finalize` over SiteEngine |
 | generation-specific HTML cache identity and regex normalization | canonical renderer bytes plus response-time preview control injection |
 | overlapping normative architecture prose in root/subproject READMEs and `SPEC.md` | this document; other docs orient, operate, or explain one implementation |
 | singleton project VFS plus global whole-tree replacement on every guide switch | project-scoped `WorkspaceRepository -> Workspace -> ProjectRevision` capture |
