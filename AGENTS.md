@@ -84,7 +84,7 @@ verified serving app `assets/index-CdYUDRdQ.js`, resolver
 `assets/packageResolver-D9o9M5Zj.js` containing the typed retry/fallback, preview
 protocol 5, and the exact 11,747,189-byte baked R4 core artifact.
 
-**ATOMIC MIXED PACKAGE MOUNT FOLLOW-UP (UNCOMMITTED 2026-07-12):** the complete
+**ATOMIC MIXED PACKAGE MOUNT FOLLOW-UP (`fdd8900`, DEPLOYED 2026-07-12):** the complete
 browser receipt exposed a second, separate cause of repeat work: whenever one
 resolver batch contained both prepared and raw packages, `EngineClient`
 deliberately reacquired every prepared member as raw because the Worker only
@@ -105,6 +105,36 @@ because this benchmark jumps from engine boot directly to US Core and therefore
 correctly reports zero mixed calls; do not claim a warm-reload improvement from
 this slice. The measured gain is the Tiny/Cycle -> US Core transition exercised
 by the full gate: nine prepared packages retained, zero baked re-fetches.
+Pages run `29207689560` passed every build/browser/upload/deploy job. The live
+origin was separately verified serving app `assets/index-bqcubdX4.js`, worker
+`assets/engine.worker-ByyXv0X0.js` containing warm/cold/mixed modes, resolver
+`assets/packageResolver-DsWQqzCL.js`, and preview protocol 5.
+
+**EDIT LATENCY MEASUREMENT (UNCOMMITTED BENCHMARK OPTION 2026-07-12):** the 300
+ms semantic and 120 ms prose pauses are explicit trailing debounces in
+`LatestTaskQueue`, not processing measurements. `BENCH_PROFILE_EDIT=1` now adds
+a loaded US Core Patient JSON title edit to the existing benchmark and waits for
+the changed published profile page. Two receipts are
+`/tmp/uscore-profile-edit.json` and `/tmp/uscore-profile-edit-final.json`:
+5,569.7/5,610.8 ms edit-to-visible, first Worker operation at 530.3/522.9 ms,
+and 5,039.4/5,087.9 ms from that boundary to the visible page. The new
+SiteBuild/catalog took 4,480.7/4,482.4 ms: compile 1,629/1,617 ms and the
+remaining Rust/Worker preparation boundary about 2,547/2,589 ms (PreparedGuide
+814/826, Publisher model 114/117, render model 774/787, output catalog 85/86,
+Publisher artifacts 172/174, close 14/15). `outputs` was 35.5/40.6 ms and
+open-page render 143.8/144.2 ms; preview commit was 177.6/181.6 ms and final
+reload/scripts/layout about 394/406 ms. Exact edit-scoped package downloads
+were zero. Do not present debounce tuning as the main semantic-edit optimization;
+compile and preparation dominate.
+The same follow-up now immediately invalidates the current latest-task lease on
+every source edit, before starting the trailing debounce. Previously an older
+capture retained publication authority until the timer enqueued its successor,
+leaving a 120/300 ms stale-commit window. The next build remains debounced and
+serialized; only publication authority changes immediately.
+App 102/102 (514 assertions), TypeScript, the 1,135-module Pages build, and the
+exact full browser receipt `/tmp/fhir-edit-lease-full.log` (`E2E GATE: PASS`)
+are green after this change; the receipt preserves the mixed-mount zero-refetch,
+US Core/mCODE, edit/hot-reload/scroll, persistence/restart, and mobile gates.
 
 The audit patch is landed and Pages run `29195715737` passed. The active
 uncommitted round keeps the four-operation architecture and makes the persistent

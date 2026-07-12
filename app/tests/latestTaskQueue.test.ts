@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   LatestTaskQueue,
@@ -6,6 +7,8 @@ import {
   SITE_EDIT_DEBOUNCE_MS,
   editDebounceMs,
 } from '../src/build/latestTaskQueue';
+
+const APP = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -76,6 +79,17 @@ describe('LatestTaskQueue', () => {
     const outcome = await running;
     expect(outcome.latest).toBe(false);
     expect(couldPublish).toBe(false);
+  });
+
+  test('an edit revokes publication authority before waiting on its debounce', () => {
+    const schedule = APP.slice(
+      APP.indexOf('const scheduleCompile = useCallback'),
+      APP.indexOf('// ---- open a baked project'),
+    );
+    const invalidate = schedule.indexOf('buildQueueRef.current.invalidate()');
+    const timer = schedule.indexOf('window.setTimeout');
+    expect(invalidate).toBeGreaterThan(-1);
+    expect(timer).toBeGreaterThan(invalidate);
   });
 
   test('a rejection does not poison later queued work', async () => {

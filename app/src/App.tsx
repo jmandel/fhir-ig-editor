@@ -540,6 +540,10 @@ export function App() {
   const debounceRef = useRef<number | null>(null);
   const scheduleCompile = useCallback((editedPath: string) => {
     if (!projectWorkspace || !engineRef.current) return;
+    // Source changed now, even though the expensive successor is deliberately
+    // debounced. Revoke an in-flight capture's publication lease immediately so
+    // it cannot briefly present itself as current during that debounce window.
+    buildQueueRef.current.invalidate();
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const editedWorkspace = projectWorkspace;
     debounceRef.current = window.setTimeout(() => {

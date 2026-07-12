@@ -21,6 +21,7 @@
 // Optional environment:
 //   BENCH_CPU_THROTTLE=4  CDP CPU throttling rate (default 1)
 //   BENCH_MOBILE=1        emulate a 412x915, deviceScaleFactor=3 viewport
+//   BENCH_PROFILE_EDIT=1  measure one loaded US Core profile JSON edit through preview
 //   BENCH_TIMEOUT_MS=300000 per readiness wait before throttle scaling
 
 const HELP = `Usage:
@@ -49,6 +50,7 @@ const cpuThrottle = Math.max(1, Number(process.env.BENCH_CPU_THROTTLE || 1));
 const baseTimeoutMs = Math.max(30_000, Number(process.env.BENCH_TIMEOUT_MS || 300_000));
 const timeoutMs = baseTimeoutMs * cpuThrottle;
 const mobile = process.env.BENCH_MOBILE === '1';
+const profileEditEnabled = process.env.BENCH_PROFILE_EDIT === '1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const round = (n) => Math.round(n * 10) / 10;
 const ratio = (n) => Math.round(n * 1000) / 1000;
@@ -665,6 +667,80 @@ async function main() {
       throw new Error(`stale preview milestones are not ordered before exact Ready: ${JSON.stringify(stale)}`);
     }
 
+    let profileEdit = null;
+    if (profileEditEnabled) {
+      progress('loaded US Core profile JSON edit -> published page');
+      target.phase = 'profileEditSetup';
+      await target.evaluate(`(() => {
+        document.querySelector('#workspace-tab-preview')?.click();
+        const select = document.querySelector('.preview-page-select select');
+        const path = 'en/StructureDefinition-us-core-patient.html';
+        if (!select || ![...select.options].some((option) => option.value === path)) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+        setter.call(select, path);
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`);
+      await target.waitFor(
+        `(() => {
+          const frame = document.querySelector('.preview-frame');
+          const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+          return frame?.contentWindow?.location.pathname.endsWith('/en/StructureDefinition-us-core-patient.html')
+            && /US Core Patient Profile/.test(doc?.body?.textContent || '');
+        })()`,
+        'US Core patient page before profile edit',
+      );
+      const openedSource = await target.evaluate(`(async () => {
+        document.querySelector('#workspace-tab-author')?.click();
+        const row = document.querySelector('.tree-row.file[title="input/resources/structuredefinition-us-core-patient.json"]');
+        if (!row) return 'missing-source-row';
+        row.click();
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const editor = window.monaco?.editor.getEditors()[0];
+          if (editor?.getModel()?.getValue().includes('"id": "us-core-patient"')) return 'ok';
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return 'source-model-timeout';
+      })()`);
+      if (openedSource !== 'ok') throw new Error(`could not open US Core patient source: ${openedSource}`);
+      target.phase = 'profileEdit';
+      const editStart = await resetTrace(target);
+      const edited = await target.evaluate(`(() => {
+        const editor = window.monaco?.editor.getEditors()[0];
+        const model = editor?.getModel();
+        if (!model) return false;
+        const before = '"title": "US Core Patient Profile"';
+        if (!model.getValue().includes(before)) return false;
+        model.setValue(model.getValue().replace(
+          before,
+          '"title": "US Core Patient Profile Benchmark Edit"',
+        ));
+        return true;
+      })()`);
+      if (!edited) throw new Error('could not edit US Core patient title');
+      await target.waitFor(
+        `(() => {
+          const frame = document.querySelector('.preview-frame');
+          const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+          return /US Core Patient Profile Benchmark Edit/.test(doc?.body?.textContent || '');
+        })()`,
+        'edited US Core patient published page',
+      );
+      profileEdit = await traceSnapshot(target, editStart);
+      const firstOperationStartMs = Math.min(
+        ...profileEdit.operations
+          .map((operation) => operation.startMs)
+          .filter((value) => Number.isFinite(value)),
+      );
+      if (!Number.isFinite(firstOperationStartMs)) {
+        throw new Error('profile edit completed without a measured Worker operation');
+      }
+      profileEdit.explicitDebounceMs = 300;
+      profileEdit.firstWorkerOperationMs = round(firstOperationStartMs);
+      profileEdit.postDebouncePipelineMs = round(profileEdit.durationMs - firstOperationStartMs);
+      profileEdit.network = networkSummary(networkEvents, 'profileEdit');
+    }
+
     progress('preparing same-worker comparison via Cycle');
     target.phase = 'preparation';
     const sameWorkerRecycleBaseline = warm.engineLifecycle.recycleCount;
@@ -743,6 +819,7 @@ async function main() {
       phases: {
         coldStart: cold,
         warmHardReload: warm,
+        ...(profileEdit ? { profileEdit } : {}),
         sameWorkerReopen: same,
       },
       contracts: {

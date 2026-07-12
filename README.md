@@ -137,11 +137,16 @@ BASE_PATH=/fhir-ig-editor/ bash scripts/run-browser-gates.sh app/dist
 ```
 
 Measure US Core cold start, persistent-OPFS hard reload (including prior-page
-and current-ready milestones), and same-worker reopen:
+and current-ready milestones), and same-worker reopen. Add
+`BENCH_PROFILE_EDIT=1` to also measure a loaded Patient profile JSON edit through
+the changed published page, with explicit debounce and Worker-boundary timings:
 
 ```sh
 BASE_PATH=/fhir-ig-editor/ \
   bash scripts/run-uscore-benchmark.sh app/dist > uscore-benchmark.json
+
+BASE_PATH=/fhir-ig-editor/ BENCH_PROFILE_EDIT=1 \
+  bash scripts/run-uscore-benchmark.sh app/dist > uscore-profile-edit.json
 ```
 
 The lower-level CDP harness can target an already running browser:
