@@ -58,7 +58,11 @@ Focused gates: app 78/78 (422 assertions), Cycle 236/236 (651 assertions),
 SiteEngine 17 pass/1 fixture ignored, WASM 3+5+8, Fig 17+4, Pages build 1,135
 modules, and renderer/entrypoint type+bundle checks. Engine `43f56b99` is pushed
 identically to `snapshot-gen` and `main`; Cycle `0837fcc` is pushed to `main`.
-The editor pins both and awaits its final commit/push/Pages deployment.
+Editor `13f5c60` pins both and is pushed to `main`; Pages run `29187917106`
+passed the complete build, fresh-profile Chromium gate, and deployment. The
+public origin was then verified to serve asset `index-CWF8U-Ne.js`, worker
+`engine.worker-CQqy9kW6.js`, preview Service Worker protocol 5, and the
+`43f56b9`-stamped engine.
 
 ## Architecture convergence checkpoint (2026-07-11)
 
