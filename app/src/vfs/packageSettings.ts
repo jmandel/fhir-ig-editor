@@ -10,7 +10,7 @@
 // networks where even those are blocked.
 //
 // Persisted in localStorage (small strings), so the settings survive reloads
-// without touching the OPFS project store.
+// without touching any project Workspace.
 
 const REGISTRY_KEY = 'fhir-ig-editor.pkg-registries';
 const PROXY_KEY = 'fhir-ig-editor.pkg-proxy';

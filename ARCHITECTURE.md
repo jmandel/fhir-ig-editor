@@ -33,6 +33,25 @@ fragment requests, resolution batches, cache records, preview sequence numbers,
 and opaque handles are inputs or private execution details. They may contribute
 to an identity, but they must not become alternative handoffs.
 
+The browser keeps one mutable `Workspace` per project. Source transports install
+a complete workspace generation transactionally and are then discarded; they
+are not project caches or build authority. Each preparation captures that
+workspace once as an immutable `ProjectRevision`. Switching projects selects a
+different workspace instead of replacing a global working tree, so authored
+edits survive A -> B -> A and reload. `ProjectRevision` crosses the worker only
+through `prepare`; Rust derives the canonical content-addressed source revision.
+
+The target-neutral Rust executor is `site_engine::SiteEngine`. Its preparation
+state owns semantic compilation reuse, complete `PreparedGuide` construction,
+generator projection, Publisher assembly, and bounded immutable runtimes. A
+host supplies an explicit resolver-scoped `PackageEnvironment`; `wasm_api`
+only parses and serializes transport and has no parallel preparation path.
+Publisher `SiteBuild` artifacts root semantic documents, all authored roles,
+the materialized template tree, assembled runtime tree, exact source revision,
+and package lock. Current live handles retain the constructed Rust render state;
+reconstructing that private state from the closed build and `ContentStore` is a
+future executor operation, not a second handoff value.
+
 ## The only host API
 
 ```text
@@ -123,8 +142,8 @@ key and is not covered by this seam.
 ## Ownership
 
 - Rust owns source capture, package resolution, compilation, `PreparedGuide`,
-  target projection, Publisher need resolution, and canonical contract
-  validation.
+  target projection, Publisher need resolution, runtime construction, and
+  canonical contract validation through `SiteEngine`.
 - A renderer owns its declared output namespace and all output bytes.
 - The host owns `ContentStore`, scheduling, private caches, handle lifetimes,
   and atomic publication.
@@ -152,6 +171,7 @@ place.
 | duplicate Rust/TypeScript receipt authority | one canonical contract implementation plus independent conformance fixtures |
 | generation-specific HTML cache identity and regex normalization | canonical renderer bytes plus response-time preview control injection |
 | overlapping normative architecture prose in root/subproject READMEs and `SPEC.md` | this document; other docs orient, operate, or explain one implementation |
+| singleton project VFS plus global whole-tree replacement on every guide switch | project-scoped `WorkspaceRepository -> Workspace -> ProjectRevision` capture |
 
 ## Reduction rules and completion evidence
 

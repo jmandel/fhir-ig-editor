@@ -55,6 +55,11 @@ fragment discovery is resolved internally by Rust and never becomes an editor
 callback API. Assets are ordinary outputs, and final publication is one verified
 `SiteOutput`.
 
+The shared target-neutral Rust executor is `site_engine::SiteEngine`. The WASM
+crate is a transport facade over that executor, not another preparation layer.
+The browser's `WorkspaceRepository -> Workspace -> ProjectRevision` path keeps
+one working copy per guide and captures one immutable request for `prepare`.
+
 Package transport remains compact `PreparedPackage` v2: authenticated 1 MiB
 chunks, transactional one-artifact-at-a-time warm mount, and bounded lazy member
 inflation. Cache records and worker/preview handles are private execution
@@ -65,7 +70,7 @@ details, not additional build representations.
 ```text
 app/                     React/Vite application
   src/editor/            Monaco and file tree
-  src/vfs/               OPFS/in-memory project and package persistence
+  src/vfs/               project-scoped Workspaces and package persistence
   src/worker/            typed worker protocol and engine host
   src/build/             project/build identity and coordination
   src/site/              four-operation site contract and catalog invariants

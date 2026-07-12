@@ -5,7 +5,7 @@
 import type {
   GeneratorSpec,
   OutputCatalog,
-  ProjectInput,
+  ProjectRevision,
   PrepareResult,
   RenderedOutput,
   SiteOutput,
@@ -329,7 +329,7 @@ export interface EngineOps {
   /** Private acquisition handshake; only EngineClient.prepare drives it. */
   resolveTemplate: { args: [coordinate: string]; result: TemplateResolution };
   // The complete public site-generation surface.
-  prepare: { args: [project: ProjectInput, spec: GeneratorSpec]; result: PrepareResult };
+  prepare: { args: [project: ProjectRevision, spec: GeneratorSpec]; result: PrepareResult };
   outputs: { args: [handle: string]; result: OutputCatalog };
   render: { args: [handle: string, path: string]; result: RenderedOutput };
   finalize: { args: [handle: string]; result: SiteOutput };

@@ -645,12 +645,35 @@ try {
   await waitFor(ws, `document.querySelector('#workspace-tab-explore')?.getAttribute('aria-selected') === 'true'`, 10000, 'tiny definition trail');
   results.tinyGuide.definitionMode = true;
   await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[2]?.click()`);
-  await waitFor(ws, `(() => {
-    const frame = document.querySelector('.preview-frame');
-    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
-    return /StructureDefinition-editor-user\.html$/.test(frame?.contentWindow?.location.pathname || '')
-      && /IG Editor User/.test(doc?.body?.textContent || '');
-  })()`, 30000, 'tiny published profile trail');
+  try {
+    await waitFor(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      return /StructureDefinition-editor-user\.html$/.test(frame?.contentWindow?.location.pathname || '')
+        && /IG Editor User/.test(doc?.body?.textContent || '');
+    })()`, 30000, 'tiny published profile trail');
+  } catch (error) {
+    const dump = await evalJs(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      return {
+        path: frame?.contentWindow?.location.pathname || '',
+        selected: document.querySelector('.preview-page-select select')?.value || '',
+        error: document.querySelector('.preview-error')?.textContent || '',
+        openError: document.querySelector('.open-error')?.textContent || '',
+        status: document.querySelector('.statusline')?.textContent || '',
+        progress: document.querySelector('.open-progress')?.textContent || '',
+        ready: document.body?.textContent?.includes('Ready') || false,
+        body: (doc?.body?.textContent || '').slice(0, 800),
+        pages: [...document.querySelectorAll('.preview-page-select option')].map((option) => option.value),
+        trail: [...document.querySelectorAll('.artifact-trail-step')]
+          .map((step) => ({ text: step.textContent?.trim() || '', disabled: step.disabled })),
+        metrics: (window.__igDebug?.metrics || []).slice(-20),
+      };
+    })()`);
+    console.error('[diag] tiny published profile trail:', JSON.stringify(dump, null, 2));
+    throw error;
+  }
   Object.assign(results.tinyGuide, await evalJs(ws, `(() => {
     const frame = document.querySelector('.preview-frame');
     const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
@@ -878,7 +901,23 @@ try {
   // Wait for the preview surface and its page catalog. The iframe can initially
   // contain the honest "not rendered yet" document while its source is being
   // published, so a generic body-length check is not a readiness condition.
-  await waitFor(ws, `!!document.querySelector('.preview-frame')`, 30000, 'preview iframe');
+  try {
+    await waitFor(ws, `!!document.querySelector('.preview-frame')`, 30000, 'preview iframe');
+  } catch (error) {
+    const dump = await evalJs(ws, `(() => ({
+      project: localStorage.getItem('igEditor.project'),
+      generator: document.querySelector('.preview-generator-select select')?.value || '',
+      siteError: document.querySelector('.preview-error')?.textContent || '',
+      openError: document.querySelector('.open-error')?.textContent || '',
+      status: document.querySelector('.statusline')?.textContent || '',
+      progress: document.querySelector('.open-progress')?.textContent || '',
+      pages: [...document.querySelectorAll('.preview-page-select option')].map((option) => option.value),
+      diagnostics: [...document.querySelectorAll('.diag')].map((diag) => diag.textContent),
+      metrics: (window.__igDebug?.metrics || []).slice(-20),
+    }))()`);
+    console.error('[diag] preview iframe:', JSON.stringify(dump, null, 2));
+    throw error;
+  }
   const frameHasContent = `(() => {
     try {
       const f = document.querySelector('.preview-frame');

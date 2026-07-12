@@ -33,7 +33,7 @@ import type {
   GeneratorSpec,
   OutputCatalog,
   PrepareResult,
-  ProjectInput,
+  ProjectRevision,
   RenderedOutput,
   SiteOutput,
 } from '../site/contract';
@@ -611,7 +611,7 @@ export class EngineClient {
 
   // ---- the complete public site-generation API ---------------------------
 
-  async prepare(project: ProjectInput, spec: GeneratorSpec): Promise<PrepareResult> {
+  async prepare(project: ProjectRevision, spec: GeneratorSpec): Promise<PrepareResult> {
     const started = performance.now();
     try {
       await this.acquireForProject(project.config);

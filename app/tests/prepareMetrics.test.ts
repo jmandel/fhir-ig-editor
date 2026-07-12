@@ -25,7 +25,7 @@ describe('prepare timing sidecar', () => {
       expect(CONTRACT).toContain(`${field}:`);
       expect(CLIENT).toContain(`result.metrics.rust.${field}`);
     }
-    expect(PROTOCOL).toContain("prepare: { args: [project: ProjectInput, spec: GeneratorSpec]; result: PrepareResult }");
+    expect(PROTOCOL).toContain("prepare: { args: [project: ProjectRevision, spec: GeneratorSpec]; result: PrepareResult }");
     expect(PROTOCOL).not.toContain('prepareMetrics:');
   });
 
@@ -45,7 +45,7 @@ describe('prepare timing sidecar', () => {
       CLIENT.indexOf('async expandValueSet'),
     );
     const prepare = CLIENT.slice(
-      CLIENT.indexOf('async prepare(project: ProjectInput'),
+      CLIENT.indexOf('async prepare(project: ProjectRevision'),
       CLIENT.indexOf('async outputs(handle:'),
     );
     expect(snapshot).toContain('await this.ensureSnapshotBundles()');

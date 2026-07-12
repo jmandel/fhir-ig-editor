@@ -4,7 +4,7 @@
 // they NEVER silently partial-expand.
 //
 // Persisted in localStorage (a single small URL string), so the setting survives
-// reloads without touching the OPFS project store.
+// reloads without touching any project Workspace.
 
 const KEY = 'fhir-ig-editor.tx-endpoint';
 

@@ -1,7 +1,7 @@
 // Load an IG project directly from a GitHub repo @ ref, at runtime, in the
 // browser — no CI data-gen, no local checkout. The produced manifest is the
 // SAME shape `scripts/export-ig-manifest.mjs` emits ({ name, fileCount, files,
-// binaryFiles }), so every downstream consumer (the store, the compiler, any
+// binaryFiles }), so every downstream consumer (the Workspace, compiler, or
 // site generator) is agnostic to whether the project came from a baked
 // data/<id>/manifest.json or was fetched live here.
 //
@@ -14,7 +14,11 @@
 // So: ONE git-trees request for the manifest of paths, then each wanted file
 // from raw.githubusercontent.com (bounded concurrency).
 
-import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
+import {
+  type BinaryProjectFile,
+  type ProjectFile,
+  WorkspaceRepository,
+} from './workspace';
 import type { ProgressEvent } from '../worker/protocol';
 import type { DemoIgMeta } from './demoIg';
 import { readResponseBytes } from '../worker/bundleIntegrity';
@@ -37,6 +41,7 @@ export interface IgManifest {
   fileCount: number;
   files: Record<string, string>;
   binaryFiles: Record<string, string>;
+  sourceIdentity: string;
 }
 
 // The publisher-input file set the compiler + the S6 site producer read — the
@@ -75,6 +80,23 @@ interface TreeEntry {
   type: string;
 }
 
+interface GithubIgTree {
+  owner: string;
+  repo: string;
+  rootPrefix: string;
+  label: string;
+  commitSha: string;
+  treeSha: string;
+  textPaths: string[];
+  binaryPaths: string[];
+}
+
+const GITHUB_SELECTION_RECIPE = 'publisher-input-v1';
+
+function githubSourceIdentity(treeSha: string, rootPrefix: string): string {
+  return `github-tree-sha1:${treeSha};root=${encodeURIComponent(rootPrefix)};selection=${GITHUB_SELECTION_RECIPE}`;
+}
+
 /** Run `worker` over `items` with at most `limit` in flight. Preserves order of
  *  completion side effects only through the worker; results are discarded. */
 async function mapPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -107,22 +129,52 @@ function nameFromConfig(cfg: string | undefined): string | null {
   return m ? m[1].trim().replace(/^["']|["']$/g, '') : null;
 }
 
-/** Fetch a GitHub-hosted IG's publisher-input files into an IgManifest. Throws a
- *  descriptive Error on any network/CORS/HTTP/parse failure (the caller surfaces
- *  it) — never resolves with a partial project. */
-export async function fetchGithubIgManifest(
+/** Resolve a mutable GitHub ref to the immutable tree and selected publisher
+ * input paths. Callers can compare tree identity before downloading bodies. */
+async function resolveGithubIgTree(
   spec: GithubIgSpec,
   onProgress?: (ev: ProgressEvent) => void,
-): Promise<IgManifest> {
+): Promise<GithubIgTree> {
   const { owner, repo, ref } = spec;
   const rootPrefix = spec.root ? spec.root.replace(/\/?$/, '/') : '';
   const label = `${owner}/${repo}@${ref}`;
 
-  // 1. One CORS-enabled git-trees request → the full recursive path list.
+  // 1. Resolve the mutable ref once, then list the tree from that immutable
+  // commit. A tree SHA is useful source identity but is not a raw-file ref.
   onProgress?.({ stage: 'manifest', label, message: `Listing files in ${label}…` });
-  const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(
-    ref,
-  )}?recursive=1`;
+  const commitUrl = `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`;
+  let commitResp: Response;
+  try {
+    commitResp = await fetch(commitUrl);
+  } catch (e) {
+    throw new Error(
+      `Could not reach GitHub to resolve ${label} (${String(e)}). Check the network / that the repo and ref exist.`,
+    );
+  }
+  if (commitResp.status === 404) throw new Error(`GitHub repo or ref not found: ${label} (HTTP 404).`);
+  if (commitResp.status === 403) {
+    throw new Error(
+      `GitHub API rate limit or access denied resolving ${label} (HTTP 403). Try again later or use a different ref.`,
+    );
+  }
+  if (!commitResp.ok) throw new Error(`Resolving ${label} failed: HTTP ${commitResp.status}.`);
+  let commit: { sha?: string; commit?: { tree?: { sha?: string } } };
+  try {
+    commit = await commitResp.json();
+  } catch (e) {
+    throw new Error(`GitHub returned an unparseable commit for ${label}: ${String(e)}.`);
+  }
+  const commitSha = commit.sha;
+  const rootTreeSha = commit.commit?.tree?.sha;
+  if (
+    typeof commitSha !== 'string'
+    || !/^[0-9a-f]{40}$/.test(commitSha)
+    || typeof rootTreeSha !== 'string'
+    || !/^[0-9a-f]{40}$/.test(rootTreeSha)
+  ) {
+    throw new Error(`GitHub returned no immutable commit/tree identity for ${label}.`);
+  }
+  const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${rootTreeSha}?recursive=1`;
   let treeResp: Response;
   try {
     treeResp = await fetch(treeUrl);
@@ -138,7 +190,7 @@ export async function fetchGithubIgManifest(
     );
   }
   if (!treeResp.ok) throw new Error(`Listing ${label} failed: HTTP ${treeResp.status}.`);
-  let tree: { tree?: TreeEntry[]; truncated?: boolean };
+  let tree: { sha?: string; tree?: TreeEntry[]; truncated?: boolean };
   try {
     tree = await treeResp.json();
   } catch (e) {
@@ -148,6 +200,9 @@ export async function fetchGithubIgManifest(
     throw new Error(
       `The file list for ${label} was truncated by GitHub (repo too large for a single tree request).`,
     );
+  }
+  if (typeof tree.sha !== 'string' || !/^[0-9a-f]{40}$/.test(tree.sha)) {
+    throw new Error(`GitHub returned no immutable tree identity for ${label}.`);
   }
   const entries = (tree.tree ?? []).filter((e) => e.type === 'blob');
 
@@ -168,6 +223,20 @@ export async function fetchGithubIgManifest(
     );
   }
 
+  return { owner, repo, rootPrefix, label, commitSha, treeSha: tree.sha, textPaths, binaryPaths };
+}
+
+/** Fetch a GitHub-hosted IG's publisher-input files into an IgManifest. Throws a
+ * descriptive Error on any network/CORS/HTTP/parse failure and never resolves
+ * with a partial project. */
+export async function fetchGithubIgManifest(
+  spec: GithubIgSpec,
+  onProgress?: (ev: ProgressEvent) => void,
+  resolved?: GithubIgTree,
+): Promise<IgManifest> {
+  const tree = resolved ?? await resolveGithubIgTree(spec, onProgress);
+  const { owner, repo, rootPrefix, label, commitSha, treeSha, textPaths, binaryPaths } = tree;
+
   // 3. Fetch each file from raw.githubusercontent.com (CORS-ok, bounded pool).
   const files: Record<string, string> = {};
   const binaryFiles: Record<string, string> = {};
@@ -176,7 +245,7 @@ export async function fetchGithubIgManifest(
   let downloaded = 0;
   const downloadedByPath = new Map<string, number>();
   const rawUrl = (r: string) =>
-    `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${rootPrefix}${r
+    `https://raw.githubusercontent.com/${owner}/${repo}/${commitSha}/${`${rootPrefix}${r}`
       .split('/')
       .map(encodeURIComponent)
       .join('/')}`;
@@ -225,22 +294,55 @@ export async function fetchGithubIgManifest(
   const name =
     spec.name ?? nameFromConfig(files['sushi-config.yaml']) ?? `${owner}/${repo}`;
   const fileCount = Object.keys(files).length + Object.keys(binaryFiles).length;
-  return { name, fileCount, files, binaryFiles };
+  return {
+    name,
+    fileCount,
+    files,
+    binaryFiles,
+    sourceIdentity: githubSourceIdentity(treeSha, rootPrefix),
+  };
 }
 
-/** Fetch a GitHub-hosted IG and hydrate the store — the live twin of
- *  `loadProject`'s baked path. Errors propagate (open flow surfaces them). */
+/** Fetch a GitHub-hosted IG and install or reopen its project workspace — the
+ * live twin of `loadProject`'s baked path. Errors propagate to the open flow. */
 export async function loadGithubIg(
-  store: ProjectStore,
+  workspaces: WorkspaceRepository,
+  projectId: string,
   spec: GithubIgSpec,
   onProgress?: (ev: ProgressEvent) => void,
 ): Promise<DemoIgMeta> {
-  const manifest = await fetchGithubIgManifest(spec, onProgress);
+  const existing = await workspaces.open(projectId);
+  if (existing?.dirty) {
+    onProgress?.({
+      stage: 'project-cache-hit',
+      label: projectId,
+      message: `Reopening edited ${existing.name} working copy.`,
+      fromCache: true,
+      fileCount: existing.list().length,
+    });
+    return { name: existing.name, fileCount: existing.list().length, workspace: existing };
+  }
+  const tree = await resolveGithubIgTree(spec, onProgress);
+  const sourceIdentity = githubSourceIdentity(tree.treeSha, tree.rootPrefix);
+  if (existing?.sourceIdentity === sourceIdentity) {
+    return { name: existing.name, fileCount: existing.list().length, workspace: existing };
+  }
+  const manifest = await fetchGithubIgManifest(spec, onProgress, tree);
   const files: ProjectFile[] = Object.entries(manifest.files).map(([path, text]) => ({ path, text }));
   const binary: BinaryProjectFile[] = Object.entries(manifest.binaryFiles).map(([path, base64]) => ({
     path,
     base64,
   }));
-  await store.loadAll(files, binary);
-  return { name: manifest.name, fileCount: files.length + binary.length };
+  const installed = await workspaces.installSource({
+    projectId,
+    name: manifest.name,
+    sourceIdentity: manifest.sourceIdentity,
+    files,
+    binaryFiles: binary,
+  }, { replace: existing });
+  return {
+    name: installed.workspace.name,
+    fileCount: installed.workspace.list().length + installed.workspace.binaryFileCount,
+    workspace: installed.workspace,
+  };
 }

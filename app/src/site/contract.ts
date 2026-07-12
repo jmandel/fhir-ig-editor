@@ -12,15 +12,15 @@ export interface ContentRef {
   mediaType?: string;
 }
 
-export interface ProjectInput {
-  projectId: string;
-  config: string;
-  files: Record<string, string>;
-  predefined: Record<string, unknown>;
+export interface ProjectRevision {
+  readonly projectId: string;
+  readonly config: string;
+  readonly files: Readonly<Record<string, string>>;
+  readonly predefined: Readonly<Record<string, unknown>>;
   /** Exact authored site bytes accepted by Rust compileProject. Source binary
    * transport remains private to prepare; output bytes never use this shape. */
-  siteFiles: Record<string, string>;
-  buildEpochSecs: number;
+  readonly siteFiles: Readonly<Record<string, string>>;
+  readonly buildEpochSecs: number;
 }
 
 export type GeneratorSpec =

@@ -37,6 +37,55 @@ finalize(handle)                 -> SiteOutput
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
 
+## Architecture convergence checkpoint (2026-07-11)
+
+The target-neutral `crates/site_engine` crate now owns resolver-scoped package
+views, exact semantic compilation, complete PreparedGuide construction, Cycle
+projection, Publisher template/runtime/model/render/catalog preparation,
+bounded current+previous runtime retention, independent rendering, verified
+content reads, Publisher finalization, and typed Cycle external finalization.
+Runtime installation and PublisherRuntime construction are crate-private.
+`wasm_api` is a thin parse/transport facade (1,537 lines) over one typed
+`SiteEngine::prepare`; its duplicate preparation implementation is deleted.
+
+Publisher's closed SiteBuild now has a nonempty rooted artifact closure over
+the four semantic documents, six authored roles, materialized template tree,
+assembled runtime files with provenance/reads, exact source revision, and every
+locked package; every addressed byte is verified before handle installation.
+Fresh-process RenderState reconstruction from that closed build + ContentStore
+remains the next executor step and is not claimed by the current live handle.
+Independent gates: SiteEngine 13 pass/1 ignored, WASM 5+8, site-build 29,
+site-producer 16, Fig 17+4, render-page 8, workspace check, and wasm32 check.
+
+The fresh Pages-subpath browser receipt is
+`/tmp/fhir-site-engine-workspace-full-final.log` (`E2E GATE: PASS`) against
+engine `1fc84f51`. It caught and fixed two target/transport regressions before
+landing: Rust `Instant` is unsupported on this WASM target, so metrics now use a
+host-supplied monotonic clock; and parsed predefined JSON plus its exact raw
+authored bytes are one source channel. Authenticated immutable package/object
+bytes are shared and admitted once rather than re-hashed on every closure walk.
+Stock warm edit is 1,443 ms with 590 ms Rust prepare; the same run proves Tiny,
+Cycle, US Core 1,535/1,535 images + 85/85 assets, one-shell CarePlan, real mCODE,
+restart persistence, scroll 640 -> 640, and mobile geometry.
+
+The first deletion pass is complete: Fig's unused predecessor-bound revision
+promotion path, the orphaned `render_page::stock` collector, and the closed-CAS
+replay adapter were deleted (1,349 lines). Direct legacy staged-tree Fig
+render/watch still exist and must not be wrapped; migrate them to the completed
+`SiteEngine` four-operation flow, then delete `fig::engine`, `WatchState`,
+`watch_bench`, fragment/materialization commands, and their docs. Focused
+`site_engine` + `wasm_api` tests are green (2+39+5+8), as are the deletion
+pass's Fig 17/17 + envelope 4/4, render_page 8/8, and site_build 29/29 gates.
+
+The editor singleton project store is replaced by per-project `Workspace`
+ownership: mutable Workspace -> immutable captured ProjectRevision -> prepare.
+Transactional source generations, stale-replacement guards, one mutable owner,
+crash-readable edits, latest-open leases, and dirty offline reopen preserve
+A -> B -> A edits and avoid the measured 376.7 ms archive unpack plus 359.5 ms
+global-store rewrite. App gates are 77/77 (411 assertions), TypeScript, and the
+1,135-module production build. Cross-editor-tab mutation synchronization is not
+yet claimed; one editor instance is the workspace owner.
+
 ## Current performance slice (locally complete; dependency commits landed)
 
 Editor `6236511a` is pushed and deployed. Pages run `29175980426` passed the
@@ -48,8 +97,9 @@ Dependency landing for the completed performance slice:
 
 - engine `ef8e77ac` is pushed identically to `snapshot-gen` and `main`;
 - Cycle `9246180` is pushed to `main`; and
-- the editor integration commit pins both dependency commits; its push and
-  Pages receipt are still pending in this landing sequence.
+- editor `31466c4c` pins both dependency commits and is pushed to `main`;
+  Pages run `29179195857` passed build, Chromium closure, artifact upload, and
+  deploy, and the live WASM carried engine stamp `ef8e77a`.
 
 The performance work composes existing contracts only:
 
@@ -103,8 +153,7 @@ Explore 329, Preview 490 with no occlusion. App 66/66 (376 assertions), current
 WASM build, Pages-base production build (1,135 modules), Fig 18/18 + 4/4
 envelope, Cycle 239/239, typecheck, and focused native cache gates are green.
 The final US Core benchmark is `/tmp/uscore-perf-recent-compile.json`. The
-performance slice is complete and locally green; only the editor push and its
-Pages receipt remain.
+performance slice is complete, pushed, deployed, and live-verified.
 
 ## Current UX round
 

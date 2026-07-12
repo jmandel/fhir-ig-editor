@@ -1,8 +1,14 @@
 // Baked-project loader. The first-run authoring guide and the Cycle external-
 // builder fixture are exported to data/<id>/manifest.json; catalog IGs use the
-// authenticated source.tgz path below. Every route hydrates the same ProjectStore.
+// authenticated source.tgz path below. Every route installs or reopens one
+// project-scoped Workspace.
 
-import type { ProjectStore, ProjectFile, BinaryProjectFile } from './store';
+import {
+  type BinaryProjectFile,
+  type ProjectFile,
+  type Workspace,
+  WorkspaceRepository,
+} from './workspace';
 import type { ProgressEvent } from '../worker/protocol';
 import { loadGithubIg, type GithubIgSpec } from './githubIg';
 import igCatalog from '../igCatalog.json';
@@ -87,18 +93,29 @@ function parseSourceDescriptor(value: unknown, ig: CatalogIg): CatalogSourceDesc
 }
 
 /** Load a CI-baked IG from its same-origin gzipped source archive
- *  (`data/<id>/source.tgz`): fetch → gunzip → untar → hydrate the store. */
+ * (`data/<id>/source.tgz`): fetch -> gunzip -> untar -> transactional install. */
 async function loadTgzProject(
-  store: ProjectStore,
+  workspaces: WorkspaceRepository,
   ig: CatalogIg,
   onProgress?: (ev: ProgressEvent) => void,
 ): Promise<DemoIgMeta> {
   const descriptorStarted = performance.now();
+  const existing = await workspaces.open(ig.id);
+  if (existing?.dirty) {
+    onProgress?.({
+      stage: 'project-cache-hit',
+      label: ig.id,
+      message: `Reopening edited ${existing.name} working copy.`,
+      fromCache: true,
+      fileCount: existing.list().length,
+    });
+    return { name: existing.name, fileCount: existing.list().length, workspace: existing };
+  }
   const descriptorResponse = await fetch(`${BASE}data/${ig.id}/source.json`);
   if (!descriptorResponse.ok) throw new Error(`fetch ${ig.id} source descriptor -> ${descriptorResponse.status}`);
   const descriptor = parseSourceDescriptor(await descriptorResponse.json(), ig);
   const identity = `catalog-source-sha256:${descriptor.sha256}`;
-  if (store.hasSource(identity)) {
+  if (existing?.sourceIdentity === identity) {
     onProgress?.({
       stage: 'project-cache-hit',
       label: ig.id,
@@ -108,7 +125,7 @@ async function loadTgzProject(
       inputBytes: descriptor.bytes,
       fileCount: descriptor.files,
     });
-    return { name: ig.name, fileCount: descriptor.files };
+    return { name: existing.name || ig.name, fileCount: existing.list().length, workspace: existing };
   }
 
   onProgress?.({
@@ -169,17 +186,30 @@ async function loadTgzProject(
   });
 
   onProgress?.({ stage: 'project-store', label: ig.id, message: `Storing ${ig.name} project files…` });
-  const stored = await store.loadAll(files, binary, identity);
+  const stored = await workspaces.installSource({
+    projectId: ig.id,
+    name: ig.name,
+    sourceIdentity: identity,
+    files,
+    binaryFiles: binary,
+  }, { replace: existing });
   onProgress?.({
-    stage: 'project-store',
+    stage: stored.installed ? 'project-store' : 'project-cache-hit',
     label: ig.id,
-    message: `Stored ${ig.name} project files.`,
+    message: stored.installed
+      ? `Stored ${ig.name} project files.`
+      : `Kept edited ${stored.workspace.name} working copy.`,
+    fromCache: !stored.installed,
     durationMs: stored.durationMs,
     inputBytes: stored.storedBytes,
     outputBytes: stored.storedBytes,
     fileCount: stored.textFiles + stored.binaryFiles,
   });
-  return { name: ig.name, fileCount: files.length + binary.length };
+  return {
+    name: stored.workspace.name,
+    fileCount: stored.workspace.list().length + stored.workspace.binaryFileCount,
+    workspace: stored.workspace,
+  };
 }
 
 /** A featured/openable project whose SOURCE is fetched live from a GitHub repo
@@ -202,13 +232,14 @@ interface IgManifest {
 export interface DemoIgMeta {
   name: string;
   fileCount: number;
+  workspace: Workspace;
 }
 
 /** Load a baked project by id (`data/<id>/manifest.json`). The optional
  *  `onProgress` surfaces the manifest fetch (with byte count when the response
  *  carries Content-Length) so the project-open overlay reads as alive. */
 export async function loadProject(
-  store: ProjectStore,
+  workspaces: WorkspaceRepository,
   projectId: string,
   onProgress?: (ev: ProgressEvent) => void,
 ): Promise<DemoIgMeta> {
@@ -217,10 +248,21 @@ export async function loadProject(
   // not pre-baked); everything else is a baked data/<id>/manifest.json fetch
   // (the tiny guide and Cycle fixture).
   const cat = CATALOG_BY_ID[projectId];
-  if (cat) return loadTgzProject(store, cat, onProgress);
+  if (cat) return loadTgzProject(workspaces, cat, onProgress);
   const gh = GITHUB_PROJECTS[projectId];
-  if (gh) return loadGithubIg(store, gh, onProgress);
+  if (gh) return loadGithubIg(workspaces, projectId, gh, onProgress);
 
+  const existing = await workspaces.open(projectId);
+  if (existing?.dirty) {
+    onProgress?.({
+      stage: 'project-cache-hit',
+      label: projectId,
+      message: `Reopening edited ${existing.name} working copy.`,
+      fromCache: true,
+      fileCount: existing.list().length,
+    });
+    return { name: existing.name, fileCount: existing.list().length, workspace: existing };
+  }
   const resp = await fetch(`${BASE}data/${projectId}/manifest.json`);
   if (!resp.ok) throw new Error(`fetch ${projectId} manifest -> ${resp.status}`);
   const len = Number(resp.headers.get('content-length')) || 0;
@@ -240,7 +282,18 @@ export async function loadProject(
       message: `Downloading ${projectId} project files…`,
     });
   }, len || undefined);
+  const sourceIdentity = `baked-manifest-sha256:${await sha256Hex(manifestBytes)}`;
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as IgManifest;
+  if (existing?.sourceIdentity === sourceIdentity) {
+    onProgress?.({
+      stage: 'project-cache-hit',
+      label: projectId,
+      message: `Reusing unchanged ${existing.name} project files.`,
+      fromCache: true,
+      fileCount: existing.list().length,
+    });
+    return { name: existing.name, fileCount: existing.list().length, workspace: existing };
+  }
   const files: ProjectFile[] = Object.entries(manifest.files).map(([path, text]) => ({
     path,
     text,
@@ -248,6 +301,16 @@ export async function loadProject(
   const binary: BinaryProjectFile[] = Object.entries(manifest.binaryFiles ?? {}).map(
     ([path, base64]) => ({ path, base64 }),
   );
-  await store.loadAll(files, binary);
-  return { name: manifest.name, fileCount: files.length + binary.length };
+  const installed = await workspaces.installSource({
+    projectId,
+    name: manifest.name,
+    sourceIdentity,
+    files,
+    binaryFiles: binary,
+  }, { replace: existing });
+  return {
+    name: installed.workspace.name,
+    fileCount: installed.workspace.list().length + installed.workspace.binaryFileCount,
+    workspace: installed.workspace,
+  };
 }

@@ -31,7 +31,7 @@ import type {
   ContentRef,
   OutputCatalog,
   OutputDescriptor,
-  ProjectInput,
+  ProjectRevision,
   RenderedOutput,
   RustPrepareMetrics,
   SiteOutput,
@@ -76,6 +76,17 @@ type WasmModule = {
 
 let session: WasmSession | null = null;
 let wasmMod: WasmModule | null = null;
+
+// console_error_panic_hook reports the useful Rust panic text to this worker's
+// console before wasm aborts with an otherwise opaque `RuntimeError: unreachable`.
+// Preserve that request-local text so the ordinary typed error reply can expose
+// it to the UI and browser gate.
+const workerConsoleError = console.error.bind(console);
+let lastWorkerConsoleError = '';
+console.error = (...args: unknown[]) => {
+  lastWorkerConsoleError = args.map((value) => String(value)).join(' ');
+  workerConsoleError(...args);
+};
 
 async function ensureSession(): Promise<WasmSession> {
   if (session) return session;
@@ -231,7 +242,7 @@ function publicCycleDescriptor(
   };
 }
 
-async function compileProject(session: WasmSession, project: ProjectInput): Promise<CompileResult> {
+async function compileProject(session: WasmSession, project: ProjectRevision): Promise<CompileResult> {
   const started = performance.now();
   const result = unwrap<Record<string, unknown>>(session.compileProject(
     JSON.stringify(project.files),
@@ -636,6 +647,7 @@ const handlers: Handlers = {
 
 async function handleRequest(msg: WorkerRequest): Promise<void> {
   const reply = (r: WorkerReply) => (self as unknown as Worker).postMessage(r);
+  lastWorkerConsoleError = '';
   try {
     const handler = handlers[msg.op] as (...args: unknown[]) => Promise<unknown>;
     if (!handler) throw new Error(`unknown op: ${msg.op}`);
@@ -647,7 +659,15 @@ async function handleRequest(msg: WorkerRequest): Promise<void> {
         ? { operation: 'prepare' as const, stage: 'site' as const, compiled: err.compiled! }
         : { operation: 'prepare' as const, stage: 'compile' as const }
       : undefined;
-    reply({ id: msg.id, ok: false, error: String(e2?.stack ?? e2), ...(detail ? { detail } : {}) });
+    const consoleContext = lastWorkerConsoleError
+      ? `\nWorker console: ${lastWorkerConsoleError}`
+      : '';
+    reply({
+      id: msg.id,
+      ok: false,
+      error: `${String(e2?.stack ?? e2)}${consoleContext}`,
+      ...(detail ? { detail } : {}),
+    });
   }
 }
 

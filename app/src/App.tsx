@@ -5,10 +5,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { EngineClient, PrepareError } from './worker/client';
 import type { BlockedPackage } from './worker/client';
-import { ProjectStore } from './vfs/store';
+import {
+  type Workspace,
+  type WorkspaceCapture,
+  WorkspaceRepository,
+} from './vfs/workspace';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
-import type { GeneratorSpec, OutputDescriptor, ProjectInput } from './site/contract';
+import type { GeneratorSpec, OutputDescriptor } from './site/contract';
 import {
   ensurePreviewServiceWorker,
   wirePreviewResponder,
@@ -62,10 +66,6 @@ import { presentProgress } from './progressPresentation';
 
 const DEBOUNCE_MS = 300;
 
-interface ProjectBuildSnapshot extends ProjectInput {
-  predefinedDisplay: CompileResult['resources'];
-}
-
 interface BuildOutcome {
   ok: boolean;
   error?: string;
@@ -82,19 +82,6 @@ function generatorSpec(id: string, templateCoordinate: string): GeneratorSpec {
       };
 }
 
-function captureProject(st: ProjectStore, projectId: string): ProjectBuildSnapshot {
-  return {
-    projectId,
-    config: st.config(),
-    files: st.fshFiles(),
-    predefined: st.predefinedResources(),
-    predefinedDisplay: st.predefinedDisplayResources(),
-    siteFiles: st.siteFiles(),
-    // A fixed injected timestamp keeps rebuilds deterministic.
-    buildEpochSecs: 1700000000,
-  };
-}
-
 function projectDisplayName(projectId: string): string {
   if (projectId === TINY_PROJECT_ID) return 'The Guide That Describes Its Editor';
   if (projectId === 'cycle') return 'Period Tracking Implementation Guide';
@@ -107,6 +94,13 @@ function defaultGeneratorFor(projectId: string): string {
 
 function initialWorkspaceFor(projectId: string): WorkspaceMode {
   return projectId === TINY_PROJECT_ID || projectId === 'cycle' ? 'author' : 'explore';
+}
+
+function initialSourcePath(workspace: Workspace): string | null {
+  return workspace.list().find((path) => path.endsWith('.fsh'))
+    ?? workspace.list().find((path) => /^input\/pagecontent\/.*\.md$/.test(path))
+    ?? workspace.list()[0]
+    ?? null;
 }
 
 /** Machine-readable trace consumed by the persistent-profile benchmark. */
@@ -122,8 +116,10 @@ export function App() {
   // Engine work is serialized; leases prevent obsolete immutable build handles
   // from publishing UI or Service Worker generations.
   const buildQueueRef = useRef(new LatestTaskQueue());
-  const [store, setStore] = useState<ProjectStore | null>(null);
-  const storeRef = useRef<ProjectStore | null>(null);
+  const openRequestRef = useRef(0);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRepository | null>(null);
+  const [projectWorkspace, setProjectWorkspace] = useState<Workspace | null>(null);
+  const projectWorkspaceRef = useRef<Workspace | null>(null);
   const projectIdRef = useRef<string>(localStorage.getItem(PROJECT_KEY) || TINY_PROJECT_ID);
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
@@ -220,7 +216,7 @@ export function App() {
     [compile, predefinedResources],
   );
 
-  // ---- boot: engine + store ------------------------------------------------
+  // ---- boot: engine + project-scoped workspaces ----------------------------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -235,19 +231,19 @@ export function App() {
       void ensurePreviewServiceWorker().then((ok) => {
         if (!cancelled) setPreviewCapable(ok);
       });
-      const st = await ProjectStore.create();
+      const repository = await WorkspaceRepository.create();
+      const workspace = await repository.open(projectIdRef.current);
       if (cancelled) return;
-      setStore(st);
-      storeRef.current = st;
-      st.listeners.add(() => setPaths(st.list()));
-      setPaths(st.list());
+      setWorkspaces(repository);
+      setProjectWorkspace(workspace);
+      projectWorkspaceRef.current = workspace;
 
       // The preview host survives editor/worker restarts. Restore its validated
       // immutable pointer immediately so a persisted project can display the
       // last verified response while exact package resolution + prepare run.
       // This remains explicitly stale: only the successor prepare/publication
       // below can establish that today's closed input identity is unchanged.
-      if (st.list().length > 0) {
+      if (workspace) {
         void restorePersistedPreviewSource(projectIdRef.current).then((publication) => {
           if (cancelled || !publication || projectIdRef.current !== publication.source.igId) return;
           const pages = publication.source.catalog.outputs.filter((output) => output.kind === 'page');
@@ -279,10 +275,15 @@ export function App() {
       setStatus(`Engine ready — mounted ${res.mounted} packages.`);
 
       // If OPFS already has a project (reload), compile it immediately.
-      if (st.list().length > 0) {
+      if (workspace) {
         setProjectLoaded(true);
-        setProjectName(projectDisplayName(projectIdRef.current));
-        void runCompile(st, engine);
+        setProjectName(workspace.name || projectDisplayName(projectIdRef.current));
+        const first = initialSourcePath(workspace);
+        if (first) {
+          setActivePath(first);
+          setActiveText(workspace.read(first) ?? '');
+        }
+        void runCompile(workspace, engine);
       }
     })();
     return () => {
@@ -290,6 +291,19 @@ export function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!projectWorkspace) {
+      setPaths([]);
+      return;
+    }
+    const update = () => setPaths(projectWorkspace.list());
+    projectWorkspace.listeners.add(update);
+    update();
+    return () => {
+      projectWorkspace.listeners.delete(update);
+    };
+  }, [projectWorkspace]);
 
   // ---- template catalogs (#40 default UX): load the curated families' live
   // version lists on boot (registry → OPFS/TTL/last-known-good/pinned fallback).
@@ -326,12 +340,13 @@ export function App() {
 
   // ---- one project crossing -> immutable BuildHandle -> atomic publication --
   const performBuildSite = useCallback(async (
-    project: ProjectBuildSnapshot,
+    capture: WorkspaceCapture,
     engine: EngineClient,
     genId: string,
     selectedTemplate: string,
     lease: TaskLease,
   ) => {
+    const project = capture.revision;
     const report = (ev: ProgressEvent) => {
       if (!lease.isLatest()) return;
       recordRuntimeMetric(ev);
@@ -345,8 +360,8 @@ export function App() {
     const showCompiled = (compiled: CompileResult) => {
       if (!lease.isLatest()) return;
       setCompile(compiled);
-      setPredefinedResources(project.predefinedDisplay);
-      const allResources = mergeResourcesByIdentity(compiled.resources, project.predefinedDisplay);
+      setPredefinedResources(capture.predefinedDisplay);
+      const allResources = mergeResourcesByIdentity(compiled.resources, capture.predefinedDisplay);
       setSelectedResource((current) => {
         if (current && allResources.some((resource) => resourceIdentity(resource) === current)) return current;
         // Prefer the exact artifact declared by the first authored FSH file.
@@ -430,16 +445,17 @@ export function App() {
   }, []);
 
   const enqueueSiteBuild = useCallback(async (
-    st: ProjectStore,
+    workspace: Workspace,
     engine: EngineClient,
     genId: string,
   ) => {
-    const project = captureProject(st, projectIdRef.current);
+    const capture = workspace.capture(1700000000);
+    const project = capture.revision;
     const selectedTemplate = project.projectId === TINY_PROJECT_ID
       ? tinyTemplateRef.current
       : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     await buildQueueRef.current.enqueue((lease) =>
-      performBuildSite(project, engine, genId, selectedTemplate, lease),
+      performBuildSite(capture, engine, genId, selectedTemplate, lease),
     );
   }, [performBuildSite]);
 
@@ -448,8 +464,8 @@ export function App() {
     localStorage.setItem(GENERATOR_KEY, id);
     setGeneratorId(id);
     setPreviewStale(true);
-    if (storeRef.current && engineRef.current) {
-      void enqueueSiteBuild(storeRef.current, engineRef.current, id).catch(() => {});
+    if (projectWorkspaceRef.current && engineRef.current) {
+      void enqueueSiteBuild(projectWorkspaceRef.current, engineRef.current, id).catch(() => {});
     }
   }, [enqueueSiteBuild]);
 
@@ -469,34 +485,35 @@ export function App() {
     setTemplateCoord(coord);
     setTemplateError(null);
     setPreviewStale(true);
-    if (!storeRef.current || !engineRef.current) return;
-    void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch((e) => {
+    if (!projectWorkspaceRef.current || !engineRef.current) return;
+    void enqueueSiteBuild(projectWorkspaceRef.current, engineRef.current, PUBLISHER_GENERATOR).catch((e) => {
       // Revert to the last template that loaded — never leave the preview wedged.
       setTemplateError(String(e).replace(/^Error:\s*/, ''));
       if (tiny) tinyTemplateRef.current = previous;
       else localStorage.setItem(TEMPLATE_KEY, previous);
       setTemplateCoord(previous);
-      if (previous !== coord && storeRef.current && engineRef.current) {
-        void enqueueSiteBuild(storeRef.current, engineRef.current, PUBLISHER_GENERATOR).catch(() => {});
+      if (previous !== coord && projectWorkspaceRef.current && engineRef.current) {
+        void enqueueSiteBuild(projectWorkspaceRef.current, engineRef.current, PUBLISHER_GENERATOR).catch(() => {});
       }
     });
   }, [enqueueSiteBuild]);
 
   // ---- prepare full project + selected generator in one worker request ------
-  const runCompile = useCallback(async (st: ProjectStore, engine: EngineClient): Promise<BuildOutcome> => {
+  const runCompile = useCallback(async (workspace: Workspace, engine: EngineClient): Promise<BuildOutcome> => {
     if (!engine.initialized) return { ok: false, error: 'engine is not initialized' };
     // Snapshot before entering the queue: loading another IG or typing while an
     // older wasm operation finishes cannot change this request's inputs midway.
-    const project = captureProject(st, projectIdRef.current);
-    const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(projectIdRef.current);
+    const capture = workspace.capture(1700000000);
+    const project = capture.revision;
+    const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(project.projectId);
     const selectedTemplate = project.projectId === TINY_PROJECT_ID
       ? tinyTemplateRef.current
       : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     let failure: unknown = null;
-    await buildQueueRef.current.enqueue(async (lease) => {
+    const outcome = await buildQueueRef.current.enqueue(async (lease) => {
       if (lease.isLatest()) setCompiling(true);
       try {
-        await performBuildSite(project, engine, genId, selectedTemplate, lease);
+        await performBuildSite(capture, engine, genId, selectedTemplate, lease);
         if (lease.isLatest()) setBlockedPackages([]);
       } catch (e) {
         failure = e;
@@ -510,36 +527,41 @@ export function App() {
           });
         }
       } finally {
-        setCompiling(false);
+        if (lease.isLatest()) setCompiling(false);
       }
     });
+    if (!outcome.latest) return { ok: false, error: 'build superseded by a newer request' };
     return failure == null ? { ok: true } : { ok: false, error: String(failure) };
   }, [performBuildSite]);
 
   // ---- debounced compile on edit ------------------------------------------
   const debounceRef = useRef<number | null>(null);
   const scheduleCompile = useCallback(() => {
-    if (!store || !engineRef.current) return;
+    if (!projectWorkspace || !engineRef.current) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    const editedWorkspace = projectWorkspace;
     debounceRef.current = window.setTimeout(() => {
-      void runCompile(store, engineRef.current!);
+      debounceRef.current = null;
+      if (projectWorkspaceRef.current !== editedWorkspace) return;
+      void runCompile(editedWorkspace, engineRef.current!);
     }, DEBOUNCE_MS);
-  }, [store, runCompile]);
+  }, [projectWorkspace, runCompile]);
 
   // ---- open a baked project -------------------------------------------------
   const openProject = useCallback(async (projectId: string) => {
-    if (!store) return;
+    if (!workspaces) return;
+    const requestId = ++openRequestRef.current;
     const engine = engineRef.current;
-    // Supersede a compile/site build immediately, before the potentially slow
-    // catalog fetch mutates the shared ProjectStore.
+    // Supersede current work immediately. Source acquisition targets an
+    // inactive project workspace, so the current working copy stays coherent
+    // if fetch/verification/import fails.
     buildQueueRef.current.invalidate();
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    setCompiling(false);
     setSiteBuilding(false);
-    setProjectLoaded(false);
-    setCompile(null);
-    setPredefinedResources([]);
-    setSelectedResource(null);
-    setPreviewStale(false);
-    if (siteIgId !== projectId) setSitePages(null);
     // Surface the SAME staged progress the boot path shows for the whole open:
     // manifest fetch → package acquisition (bundle fetch/mount) → compile →
     // site render. Every stage flows through `setProgress`;
@@ -549,92 +571,107 @@ export function App() {
     setOpeningSince(Date.now());
     setOpenError(null); // clear any prior failure the moment a new open starts
     const emit = (ev: ProgressEvent) => {
+      if (openRequestRef.current !== requestId) return;
       recordRuntimeMetric(ev);
       setProgress(ev);
       setStatus(ev.message);
     };
     emit({ stage: 'manifest', message: `Loading ${projectId} project files…` });
-    engine?.setProgress(emit);
-    localStorage.setItem(PROJECT_KEY, projectId);
-    projectIdRef.current = projectId;
-    // The teaching guide starts from one exact standard-HL7 template without
-    // overwriting the user's remembered template preference for other guides.
-    if (projectId === TINY_PROJECT_ID) {
-      tinyTemplateRef.current = DEFAULT_TEMPLATE;
-      setTemplateCoord(DEFAULT_TEMPLATE);
-      setTemplateError(null);
-    } else {
-      setTemplateCoord(localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE);
-    }
-    // The `cycle` generator is bespoke to its external-builder fixture; every other IG (the
-    // catalog / published IGs) renders with the Publisher generator. Default
-    // the preview generator per project so a published IG never opens with the
-    // Cycle-specific generator selected.
-    const defaultGen = defaultGeneratorFor(projectId);
-    const initialMode = initialWorkspaceFor(projectId);
-    setActivatedModes(new Set([initialMode]));
-    setWorkspaceMode(initialMode);
-    localStorage.setItem(GENERATOR_KEY, defaultGen);
-    setGeneratorId(defaultGen);
     try {
-      const meta = await loadProject(store, projectId, emit);
+      const meta = await loadProject(workspaces, projectId, emit);
+      if (openRequestRef.current !== requestId) return;
+      // The previous project remains editable while source acquisition runs.
+      // Cancel an edit timer created during that interval before swapping owners;
+      // its callback also checks owner identity as a final stale-work guard.
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+      const nextWorkspace = meta.workspace;
+      // Publish the active workspace pointer only after its complete generation
+      // exists. A failed source import never makes localStorage disagree with
+      // the working tree restored on the next boot.
+      localStorage.setItem(PROJECT_KEY, projectId);
+      projectIdRef.current = projectId;
+      projectWorkspaceRef.current = nextWorkspace;
+      setProjectWorkspace(nextWorkspace);
+      setCompile(null);
+      setPredefinedResources([]);
+      setSelectedResource(null);
+      setPreviewStale(false);
+      if (siteIgId !== projectId) setSitePages(null);
+      // The teaching guide starts from one exact standard-HL7 template without
+      // overwriting the user's remembered template preference for other guides.
+      if (projectId === TINY_PROJECT_ID) {
+        tinyTemplateRef.current = DEFAULT_TEMPLATE;
+        setTemplateCoord(DEFAULT_TEMPLATE);
+        setTemplateError(null);
+      } else {
+        setTemplateCoord(localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE);
+      }
+      const defaultGen = defaultGeneratorFor(projectId);
+      const initialMode = initialWorkspaceFor(projectId);
+      setActivatedModes(new Set([initialMode]));
+      setWorkspaceMode(initialMode);
+      localStorage.setItem(GENERATOR_KEY, defaultGen);
+      setGeneratorId(defaultGen);
       setProjectName(meta.name || projectDisplayName(projectId));
       setProjectLoaded(true);
       emit({ stage: 'bundle-mount', message: `Loaded ${meta.name} — ${meta.fileCount} files. Compiling…` });
       // Open the first FSH file (or first pagecontent md for FSH-less projects).
-      const first =
-        store.list().find((p) => p.endsWith('.fsh')) ??
-        store.list().find((p) => /^input\/pagecontent\/.*\.md$/.test(p)) ??
-        store.list()[0] ??
-        null;
+      const first = initialSourcePath(nextWorkspace);
       if (first) {
         setActivePath(first);
-        setActiveText(store.read(first) ?? '');
+        setActiveText(nextWorkspace.read(first) ?? '');
       }
       // runCompile drives acquisition (bundle fetch/mount), compile, and the site
       // render — all of which report through the engine progress cb we
       // set above. Await it so the overlay stays up until the project is usable.
       if (engine) {
-        const outcome = await runCompile(store, engine);
+        const outcome = await runCompile(nextWorkspace, engine);
+        if (openRequestRef.current !== requestId) return;
         if (!outcome.ok) throw new Error(outcome.error ?? 'build failed');
       }
       emit({ stage: 'ready', message: `${meta.name} ready.` });
     } catch (e) {
+      if (openRequestRef.current !== requestId) return;
       // Surface the failure VISIBLY (persistent banner) — a fetch/CORS/HTTP/parse
       // error must never be a silent dead click (the exact US Core 404 bug).
       const message = String(e).replace(/^Error:\s*/, '');
       setStatus(`Failed to open ${projectId}: ${message}`);
       setOpenError({ projectId, message });
     } finally {
-      engine?.setProgress(null);
-      setOpeningSince(null);
+      if (openRequestRef.current === requestId) {
+        engine?.setProgress(null);
+        setOpeningSince(null);
+      }
     }
-  }, [store, runCompile, siteIgId]);
+  }, [workspaces, runCompile, siteIgId]);
   const openDemo = useCallback(() => openProject(TINY_PROJECT_ID), [openProject]);
 
   // ---- edit handling -------------------------------------------------------
   const onEdit = useCallback(
     (text: string) => {
-      if (!store || !activePath) return;
+      if (!projectWorkspace || !activePath) return;
       setActiveText(text);
-      void store.write(activePath, text);
+      void projectWorkspace.write(activePath, text);
       setPreviewStale(true);
       scheduleCompile();
     },
-    [store, activePath, scheduleCompile],
+    [projectWorkspace, activePath, scheduleCompile],
   );
 
   const selectFile = useCallback(
     (path: string) => {
-      if (!store) return;
+      if (!projectWorkspace) return;
       setActivePath(path);
-      setActiveText(store.read(path) ?? '');
+      setActiveText(projectWorkspace.read(path) ?? '');
       setRevealLine(undefined);
       const declared = soleResourceDeclaredIn(resources, path);
       setSelectedResource(declared ? resourceIdentity(declared) : null);
       activateWorkspace('author');
     },
-    [store, resources, activateWorkspace],
+    [projectWorkspace, resources, activateWorkspace],
   );
 
   const navigateTo = useCallback(
@@ -703,7 +740,7 @@ export function App() {
         </div>
         {projectLoaded && <span className="topbar-project">{projectName}</span>}
         <div className="topbar-actions">
-          {store && !store.persistent && (
+          {workspaces && !workspaces.persistent && (
             <span className="badge-warn" title="OPFS unavailable — project is in-memory only">
               in-memory
             </span>
@@ -731,7 +768,7 @@ export function App() {
                 onChange={() => setSettingsVersion((value) => value + 1)}
                 onDropTgz={async (bytes) => {
                   const label = (await engineRef.current?.ingestLocalTgz(bytes)) ?? '';
-                  if (store && engineRef.current) void runCompile(store, engineRef.current);
+                  if (projectWorkspace && engineRef.current) void runCompile(projectWorkspace, engineRef.current);
                   return label;
                 }}
               />
@@ -866,9 +903,9 @@ export function App() {
             resource={activeResource}
             page={selectedResourcePage}
             onOpenSource={() => {
-              if (!activeResource?.definition || !store) return;
+              if (!activeResource?.definition || !projectWorkspace) return;
               setActivePath(activeResource.definition.path);
-              setActiveText(store.read(activeResource.definition.path) ?? '');
+              setActiveText(projectWorkspace.read(activeResource.definition.path) ?? '');
               setRevealLine(activeResource.definition.line);
               activateWorkspace('author');
             }}
