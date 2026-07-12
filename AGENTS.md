@@ -72,7 +72,11 @@ geometry. Fresh-process native Publisher also passes at
 `so1-sha256:eb61f833...` receipt. Engine implementation `e0d3a217` plus its
 certification-only handoff commit `bfcb9903` are pushed identically to
 `snapshot-gen` and `main`; Cycle `70231bd` is pushed to `main`. Editor
-commit/push and Pages/live certification remain.
+`5476bea` pins both and is pushed to `main`. Pages run `29201262281` passed the
+engine/native/package/Cycle/app/build gates, complete fresh-profile Chromium
+closure, artifact upload, and deploy. The live origin serves app
+`assets/index-Dq4nSwVK.js`, worker `assets/engine.worker-D8QfEkFa.js`, preview
+Service Worker protocol 5, and the `bfcb990`-expected 5,653,630-byte WASM.
 
 The same app patch adds exact diagnostic owner navigation through source,
 definition, and published consequence; one truthful build status; page-owned
