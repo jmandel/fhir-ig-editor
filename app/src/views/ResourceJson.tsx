@@ -3,12 +3,12 @@
 
 import Editor from '@monaco-editor/react';
 import { configureMonaco } from '../editor/monacoSetup';
-import type { CompiledResource } from '../worker/protocol';
+import type { ResourceView } from './resourceView';
 import { resourceIdentity } from './artifactSelection';
 
 configureMonaco();
 
-export function ResourceJson({ resource }: { resource: CompiledResource }) {
+export function ResourceJson({ resource }: { resource: ResourceView }) {
   return (
     <Editor
       path={`__view__/${encodeURIComponent(resourceIdentity(resource))}.json`}

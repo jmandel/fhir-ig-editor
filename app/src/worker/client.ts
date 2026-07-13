@@ -13,6 +13,7 @@ declare const __ENGINE_RECIPE__: string | undefined;
 
 import EngineWorker from './engine.worker?worker';
 import type {
+  BuildError,
   BundleSpec,
   CompileResult,
   EngineOps,
@@ -21,22 +22,22 @@ import type {
   MountResult,
   Op,
   PackageMountInput,
-  ProgressEvent,
+  PrepareTransportResult,
+  BuildEvent,
   ResolutionStep,
   SnapshotResult,
   TemplateResolution,
   VersionIndex,
   WorkerReply,
 } from './protocol';
+import type { Build } from '../site/contract';
 import type {
-  BuildHandle,
+  ContentRef,
   GeneratorSpec,
   OutputCatalog,
-  PrepareResult,
   ProjectRevision,
-  RenderedOutput,
   SiteOutput,
-} from '../site/contract';
+} from '../site/contract.generated';
 import type { ResolveOutcome } from './packageResolver';
 import { assertCompatibleEngineCommit } from './engineVersion';
 import {
@@ -49,22 +50,77 @@ import { ResolutionCache } from './resolutionCache';
 import { getPackageProxy, getRegistries } from '../vfs/packageSettings';
 export type { BlockedPackage, ResolveOutcome } from './packageResolver';
 
-/** A failed atomic prepare. A successful compile is retained as presentation
- * metadata when only the selected site generator failed afterward. */
-export class PrepareError extends Error {
+class ImmutableBuild implements Build {
+  private readonly buildId: string;
+  readonly compilation: CompileResult;
+
   constructor(
-    message: string,
-    readonly stage: 'compile' | 'site',
-    readonly compiled?: CompileResult,
+    prepared: PrepareTransportResult,
+    private readonly outputOperation: () => Promise<OutputCatalog>,
+    private readonly renderOperation: (path: string) => Promise<ContentRef>,
+    private readonly finalizeOperation: () => Promise<SiteOutput>,
+    private readonly report: ProgressCb | null,
   ) {
-    super(message);
-    this.name = 'PrepareError';
+    this.buildId = prepared.buildId;
+    this.compilation = prepared.compiled;
+    Object.freeze(this);
+  }
+
+  async outputs(): Promise<OutputCatalog> {
+    const started = performance.now();
+    const catalog = await this.outputOperation();
+    this.report?.({
+      operation: 'outputs',
+      buildId: this.buildId,
+      stage: 'site-build',
+      message: `Listed ${catalog.outputs.length} outputs.`,
+      durationMs: performance.now() - started,
+      fileCount: catalog.outputs.length,
+    });
+    return catalog;
+  }
+
+  async render(path: string): Promise<ContentRef> {
+    const started = performance.now();
+    const content = await this.renderOperation(path);
+    this.report?.({
+      operation: 'render',
+      buildId: this.buildId,
+      stage: 'site-build',
+      label: path,
+      message: `Rendered ${path}.`,
+      durationMs: performance.now() - started,
+      outputBytes: content.byteLength,
+    });
+    return content;
+  }
+
+  async finalize(): Promise<SiteOutput> {
+    const started = performance.now();
+    const output = await this.finalizeOperation();
+    this.report?.({
+      operation: 'finalize',
+      buildId: this.buildId,
+      stage: 'site-build',
+      message: `Finalized ${output.files.length} outputs.`,
+      durationMs: performance.now() - started,
+      fileCount: output.files.length,
+    });
+    return output;
+  }
+}
+
+/** Typed failure from any Build lifecycle or functional operation. */
+export class BuildFailure extends Error {
+  constructor(readonly detail: BuildError<CompileResult>) {
+    super(detail.message);
+    this.name = 'BuildFailure';
   }
 }
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 
-export type ProgressCb = (ev: ProgressEvent) => void;
+export type ProgressCb = (ev: BuildEvent) => void;
 
 const MAX_RETAINED_CYCLE_SUCCESSOR_FILES = 128;
 const MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS = 16 * 1024 * 1024;
@@ -73,14 +129,14 @@ const MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS = 16 * 1024 * 1024;
  * editable project id. It exists only to exercise the certified lightweight
  * external-builder A -> B -> A path beside one retained Publisher runtime. */
 function isBoundedCycleSuccessor(project: ProjectRevision, spec: GeneratorSpec): boolean {
-  if (project.projectId !== 'cycle' || spec.generator !== 'cycle') return false;
+  if (spec.generator !== 'cycle') return false;
   const values = [
     project.config,
-    ...Object.values(project.files),
+    ...Object.values(project.fsh),
     ...Object.values(project.siteFiles),
     JSON.stringify(project.predefined) ?? '',
   ];
-  const fileCount = Object.keys(project.files).length
+  const fileCount = Object.keys(project.fsh).length
     + Object.keys(project.siteFiles).length
     + Object.keys(project.predefined).length;
   return fileCount <= MAX_RETAINED_CYCLE_SUCCESSOR_FILES
@@ -93,6 +149,7 @@ export class EngineClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private snapshotCache = new Map<string, SnapshotResult>();
+  private builds = new Map<string, Build>();
   /** One resolver-loop outcome bound to exact config bytes and the current
    * package-mount generation. Rust invalidates its fixpoint on a fresh mount;
    * the host mirrors that law here. */
@@ -110,7 +167,6 @@ export class EngineClient {
    * current Worker session has already mounted. */
   private mountedLabels = new Set<string>();
   private preparedFallbacks = new Map<string, () => Promise<PackageMountInput>>();
-  private progressCb: ProgressCb | null = null;
   /** The mounted engine's commit, checked against the app's expected commit so
    * stale app/engine mixes fail clearly. Captured on init. */
   private engineCommit = 'unknown';
@@ -136,20 +192,12 @@ export class EngineClient {
       if (!p) return;
       this.pending.delete(id);
       if (e.data.ok) p.resolve(e.data.result);
-      else if (e.data.detail?.operation === 'prepare') {
-        p.reject(new PrepareError(
-          e.data.error,
-          e.data.detail.stage,
-          e.data.detail.stage === 'site' ? e.data.detail.compiled : undefined,
-        ));
-      } else {
-        p.reject(new Error(e.data.error));
-      }
+      else p.reject(new BuildFailure(e.data.error));
     };
     return worker;
   }
 
-  private async recycleWorker(): Promise<void> {
+  private async recycleWorker(report: ProgressCb | null): Promise<void> {
     if (this.pending.size !== 0) {
       throw new Error('cannot recycle the engine while another operation is pending');
     }
@@ -167,13 +215,14 @@ export class EngineClient {
     this.preparedFallbacks.clear();
     this.resolutionCache.clear();
     this.snapshotCache.clear();
+    this.builds.clear();
     this.deferredMount = null;
     this.snapshotBundles = [...this.bakedByLabel.values()]
       .filter((bundle) => bundle.loadPhase === 'snapshot');
     this.preparedConfigs = [];
     this.lastCompiledResourceCount = null;
     this.recycleCount += 1;
-    this.progressCb?.({
+    report?.({
       stage: 'wasm',
       message: 'Reclaiming compiler memory before opening another large guide…',
     });
@@ -202,7 +251,7 @@ export class EngineClient {
     entry: BakedBundleEntry,
     stageLabel: string,
     forceRaw = false,
-    report: ProgressCb | null = this.progressCb,
+    report: ProgressCb | null,
   ): Promise<PackageMountInput> {
     const started = performance.now();
     const transportIdentity = `tgz-${entry.sha256}`;
@@ -213,7 +262,10 @@ export class EngineClient {
       const { findPreparedPackage } = await import('./preparedPackageCache');
       const pointer = await findPreparedPackage(entry.label, transportIdentity);
       if (pointer) {
-        this.preparedFallbacks.set(entry.label, () => this.loadBundle(entry, stageLabel, true));
+        this.preparedFallbacks.set(
+          entry.label,
+          () => this.loadBundle(entry, stageLabel, true, report),
+        );
         report?.({
           stage: 'bundle-cache-hit',
           label: entry.label,
@@ -284,7 +336,10 @@ export class EngineClient {
 
   /** The only incremental mount path on the main thread. Keep resolution,
    * compile, and snapshot caches synchronized with the worker/Rust session. */
-  private async mountPackages(packages: PackageMountInput[]): Promise<MountResult> {
+  private async mountPackages(
+    packages: PackageMountInput[],
+    report: ProgressCb | null,
+  ): Promise<MountResult> {
     let transaction = packages;
     const started = performance.now();
     let result: MountResult;
@@ -312,85 +367,15 @@ export class EngineClient {
     // revision. Keep that immutable result until re-resolution proves its
     // closure changed.
     this.resolutionCache.noteMount(result.newlyMounted);
-    const prepared = result.preparedMetrics;
-    this.progressCb?.({
-      stage: 'bundle-mount',
-      message: result.newlyMounted.length
-        ? `Mounted ${result.newlyMounted.join(', ')}.`
-        : 'Packages already mounted.',
-      durationMs: rpcMs,
-      inputBytes: result.inputBytes,
-      metrics: {
-        workerSerializeMs: result.serializeMs,
-        wasmMs: result.wasmMs,
-        workerAndCloneMs: Math.max(0, rpcMs - result.mountMs),
-        ...(prepared ? {
-          preparedWarmBinary: prepared.mode === 'warm-binary' ? 1 : 0,
-          preparedColdPrepare: prepared.mode === 'cold-prepare' ? 1 : 0,
-          preparedMixed: prepared.mode === 'mixed' ? 1 : 0,
-          preparedAdded: prepared.added,
-          preparedArtifactBytes: prepared.artifactBytes,
-          preparedEngineMountMs: prepared.engineMountMs,
-          ...(prepared.decodeValidatePrepareMs === undefined ? {} : {
-            preparedDecodeValidatePrepareMs: prepared.decodeValidatePrepareMs,
-          }),
-          ...(prepared.preparedMembers === undefined ? {} : { preparedMembers: prepared.preparedMembers }),
-          ...(prepared.mountMemberBodyCopies === undefined ? {} : {
-            preparedMountMemberBodyCopies: prepared.mountMemberBodyCopies,
-          }),
-          ...(prepared.inputJsonBytes === undefined ? {} : { preparedInputJsonBytes: prepared.inputJsonBytes }),
-          ...(prepared.base64Bytes === undefined ? {} : { preparedBase64Bytes: prepared.base64Bytes }),
-          ...(prepared.decodedSourceBytes === undefined ? {} : {
-            preparedDecodedSourceBytes: prepared.decodedSourceBytes,
-          }),
-          ...(prepared.normalizedBytes === undefined ? {} : { preparedNormalizedBytes: prepared.normalizedBytes }),
-          ...(prepared.jsonParseMs === undefined ? {} : { preparedJsonParseMs: prepared.jsonParseMs }),
-          ...(prepared.base64DecodeMs === undefined ? {} : { preparedBase64DecodeMs: prepared.base64DecodeMs }),
-          ...(prepared.normalizationMs === undefined ? {} : { preparedNormalizationMs: prepared.normalizationMs }),
-          ...(prepared.indexingMs === undefined ? {} : { preparedIndexingMs: prepared.indexingMs }),
-          ...(prepared.artifactEncodeMs === undefined ? {} : { preparedArtifactEncodeMs: prepared.artifactEncodeMs }),
-          ...(prepared.decodeValidateMs === undefined ? {} : {
-            preparedDecodeValidateMs: prepared.decodeValidateMs,
-          }),
-          ...(prepared.packages === undefined ? {} : { preparedPackages: prepared.packages }),
-          ...(prepared.retainedBlobBytes === undefined ? {} : {
-            preparedRetainedBlobBytes: prepared.retainedBlobBytes,
-          }),
-          ...(prepared.maxStagedArtifactBytes === undefined ? {} : {
-            preparedMaxStagedArtifactBytes: prepared.maxStagedArtifactBytes,
-          }),
-          ...(prepared.jsBatchBytes === undefined ? {} : {
-            preparedJsBatchBytes: prepared.jsBatchBytes,
-          }),
-          ...(prepared.compressedRetainedBytes === undefined ? {} : {
-            preparedCompressedRetainedBytes: prepared.compressedRetainedBytes,
-          }),
-          ...(prepared.declaredRawBytes === undefined ? {} : {
-            preparedDeclaredRawBytes: prepared.declaredRawBytes,
-          }),
-          ...(prepared.chunksInflated === undefined ? {} : {
-            preparedChunksInflated: prepared.chunksInflated,
-          }),
-          ...(prepared.rawInflatedBytes === undefined ? {} : {
-            preparedRawInflatedBytes: prepared.rawInflatedBytes,
-          }),
-          ...(prepared.chunkCacheHits === undefined ? {} : {
-            preparedChunkCacheHits: prepared.chunkCacheHits,
-          }),
-          ...(prepared.cachedRawBytes === undefined ? {} : {
-            preparedCachedRawBytes: prepared.cachedRawBytes,
-          }),
-          ...(prepared.indexedMembers === undefined ? {} : { preparedIndexedMembers: prepared.indexedMembers }),
-          ...(prepared.memberBodyCopies === undefined ? {} : {
-            preparedMemberBodyCopies: prepared.memberBodyCopies,
-          }),
-          ...(prepared.manifestJsonBytes === undefined ? {} : {
-            preparedManifestJsonBytes: prepared.manifestJsonBytes,
-          }),
-          ...(prepared.manifestParseMs === undefined ? {} : { preparedManifestParseMs: prepared.manifestParseMs }),
-        } : {}),
-      },
-    });
+    for (const event of result.events) {
+      report?.({
+        ...event,
+        metrics: {
+          ...event.metrics,
+          workerRoundTripMs: rpcMs,
+        },
+      });
+    }
     return result;
   }
 
@@ -407,9 +392,9 @@ export class EngineClient {
    * selected only after the active project's config reaches the Rust resolver. */
   async init(onProgress?: ProgressCb): Promise<InitResult> {
     if (this.inited) throw new Error('engine already initialized');
-    this.progressCb = onProgress ?? null;
+    const report = onProgress ?? null;
 
-    this.progressCb?.({ stage: 'manifest', message: 'Loading package manifest…' });
+    report?.({ stage: 'manifest', message: 'Loading package manifest…' });
     const manifestResponse = await fetch(`${BASE}data/bundles/manifest.json`);
     if (!manifestResponse.ok) {
       throw new Error(`fetch package bundle manifest -> ${manifestResponse.status}`);
@@ -418,7 +403,7 @@ export class EngineClient {
 
     for (const b of manifest.bundles) this.bakedByLabel.set(b.label, b);
     this.snapshotBundles = manifest.bundles.filter((bundle) => bundle.loadPhase === 'snapshot');
-    this.progressCb?.({ stage: 'wasm', message: 'Starting compiler engine…' });
+    report?.({ stage: 'wasm', message: 'Starting compiler engine…' });
     const res: InitResult = await this.call('init');
     this.engineCommit = res.version?.commit || 'unknown';
     // Stale-mix guard: the app bundle was built against a specific engine
@@ -429,12 +414,10 @@ export class EngineClient {
       this.engineCommit,
     );
     this.inited = true;
-    this.progressCb?.({
+    for (const event of res.events) report?.(event);
+    report?.({
       stage: 'ready',
       message: `Engine ready — ${manifest.bundles.length} packages available on demand.`,
-      durationMs: res.initMs,
-      inputBytes: res.inputBytes,
-      metrics: { workerSerializeMs: res.serializeMs, wasmMs: res.wasmMs },
     });
     return res;
   }
@@ -444,26 +427,26 @@ export class EngineClient {
    *  its exact package closure independently and must not pull the R5 support
    *  bundle into an ordinary R4 preview. Idempotent + concurrency-safe: a
    *  single shared promise; subsequent calls resolve instantly. */
-  async ensureSnapshotBundles(): Promise<void> {
+  async ensureSnapshotBundles(report: ProgressCb | null = null): Promise<void> {
     if (this.snapshotBundles.length === 0) return;
     if (this.deferredMount) return this.deferredMount;
     this.deferredMount = (async () => {
       const needed = this.snapshotBundles.filter((entry) => !this.mountedLabels.has(entry.label));
       const { packageBatchProgress } = await import('./packageResolver');
-      const batch = packageBatchProgress(needed.map((entry) => entry.label), (event) => this.progressCb?.(event));
+      const batch = packageBatchProgress(needed.map((entry) => entry.label), (event) => report?.(event));
       const specs = await Promise.all(needed.map(async (entry) => {
         const spec = await this.loadBundle(entry, 'Loading (profile dependency)', false, batch.report);
         batch.complete(entry.label);
         return spec;
       }));
-      this.progressCb?.({
+      report?.({
         stage: 'bundle-mount',
         message: `Mounting ${specs.map((item) => item.kind === 'raw' ? item.spec.label : item.pointer.label).join(', ')}…`,
       });
-      const r = await this.mountPackages(specs);
+      const r = await this.mountPackages(specs, report);
       // Mounted now; clear the deferred list so we don't re-fetch.
       this.snapshotBundles = [];
-      this.progressCb?.({
+      report?.({
         stage: 'ready',
         message: `Profile dependencies ready — ${r.mounted} packages mounted.`,
       });
@@ -479,12 +462,6 @@ export class EngineClient {
   }
 
   // ---- runtime package resolution (task #32) ----
-
-  /** Set/replace the progress callback used by acquisition + lazy mounts (so the
-   *  UI can surface resolve/registry-fetch/blocked stages outside init). */
-  setProgress(cb: ProgressCb | null): void {
-    this.progressCb = cb;
-  }
 
   /** Ingest a user-dropped `.tgz` into the session-local package store (source d:
    *  air-gapped / registry-blocked). The next `acquireForProject` will prefer it
@@ -511,7 +488,10 @@ export class EngineClient {
    *  reports `satisfied`. Packages no source can supply come back as a precise
    *  `blocked` list for the UI. Safe to call before every compile of an arbitrary
   *  IG; it is a no-op once the closure is already mounted. */
-  async acquireForProject(config: string): Promise<ResolveOutcome> {
+  async acquireForProject(
+    config: string,
+    report: ProgressCb | null = null,
+  ): Promise<ResolveOutcome> {
     const cached = this.resolutionCache.get(config);
     if (cached) return cached;
     const {
@@ -531,7 +511,7 @@ export class EngineClient {
     const host = {
       resolveStep: (cfg: string, idx?: VersionIndex) => this.resolveStep(cfg, idx),
       mount: async (bundles: PackageMountInput[]) => {
-        await this.mountPackages(bundles);
+        await this.mountPackages(bundles, report);
       },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
       fetchBaked: (bundle: BakedBundleEntry, report: ProgressCb) => this.loadBundle(bundle, 'Loading (dependency)', false, report),
@@ -556,7 +536,7 @@ export class EngineClient {
       validatedIndex = await refreshMutableVersionIndex(
         lock.mutableRequests,
         seedIndex,
-        (ev) => this.progressCb?.({ ...ev }),
+        (ev) => report?.({ ...ev }),
       );
       const freshnessMs = performance.now() - freshnessStarted;
       if (validatedIndex) {
@@ -566,13 +546,13 @@ export class EngineClient {
         const exact = await obtainLockedPackages(
           host,
           needed,
-          (ev) => this.progressCb?.({ ...ev }),
+          (ev) => report?.({ ...ev }),
         );
         const acquireMs = performance.now() - acquireStarted;
         if (exact.blocked.length === 0 && exact.packages.length === needed.length) {
           const mountStarted = performance.now();
           const lockMount = exact.packages.length > 0
-            ? await this.mountPackages(exact.packages)
+            ? await this.mountPackages(exact.packages, report)
             : null;
           const lockMountMs = performance.now() - mountStarted;
           const verifyStarted = performance.now();
@@ -586,7 +566,7 @@ export class EngineClient {
               versionIndex: validatedIndex,
             };
             this.resolutionCache.record(config, outcome);
-            this.progressCb?.({
+            report?.({
               stage: 'resolve',
               message: `Verified cached package closure (${labels.length} packages).`,
               fromCache: true,
@@ -605,7 +585,7 @@ export class EngineClient {
           }
         }
       }
-      this.progressCb?.({
+      report?.({
         stage: 'resolve',
         message: 'Cached package closure was stale or incomplete; resolving normally.',
         fromCache: false,
@@ -613,7 +593,7 @@ export class EngineClient {
         metrics: { persistentLockHit: 0, lockReadMs },
       });
     } else {
-      this.progressCb?.({
+      report?.({
         stage: 'resolve',
         message: 'No cached package closure; resolving normally.',
         fromCache: false,
@@ -624,7 +604,7 @@ export class EngineClient {
     const outcome = await acquireForProject(
       host,
       config,
-      (ev) => this.progressCb?.({ ...ev }),
+      (ev) => report?.({ ...ev }),
       validatedIndex ?? seedIndex,
     );
     // The loop's final resolve happened after its final mount, so a satisfied
@@ -642,7 +622,7 @@ export class EngineClient {
     } else {
       this.resolutionCache.clear();
     }
-    this.progressCb?.({
+    report?.({
       stage: 'resolve',
       message: outcome.step.satisfied
         ? `Resolved package closure (${outcome.step.context_closure.length} packages).`
@@ -658,18 +638,18 @@ export class EngineClient {
     return outcome;
   }
 
-  async snapshot(url: string): Promise<SnapshotResult> {
+  async snapshot(url: string, report: ProgressCb | null = null): Promise<SnapshotResult> {
     const cached = this.snapshotCache.get(url);
     if (cached) {
-      this.progressCb?.({ stage: 'snapshot', label: url, message: `Reusing snapshot for ${url}.`, fromCache: true, durationMs: 0 });
+      report?.({ stage: 'snapshot', label: url, message: `Reusing snapshot for ${url}.`, fromCache: true, durationMs: 0 });
       return cached;
     }
     const started = performance.now();
     // Snapshots need the deferred (R5 core) bundle — mount it lazily first.
-    await this.ensureSnapshotBundles();
+    await this.ensureSnapshotBundles(report);
     const res: SnapshotResult = await this.call('snapshot', url);
     this.snapshotCache.set(url, res);
-    this.progressCb?.({
+    report?.({
       stage: 'snapshot',
       label: url,
       message: `Prepared full definition for ${url}.`,
@@ -688,7 +668,11 @@ export class EngineClient {
 
   // ---- the complete public site-generation API ---------------------------
 
-  async prepare(project: ProjectRevision, spec: GeneratorSpec): Promise<PrepareResult> {
+  async prepare(
+    project: ProjectRevision,
+    spec: GeneratorSpec,
+    report: ProgressCb | null = null,
+  ): Promise<Build> {
     const started = performance.now();
     try {
       const switchingProject = !this.preparedConfigs.includes(project.config);
@@ -701,80 +685,69 @@ export class EngineClient {
       if (switchingProject
         && (this.preparedConfigs.length >= 2
           || (this.lastCompiledResourceCount === 0 && !smallCycleSuccessor))) {
-        await this.recycleWorker();
+        await this.recycleWorker(report);
       }
-      await this.acquireForProject(project.config);
+      await this.acquireForProject(project.config, report);
       if (spec.generator === 'publisher') {
-        await this.ensureTemplatePackages(spec.templateCoordinate);
-        await this.acquireForProject(project.config);
+        await this.ensureTemplatePackages(spec.templateCoordinate, report);
+        await this.acquireForProject(project.config, report);
       }
       this.snapshotCache.clear();
       const result = await this.call('prepare', project, spec);
-      this.progressCb?.({
+      for (const event of result.events) report?.(event);
+      report?.({
         stage: 'site-build',
+        label: result.buildId,
         message: `Prepared ${result.generator} SiteBuild ${result.buildId}.`,
         durationMs: performance.now() - started,
-        fileCount: result.compiled.fileCount,
-        metrics: {
-          compileProjectMs: result.metrics.compileProjectMs,
-          rustPrepareMs: result.metrics.rustPrepareMs,
-          hostPrepareMs: result.metrics.hostPrepareMs,
-          rustPrepareTotalMs: result.metrics.rust.totalMs,
-          projectRevisionMs: result.metrics.rust.projectRevisionMs,
-          packageLockMs: result.metrics.rust.packageLockMs,
-          preparedGuideKeyMs: result.metrics.rust.preparedGuideKeyMs,
-          preparedGuideMs: result.metrics.rust.preparedGuideMs,
-          snapshotCompletedLocalCacheHit: Number(
-            result.metrics.rust.snapshotCompletedLocalCacheHit,
-          ),
-          preparedGuideCacheHit: Number(result.metrics.rust.preparedGuideCacheHit),
-          siteBuildCacheHit: Number(result.metrics.rust.siteBuildCacheHit),
-          publisherRecipeAssetsCacheHit: Number(
-            result.metrics.rust.publisherRecipeAssetsCacheHit,
-          ),
-          templateMaterializeMs: result.metrics.rust.templateMaterializeMs,
-          publisherRuntimeMs: result.metrics.rust.publisherRuntimeMs,
-          publisherModelMs: result.metrics.rust.publisherModelMs,
-          renderSemanticsCacheHit: Number(result.metrics.rust.renderSemanticsCacheHit),
-          renderModelMs: result.metrics.rust.renderModelMs,
-          outputCatalogMs: result.metrics.rust.outputCatalogMs,
-          publisherArtifactsMs: result.metrics.rust.publisherArtifactsMs,
-          siteBuildCloseMs: result.metrics.rust.siteBuildCloseMs,
-          closureVerifyMs: result.metrics.rust.closureVerifyMs,
-          catalogMs: result.metrics.rust.catalogMs,
-        },
+        fileCount: Object.keys(project.fsh).length,
       });
       this.preparedConfigs = this.preparedConfigs
         .filter((config) => config !== project.config);
       this.preparedConfigs.push(project.config);
       if (this.preparedConfigs.length > 2) this.preparedConfigs.shift();
       this.lastCompiledResourceCount = result.compiled.resources.length;
-      return result;
+      const build = new ImmutableBuild(
+        result,
+        () => this.call('outputs', result.buildId),
+        (path) => this.call('render', result.buildId, path),
+        () => this.call('finalize', result.buildId),
+        report,
+      );
+      this.builds.delete(result.buildId);
+      this.builds.set(result.buildId, build);
+      while (this.builds.size > 2) {
+        const retired = this.builds.keys().next().value;
+        if (retired === undefined) break;
+        this.builds.delete(retired);
+      }
+      return build;
     } catch (error) {
-      if (error instanceof PrepareError) throw error;
-      throw new PrepareError(String(error), 'site');
+      if (error instanceof BuildFailure) throw error;
+      throw new BuildFailure({
+        operation: 'prepare',
+        phase: 'preparation',
+        code: 'internal',
+        message: String(error),
+        retryable: false,
+      });
     }
   }
 
-  async outputs(handle: BuildHandle): Promise<OutputCatalog> {
-    return this.call('outputs', handle);
-  }
-
-  async render(handle: BuildHandle, path: string): Promise<RenderedOutput> {
-    return this.call('render', handle, path);
-  }
-
-  async finalize(handle: BuildHandle): Promise<SiteOutput> {
-    return this.call('finalize', handle);
+  open(buildId: string): Build | undefined {
+    return this.builds.get(buildId);
   }
 
   /** Acquire exactly the template coordinates requested by Rust's private
    * resolution handshake. No host-side template tree or chain is retained. */
-  private async ensureTemplatePackages(coordinate: string): Promise<void> {
+  private async ensureTemplatePackages(
+    coordinate: string,
+    report: ProgressCb | null,
+  ): Promise<void> {
     const { obtainAndMountPackage } = await import('./packageResolver');
     const host = {
       resolveStep: (config: string, index?: VersionIndex) => this.resolveStep(config, index),
-      mount: async (packages: PackageMountInput[]) => { await this.mountPackages(packages); },
+      mount: async (packages: PackageMountInput[]) => { await this.mountPackages(packages, report); },
       bakedBundle: (label: string) => this.bakedByLabel.get(label),
       fetchBaked: (bundle: BakedBundleEntry, report: ProgressCb) => this.loadBundle(bundle, 'Loading (template)', false, report),
     };
@@ -783,7 +756,7 @@ export class EngineClient {
       if (step.satisfied) return;
       if (!step.missing) throw new Error(`Template ${coordinate} is unresolved without a missing coordinate`);
       const mounted = await obtainAndMountPackage(host, step.missing, (event) => {
-        this.progressCb?.({ ...event });
+        report?.({ ...event });
       });
       if (!mounted) throw new Error(`Template ${coordinate} requires unavailable ${step.missing}`);
     }

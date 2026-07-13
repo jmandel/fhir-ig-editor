@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { ProgressEvent, ResolutionStep } from '../src/worker/protocol';
+import type { BuildEvent, ResolutionStep } from '../src/worker/protocol';
 import {
   lockFromResolution,
   lockedLabels,
@@ -108,7 +108,7 @@ describe('persistent package-resolution lock', () => {
     let mounted = false;
     let inFlight = 0;
     let peak = 0;
-    const progress: ProgressEvent[] = [];
+    const progress: BuildEvent[] = [];
     const labels = ['a#1.0.0', 'b#1.0.0', 'c#1.0.0'];
     const result = await obtainLockedPackages({
       resolveStep: async () => { throw new Error('unused'); },

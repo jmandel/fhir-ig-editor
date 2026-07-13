@@ -6,9 +6,31 @@ const WORKER = readFileSync(new URL('../src/worker/engine.worker.ts', import.met
 const CLIENT = readFileSync(new URL('../src/worker/client.ts', import.meta.url), 'utf8');
 const PROTOCOL = readFileSync(new URL('../src/worker/protocol.ts', import.meta.url), 'utf8');
 const INSPECTOR = readFileSync(new URL('../src/views/ResourceInspector.tsx', import.meta.url), 'utf8');
+const E2E = readFileSync(new URL('../../scripts/verify-e2e.mjs', import.meta.url), 'utf8');
 
-describe('prepare timing sidecar', () => {
-  test('exposes the duplicate-path phases without adding a site operation', () => {
+describe('canonical build observations and failures', () => {
+  test('keeps worker and renderer transport out of the public Build contract', () => {
+    expect(CONTRACT).toContain('export interface Build');
+    expect(CONTRACT).toContain('outputs(): Promise<OutputCatalog>');
+    expect(CONTRACT).toContain('render(path: string): Promise<ContentRef>');
+    expect(CONTRACT).toContain('finalize(): Promise<SiteOutput>');
+    for (const privateTransport of [
+      'PrepareResult',
+      'PreparedProjectResult',
+      'RendererImplementation',
+      'SiteOutputFile',
+      'PreparedExport',
+      'PackageMountResult',
+      'ResolutionStep',
+      'ApiEnvelope',
+    ]) {
+      expect(CONTRACT).not.toContain(privateTransport);
+    }
+    expect(PROTOCOL).toContain("from '../site/contract.generated'");
+    expect(WORKER).toContain("from '../site/contract.generated'");
+  });
+
+  test('carries preparation observations only through BuildEvent', () => {
     for (const field of [
       'projectRevisionMs',
       'packageLockMs',
@@ -28,45 +50,56 @@ describe('prepare timing sidecar', () => {
       'closureVerifyMs',
       'catalogMs',
     ]) {
-      expect(CONTRACT).toContain(`${field}:`);
-      expect(CLIENT).toContain(`result.metrics.rust.${field}`);
+      expect(CLIENT).not.toContain(`result.metrics.rust.${field}`);
     }
-    expect(PROTOCOL).toContain("prepare: { args: [project: ProjectRevision, spec: GeneratorSpec]; result: PrepareResult }");
+    expect(PROTOCOL).toContain("prepare: { args: [project: ProjectRevision, spec: GeneratorSpec]; result: PrepareTransportResult }");
+    expect(PROTOCOL).toContain('events: BuildEvent[]');
+    expect(CLIENT).toContain('for (const event of result.events)');
+    expect(PROTOCOL).not.toContain('RustPrepareMetrics');
     expect(PROTOCOL).not.toContain('prepareMetrics:');
+    expect(PROTOCOL).not.toContain('rustPrepareMs: number');
+    expect(CONTRACT).not.toContain('RustPrepareMetrics');
   });
 
-  test('separates compiler, Rust preparation, and post-Rust host work', () => {
-    expect(WORKER).toContain('compileProjectMs: compiled.buildMs');
+  test('reads warm-reuse proof from the Rust prepare event, not a later host timing event', () => {
+    expect(E2E).toContain("event?.operation === 'prepare'");
+    expect(E2E).toContain("Object.hasOwn(event.metrics, 'snapshotCompletedLocalCacheHit')");
+  });
+
+  test('reports compiler, Rust boundary, and host opening through events', () => {
     expect(WORKER).toContain('const rustBoundaryStarted = performance.now()');
-    expect(WORKER).toContain('Math.max(0, rustBoundaryMs - compiled.buildMs)');
     expect(WORKER).toContain('const hostPrepareStarted = performance.now()');
-    expect(WORKER).toContain('rust: prepared.metrics');
-    expect(CONTRACT).toContain('compileProjectMs: number');
-    expect(CONTRACT).toContain('rustPrepareMs: number');
-    expect(CONTRACT).toContain('hostPrepareMs: number');
+    expect(WORKER).toContain('...result.events');
+    expect(WORKER).toContain('rustBoundaryMs');
+    expect(WORKER).toContain('hostPrepareMs');
+    expect(WORKER).not.toContain('rust: prepared.metrics');
   });
 
   test('preserves a typed successful compile across later preparation failure', () => {
-    expect(WORKER).toContain("status: 'siteFailed'");
-    expect(WORKER).toContain("result.status === 'siteFailed'");
-    expect(WORKER).toContain("new PrepareOperationError(result.error, 'site', compiled)");
-    expect(WORKER).toContain("throw new PrepareOperationError(String(error), 'compile')");
-    expect(WORKER).toContain("throw new PrepareOperationError(String(error), 'site', compiled)");
+    expect(WORKER).toContain('class EngineBuildFailure extends Error');
+    expect(WORKER).toContain('(error) => new EngineBuildFailure(error)');
+    expect(WORKER).toContain('unwrapApiEnvelope<T, BuildError<CompileResult>>');
+    expect(WORKER).toContain('successfulCompilation: compiled');
+    expect(WORKER).not.toContain('error.detail.successfulCompilation =');
+    expect(WORKER).not.toContain("status: 'siteFailed'");
+    expect(WORKER).not.toContain('PrepareOperationError');
     expect(WORKER).not.toContain("message.includes('compile')");
     expect(WORKER).not.toContain('compileProject(filesJson:');
-    expect(PROTOCOL).toContain("{ operation: 'prepare'; stage: 'site'; compiled: CompileResult }");
+    expect(PROTOCOL).toContain('error: BuildError<CompileResult>');
+    expect(CLIENT).toContain('class BuildFailure extends Error');
+    expect(CLIENT).toContain('readonly detail: BuildError<CompileResult>');
   });
 
   test('keeps the deferred R5 bundle off the site-preparation path', () => {
     const snapshot = CLIENT.slice(
-      CLIENT.indexOf('async snapshot(url: string)'),
+      CLIENT.indexOf('async snapshot('),
       CLIENT.indexOf('async expandValueSet'),
     );
     const prepare = CLIENT.slice(
-      CLIENT.indexOf('async prepare(project: ProjectRevision'),
-      CLIENT.indexOf('async outputs(handle:'),
+      CLIENT.indexOf('async prepare('),
+      CLIENT.indexOf('open(buildId:'),
     );
-    expect(snapshot).toContain('await this.ensureSnapshotBundles()');
+    expect(snapshot).toContain('await this.ensureSnapshotBundles(report)');
     expect(prepare).not.toContain('ensureSnapshotBundles');
     expect(INSPECTOR).toContain("useState<Tab>('differential')");
     expect(INSPECTOR).toContain("effectiveTab === 'snapshot'");
@@ -75,13 +108,13 @@ describe('prepare timing sidecar', () => {
     expect(INSPECTOR).toContain('FHIR snapshot: the complete definition');
   });
 
-  test('uses the media type returned by Rust without re-reading the catalog', () => {
+  test('returns the rendered ContentRef without re-reading the catalog', () => {
     const render = WORKER.slice(
       WORKER.indexOf('async render(handle, path)'),
       WORKER.indexOf('async finalize(handle)'),
     );
-    expect(render).toContain('unwrap<RenderedOutput>(s.render(handle, path))');
-    expect(render).toContain('return rendered');
+    expect(render).toContain('unwrapBuild<ContentRef>(s.render(handle, path))');
+    expect(render).toContain('return content');
     expect(render).not.toContain('s.outputs(handle)');
   });
 
@@ -101,7 +134,8 @@ describe('prepare timing sidecar', () => {
   });
 
   test('keeps a package-heavy guide only across a lightweight external Cycle successor', () => {
-    expect(CLIENT).toContain("project.projectId !== 'cycle' || spec.generator !== 'cycle'");
+    expect(CLIENT).toContain("spec.generator !== 'cycle'");
+    expect(CLIENT).not.toContain('project.projectId');
     expect(CLIENT).toContain('MAX_RETAINED_CYCLE_SUCCESSOR_FILES = 128');
     expect(CLIENT).toContain('MAX_RETAINED_CYCLE_SUCCESSOR_CODE_UNITS = 16 * 1024 * 1024');
     expect(CLIENT).toContain('this.lastCompiledResourceCount === 0 && !smallCycleSuccessor');
@@ -111,12 +145,12 @@ describe('prepare timing sidecar', () => {
   test('rejects a warm pointer whose selected artifact decodes to another label', () => {
     const stage = WORKER.slice(
       WORKER.indexOf('for (const item of inputs)'),
-      WORKER.indexOf('commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount())'),
+      WORKER.indexOf('commitResult = unwrap<PackageMountResult>(s.commitPreparedMount())'),
     );
-    expect(stage).toContain('const staged = unwrap<{ label: string }>(');
+    expect(stage).toContain('const staged = unwrap<PreparedStageResult>(');
     expect(stage).toContain('if (staged.label !== pointer.label)');
     expect(WORKER.indexOf('if (staged.label !== pointer.label)')).toBeLessThan(
-      WORKER.indexOf('commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount())'),
+      WORKER.indexOf('commitResult = unwrap<PackageMountResult>(s.commitPreparedMount())'),
     );
   });
 

@@ -6,13 +6,15 @@
  * live in the shared ContentStore; this directory contains only tiny pointers.
  */
 
-import { contentStore, type ContentRef } from '../storage/contentStore';
+import { contentStore } from '../storage/contentStore';
+import type { ContentRef } from '../site/contract.generated';
 import { sha256Hex } from './bundleIntegrity';
 import type { MutableVersionRequest, ResolutionStep, VersionIndex } from './protocol';
+import { RESOLVER_SCHEMA } from '../site/contract.generated';
 
 const CACHE_DIR = 'fhir-ig-editor-resolution-locks-v1';
 export const RESOLUTION_LOCK_SCHEMA = 1;
-export const EXPECTED_RESOLVER_SCHEMA = 3;
+export const EXPECTED_RESOLVER_SCHEMA = RESOLVER_SCHEMA;
 const MEDIA_TYPE = 'application/vnd.fhir.package-resolution-lock.v1+json';
 const SHA256 = /^[0-9a-f]{64}$/;
 

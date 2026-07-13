@@ -2,18 +2,16 @@
  * finalize. It does not own an adapter, an asset manifest, or renderer state. */
 
 import type {
-  BuildHandle,
   ContentRef,
   OutputCatalog,
   OutputDescriptor,
-  RenderedOutput,
 } from '../site/contract';
 import { contentStore } from '../storage/contentStore';
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 export const PREVIEW_ROOT = `${BASE}preview/`;
 const CHANNEL_NAME = 'igpreview';
-export const PREVIEW_SW_PROTOCOL = 5;
+export const PREVIEW_SW_PROTOCOL = 6;
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_OUTPUTS = 20_000;
 const MAX_CATALOG_CHARS = 8 * 1024 * 1024;
@@ -21,7 +19,6 @@ const PREVIEW_CLIENT_TTL_MS = 5 * 60_000;
 
 export interface PreviewSource {
   igId: string;
-  handle: BuildHandle;
   buildId: string;
   catalog: OutputCatalog;
 }
@@ -60,9 +57,6 @@ export function validatePreviewSource(value: PreviewSource): PreviewSource {
   if (typeof value.igId !== 'string' || !value.igId || value.igId.length > 256 || /[\\/\0]/.test(value.igId)) {
     throw new Error('preview IG id is invalid');
   }
-  if (typeof value.handle !== 'string' || !value.handle || value.handle.length > 512) {
-    throw new Error('preview build handle is invalid');
-  }
   if (typeof value.buildId !== 'string' || !value.buildId || value.buildId.length > 512) {
     throw new Error('preview build id is invalid');
   }
@@ -97,7 +91,6 @@ export function validatePreviewSource(value: PreviewSource): PreviewSource {
   }));
   return Object.freeze({
     igId: value.igId,
-    handle: value.handle,
     buildId: value.buildId,
     catalog: Object.freeze({ buildId: value.catalog.buildId, outputs: Object.freeze(outputs) }),
   }) as PreviewSource;
@@ -328,7 +321,7 @@ async function commitToPreviewWorker(
 
 // ---- Immutable publication + live unresolved-output responder -----------------
 
-type RenderOutput = (handle: BuildHandle, path: string) => Promise<RenderedOutput>;
+type RenderOutput = (buildId: string, path: string) => Promise<ContentRef>;
 let renderOutput: RenderOutput | null = null;
 let source: PreviewSource | null = null;
 let sourceGeneration = 0;
@@ -368,7 +361,7 @@ function descriptor(catalog: OutputCatalog, path: string): OutputDescriptor | nu
 }
 
 function resolvedKey(build: PreviewSource, path: string): string {
-  return `${build.handle}\u0000${build.buildId}\u0000${path}`;
+  return `${build.buildId}\u0000${path}`;
 }
 
 async function resolveRef(build: PreviewSource, path: string): Promise<ContentRef | null> {
@@ -378,12 +371,12 @@ async function resolveRef(build: PreviewSource, path: string): Promise<ContentRe
   const known = resolvedRefs.get(resolvedKey(build, path));
   if (known) return known;
   if (!renderOutput) return null;
-  const rendered = await renderOutput(build.handle, path);
-  if (rendered.path !== path || rendered.mediaType !== output.mediaType || !validContentRef(rendered.content)) {
+  const content = await renderOutput(build.buildId, path);
+  if (content.mediaType !== output.mediaType || !validContentRef(content)) {
     throw new Error(`renderer returned an invalid output for ${path}`);
   }
-  resolvedRefs.set(resolvedKey(build, path), rendered.content);
-  return rendered.content;
+  resolvedRefs.set(resolvedKey(build, path), content);
+  return content;
 }
 
 /** Resolve only the pages that are already open before publishing a successor.
@@ -403,15 +396,13 @@ export async function resolvePreviewOutputRefs(
     const index = outputs.findIndex((output) => output.path === path);
     if (index < 0 || outputs[index].content) continue;
     const output = outputs[index];
-    const rendered = await render(build.handle, path);
+    const content = await render(build.buildId, path);
     if (!mayContinue()) return null;
-    if (rendered.path !== path
-      || rendered.mediaType !== output.mediaType
-      || !validContentRef(rendered.content)) {
+    if (content.mediaType !== output.mediaType || !validContentRef(content)) {
       throw new Error(`renderer returned an invalid output for ${path}`);
     }
-    outputs[index] = { ...output, content: rendered.content };
-    resolvedRefs.set(resolvedKey(build, path), rendered.content);
+    outputs[index] = { ...output, content };
+    resolvedRefs.set(resolvedKey(build, path), content);
     changed = true;
   }
   if (!changed) return build;
@@ -470,7 +461,6 @@ async function answerRender(message: Record<string, unknown>, port: MessagePort)
     const current = source;
     if (!current
       || message.igId !== current.igId
-      || message.handle !== current.handle
       || message.buildId !== current.buildId
       || !isSafePreviewPath(message.path)) {
       port.postMessage({ ok: false });
@@ -483,15 +473,15 @@ async function answerRender(message: Record<string, unknown>, port: MessagePort)
       port.postMessage({ ok: false });
       return;
     }
-    const rendered = await renderOutput(current.handle, output.path);
-    if (rendered.path !== output.path || rendered.mediaType !== output.mediaType || !validContentRef(rendered.content)) {
+    const content = await renderOutput(current.buildId, output.path);
+    if (content.mediaType !== output.mediaType || !validContentRef(content)) {
       throw new Error('renderer output does not match catalog');
     }
-    resolvedRefs.set(resolvedKey(current, output.path), rendered.content);
-    const body = await contentStore.get(rendered.content);
+    resolvedRefs.set(resolvedKey(current, output.path), content);
+    const body = await contentStore.get(content);
     if (!body) throw new Error('rendered output is absent from ContentStore');
     port.postMessage(
-      { ok: true, path: rendered.path, mediaType: rendered.mediaType, content: rendered.content, body },
+      { ok: true, path: output.path, mediaType: output.mediaType, content, body },
       [body],
     );
   } catch (error) {
@@ -504,7 +494,6 @@ async function answerContent(message: Record<string, unknown>, port: MessagePort
     const current = source;
     if (!current
       || message.igId !== current.igId
-      || message.handle !== current.handle
       || message.buildId !== current.buildId
       || !isSafePreviewPath(message.path)) {
       port.postMessage({ ok: false });

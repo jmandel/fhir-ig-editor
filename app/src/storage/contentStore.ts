@@ -3,7 +3,7 @@
  * recipes, and dependency graphs. Reads always recheck digest and length. */
 
 import { sha256Hex } from '../worker/bundleIntegrity';
-import type { ContentRef } from '../site/contract';
+import type { ContentRef } from '../site/contract.generated';
 
 const OPFS_DIR = 'fhir-ig-editor-content-v1';
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -84,4 +84,3 @@ export class OpfsContentStore implements ContentStore {
 }
 
 export const contentStore: ContentStore = new OpfsContentStore();
-export type { ContentRef } from '../site/contract';

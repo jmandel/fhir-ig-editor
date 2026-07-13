@@ -2,7 +2,7 @@
 // and Snapshot tree (StructureDefinitions), and Expansion (ValueSets).
 
 import { useState, type KeyboardEvent } from 'react';
-import type { CompiledResource } from '../worker/protocol';
+import type { ResourceView } from './resourceView';
 import type { EngineClient } from '../worker/client';
 import { ResourceJson } from './ResourceJson';
 import { DifferentialTable } from './DifferentialTable';
@@ -19,8 +19,8 @@ export function ResourceInspector({
   engine,
   settingsVersion,
 }: {
-  resource: CompiledResource;
-  allResources: CompiledResource[];
+  resource: ResourceView;
+  allResources: ResourceView[];
   engine: EngineClient;
   settingsVersion: number;
 }) {

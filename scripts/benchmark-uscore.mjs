@@ -198,14 +198,64 @@ const INSTRUMENTATION = String.raw`(() => {
         operation.duration = operation.end - operation.start;
         operation.ok = !!data.ok;
         const result = data.result || {};
-        operation.engineDuration = result.mountMs ?? result.initMs ?? result.buildMs ?? null;
+        const events = Array.isArray(result.events) ? result.events : [];
+        const eventMetrics = Object.assign({}, ...events.map((entry) => entry.metrics || {}));
+        operation.events = events;
+        operation.engineDuration = events.reduce(
+          (sum, entry) => sum + (Number(entry.durationMs) || 0),
+          0,
+        ) || result.buildMs || null;
         operation.newlyMounted = result.newlyMounted || [];
         operation.mounted = result.mounted ?? null;
-        operation.inputBytes = result.inputBytes ?? null;
-        operation.serializeMs = result.serializeMs ?? null;
-        operation.wasmMs = result.wasmMs ?? null;
-        operation.preparedMetrics = result.preparedMetrics || null;
-        operation.packageStorage = result.packageStorage || null;
+        operation.inputBytes = events.reduce(
+          (sum, entry) => sum + (Number(entry.inputBytes) || 0),
+          0,
+        ) || null;
+        operation.serializeMs = eventMetrics.workerSerializeMs ?? null;
+        operation.wasmMs = eventMetrics.wasmMs ?? null;
+        operation.preparedMetrics = Object.keys(eventMetrics).some((key) => key.startsWith('prepared'))
+          ? {
+              mode: eventMetrics.preparedMixed ? 'mixed'
+                : eventMetrics.preparedWarmBinary ? 'warm-binary' : 'cold-prepare',
+              added: eventMetrics.preparedAdded,
+              artifactBytes: eventMetrics.preparedArtifactBytes,
+              preparedMembers: eventMetrics.preparedMembers,
+              indexedMembers: eventMetrics.preparedIndexedMembers,
+              retainedBlobBytes: eventMetrics.preparedRetainedBlobBytes,
+              maxStagedArtifactBytes: eventMetrics.preparedMaxStagedArtifactBytes,
+              jsBatchBytes: eventMetrics.preparedJsBatchBytes,
+              compressedRetainedBytes: eventMetrics.preparedCompressedRetainedBytes,
+              declaredRawBytes: eventMetrics.preparedDeclaredRawBytes,
+              chunksInflated: eventMetrics.preparedChunksInflated,
+              rawInflatedBytes: eventMetrics.preparedRawInflatedBytes,
+              chunkCacheHits: eventMetrics.preparedChunkCacheHits,
+              cachedRawBytes: eventMetrics.preparedCachedRawBytes,
+              memberBodyCopies: eventMetrics.preparedMemberBodyCopies,
+              mountMemberBodyCopies: eventMetrics.preparedMountMemberBodyCopies,
+              decodeValidatePrepareMs: eventMetrics.preparedDecodeValidatePrepareMs,
+              decodeValidateMs: eventMetrics.preparedDecodeValidateMs,
+              engineMountMs: eventMetrics.preparedEngineMountMs,
+              inputJsonBytes: eventMetrics.preparedInputJsonBytes,
+              base64Bytes: eventMetrics.preparedBase64Bytes,
+              decodedSourceBytes: eventMetrics.preparedDecodedSourceBytes,
+              normalizedBytes: eventMetrics.preparedNormalizedBytes,
+              manifestJsonBytes: eventMetrics.preparedManifestJsonBytes,
+              jsonParseMs: eventMetrics.preparedJsonParseMs,
+              base64DecodeMs: eventMetrics.preparedBase64DecodeMs,
+              normalizationMs: eventMetrics.preparedNormalizationMs,
+              indexingMs: eventMetrics.preparedIndexingMs,
+              artifactEncodeMs: eventMetrics.preparedArtifactEncodeMs,
+              manifestParseMs: eventMetrics.preparedManifestParseMs,
+            }
+          : null;
+        operation.packageStorage = {
+          compressedRetainedBytes: eventMetrics.compressedRetainedBytes,
+          declaredRawBytes: eventMetrics.declaredRawBytes,
+          chunksInflated: eventMetrics.chunksInflated,
+          rawInflatedBytes: eventMetrics.rawInflatedBytes,
+          cacheHits: eventMetrics.cacheHits,
+          cachedRawBytes: eventMetrics.cachedRawBytes,
+        };
         operation.pageCount = Array.isArray(result.pages) ? result.pages.length : result.pages ?? null;
         operation.dataCount = result.data ?? null;
       });

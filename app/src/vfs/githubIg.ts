@@ -19,7 +19,7 @@ import {
   type ProjectFile,
   WorkspaceRepository,
 } from './workspace';
-import type { ProgressEvent } from '../worker/protocol';
+import type { BuildEvent } from '../worker/protocol';
 import type { DemoIgMeta } from './demoIg';
 import { readResponseBytes } from '../worker/bundleIntegrity';
 
@@ -133,7 +133,7 @@ function nameFromConfig(cfg: string | undefined): string | null {
  * input paths. Callers can compare tree identity before downloading bodies. */
 async function resolveGithubIgTree(
   spec: GithubIgSpec,
-  onProgress?: (ev: ProgressEvent) => void,
+  onProgress?: (ev: BuildEvent) => void,
 ): Promise<GithubIgTree> {
   const { owner, repo, ref } = spec;
   const rootPrefix = spec.root ? spec.root.replace(/\/?$/, '/') : '';
@@ -231,7 +231,7 @@ async function resolveGithubIgTree(
  * with a partial project. */
 export async function fetchGithubIgManifest(
   spec: GithubIgSpec,
-  onProgress?: (ev: ProgressEvent) => void,
+  onProgress?: (ev: BuildEvent) => void,
   resolved?: GithubIgTree,
 ): Promise<IgManifest> {
   const tree = resolved ?? await resolveGithubIgTree(spec, onProgress);
@@ -309,7 +309,7 @@ export async function loadGithubIg(
   workspaces: WorkspaceRepository,
   projectId: string,
   spec: GithubIgSpec,
-  onProgress?: (ev: ProgressEvent) => void,
+  onProgress?: (ev: BuildEvent) => void,
 ): Promise<DemoIgMeta> {
   const existing = await workspaces.open(projectId);
   if (existing?.dirty) {

@@ -10,12 +10,15 @@ import { sha256Hex } from './bundleIntegrity';
 import type { PreparedPackagePointer } from './protocol';
 export type { PreparedPackagePointer } from './protocol';
 import { contentStore } from '../storage/contentStore';
+import {
+  PREPARED_PACKAGE_FORMAT_VERSION,
+  PREPARED_PACKAGE_MEDIA_TYPE,
+} from '../site/contract.generated';
+export { PREPARED_PACKAGE_MEDIA_TYPE } from '../site/contract.generated';
 
 const CACHE_DIR = 'fhir-ig-editor-prepared-packages';
-const CACHE_SCHEMA = 3;
 const SHA256 = /^[0-9a-f]{64}$/;
 const CACHE_KEY = /^pp3-sha256-[0-9a-f]{64}-n1-d1-a1$/;
-export const PREPARED_PACKAGE_MEDIA_TYPE = 'application/vnd.fhir.package.prepared.v3';
 
 function safe(value: string): string {
   return encodeURIComponent(value).replaceAll('%', '_');
@@ -35,7 +38,7 @@ export function validPreparedPackagePointer(
     ? CACHE_KEY.exec(pointer.cacheKey)
     : null;
   return !!pointer
-    && pointer.schema === CACHE_SCHEMA
+    && pointer.schema === PREPARED_PACKAGE_FORMAT_VERSION
     && typeof pointer.label === 'string'
     && (label === undefined || pointer.label === label)
     && typeof pointer.transportIdentity === 'string'

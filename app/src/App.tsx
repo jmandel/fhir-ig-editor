@@ -3,7 +3,7 @@
 // generation, and wires Monaco/resource/snapshot/diagnostic views.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { EngineClient, PrepareError } from './worker/client';
+import { BuildFailure, EngineClient } from './worker/client';
 import type { BlockedPackage } from './worker/client';
 import {
   type Workspace,
@@ -11,7 +11,7 @@ import {
   WorkspaceRepository,
 } from './vfs/workspace';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
-import type { CompiledResource, CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
+import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
 import type { GeneratorSpec, OutputDescriptor } from './site/contract';
 import {
   ensurePreviewServiceWorker,
@@ -55,6 +55,7 @@ import {
   resourceIdentity,
   soleResourceDeclaredIn,
 } from './views/artifactSelection';
+import type { ResourceView } from './views/resourceView';
 import {
   definitionsArePending,
   deriveBuildState,
@@ -62,7 +63,7 @@ import {
   settledBuildStatus,
   type WorkspaceMode,
 } from './views/ProjectOverview';
-import type { ProgressEvent } from './worker/protocol';
+import type { BuildEvent } from './worker/protocol';
 import { presentProgress } from './progressPresentation';
 
 
@@ -71,12 +72,17 @@ interface BuildOutcome {
   error?: string;
 }
 
-function generatorSpec(id: string, templateCoordinate: string): GeneratorSpec {
+function generatorSpec(
+  id: string,
+  templateCoordinate: string,
+  buildEpochSecs: number,
+): GeneratorSpec {
   return id === CYCLE_GENERATOR
-    ? { generator: 'cycle' }
+    ? { generator: 'cycle', buildEpochSecs, liquidAssetDirs: [] }
     : {
         generator: 'publisher',
         templateCoordinate,
+        buildEpochSecs,
         activeTables: true,
         runUuid: 'e0e0e0e0-0000-4000-8000-igeditor0000',
       };
@@ -104,9 +110,9 @@ function initialSourcePath(workspace: Workspace): string | null {
 }
 
 /** Machine-readable trace consumed by the persistent-profile benchmark. */
-function recordRuntimeMetric(event: ProgressEvent): void {
+function recordRuntimeMetric(event: BuildEvent): void {
   const debug = (window as unknown as {
-    __igDebug?: { metrics?: Array<{ at: number; event: ProgressEvent }> };
+    __igDebug?: { metrics?: Array<{ at: number; event: BuildEvent }> };
   }).__igDebug;
   debug?.metrics?.push({ at: performance.now(), event });
 }
@@ -126,7 +132,7 @@ export function App() {
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
   // Cold-start progress (spec §1): staged phase + per-bundle progress.
-  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  const [progress, setProgress] = useState<BuildEvent | null>(null);
   // Project-open progress: while a baked project is opening/switching (US Core,
   // tiny guide) we surface the SAME staged progress the boot path shows — otherwise
   // the package fetch + mount + compile + site preparation looks hung (mobile).
@@ -146,10 +152,11 @@ export function App() {
   const [revealLine, setRevealLine] = useState<number | undefined>(undefined);
 
   const [compile, setCompile] = useState<CompileResult | null>(null);
+  const [compileMs, setCompileMs] = useState<number | null>(null);
   // Authored local resources (input/{resources,examples}/**.json) for Explore.
   // SUSHI consumes them without re-emitting them as compiler outputs, so retain
   // their exact source declarations beside the byte-exact compiled list.
-  const [predefinedResources, setPredefinedResources] = useState<CompileResult['resources']>([]);
+  const [predefinedResources, setPredefinedResources] = useState<ResourceView[]>([]);
   const [compiling, setCompiling] = useState(false);
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
   const [resourceFilter, setResourceFilter] = useState('');
@@ -177,7 +184,7 @@ export function App() {
 
   // task #32: packages the runtime resolver could not obtain from any source.
   const [blockedPackages, setBlockedPackages] = useState<BlockedPackage[]>([]);
-  // Site preview (immutable BuildHandle-driven).
+  // Site preview (immutable Build-driven).
   const [generatorId, setGeneratorId] = useState<string>(
     () => localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(projectIdRef.current),
   );
@@ -232,7 +239,11 @@ export function App() {
       (window as unknown as { __igDebug?: unknown }).__igDebug = { engine, metrics: [] };
       // Preview-window (task #37): register the SW + render responder early so an
       // "Open site in new window" tab can be answered as soon as it exists.
-      wirePreviewResponder((handle, path) => engine.render(handle, path));
+      wirePreviewResponder((buildId, path) => {
+        const build = engine.open(buildId);
+        if (!build) return Promise.reject(new Error(`unknown build ${buildId}`));
+        return build.render(path);
+      });
       void ensurePreviewServiceWorker().then((ok) => {
         if (!cancelled) setPreviewCapable(ok);
       });
@@ -271,9 +282,9 @@ export function App() {
       });
       if (cancelled) return;
       setVersion(res.version);
-      setInitMs(res.initMs);
+      setInitMs(res.events.find((event) => event.stage === 'wasm')?.durationMs ?? null);
       setEngineReady(true);
-      const readyEvent: ProgressEvent = { stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` };
+      const readyEvent: BuildEvent = { stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` };
       recordRuntimeMetric(readyEvent);
       setProgress(readyEvent);
 
@@ -341,7 +352,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- one project crossing -> immutable BuildHandle -> atomic publication --
+  // ---- one project crossing -> immutable Build -> atomic publication --------
   const performBuildSite = useCallback(async (
     capture: WorkspaceCapture,
     engine: EngineClient,
@@ -350,9 +361,12 @@ export function App() {
     lease: TaskLease,
   ) => {
     const project = capture.revision;
-    const report = (ev: ProgressEvent) => {
+    const report = (ev: BuildEvent) => {
       if (!lease.isLatest()) return;
       recordRuntimeMetric(ev);
+      if (typeof ev.metrics?.compileProjectMs === 'number') {
+        setCompileMs(ev.metrics.compileProjectMs);
+      }
       setProgress(ev);
     };
     if (lease.isLatest()) {
@@ -370,7 +384,7 @@ export function App() {
         // The tiny guide keeps its one teaching profile in 00-EditorUser.fsh,
         // making the initial Source -> Definition -> Published-page trail
         // causal instead of whichever StructureDefinition sorts first.
-        const firstFsh = Object.keys(project.files).filter((path) => path.endsWith('.fsh')).sort()[0];
+        const firstFsh = Object.keys(project.fsh).filter((path) => path.endsWith('.fsh')).sort()[0];
         const firstDeclared = firstFsh ? soleResourceDeclaredIn(allResources, firstFsh) : null;
         if (firstDeclared) return resourceIdentity(firstDeclared);
         const first = allResources.find((resource) => resource.resourceType === 'StructureDefinition' && resource.url);
@@ -380,12 +394,15 @@ export function App() {
     try {
       report({ stage: 'site-build', message: `Preparing ${genId} site…` });
       const siteStarted = performance.now();
-      engine.setProgress(report);
-      const prepared = await engine.prepare(project, generatorSpec(genId, selectedTemplate));
+      const build = await engine.prepare(
+        project,
+        generatorSpec(genId, selectedTemplate, capture.buildEpochSecs),
+        report,
+      );
       // Compilation remains useful UI state even if catalog validation,
       // rendering, or preview publication subsequently fails.
-      showCompiled(prepared.compiled);
-      const catalog = await engine.outputs(prepared.handle);
+      showCompiled(build.compilation);
+      const catalog = await build.outputs();
       const pages = catalog.outputs.filter((output) => output.kind === 'page');
       report({
         stage: 'site-build',
@@ -397,7 +414,7 @@ export function App() {
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
       if (genId === PUBLISHER_GENERATOR) {
-        if (project.projectId !== TINY_PROJECT_ID) lastGoodTemplateRef.current = selectedTemplate;
+        if (capture.projectId !== TINY_PROJECT_ID) lastGoodTemplateRef.current = selectedTemplate;
         setTemplateError(null);
       }
       const nextGeneration = siteGenerationRef.current + 1;
@@ -405,9 +422,8 @@ export function App() {
       const publishStarted = performance.now();
       const published = await publishPreviewSource(
         {
-          igId: project.projectId,
-          handle: prepared.handle,
-          buildId: prepared.buildId,
+          igId: capture.projectId,
+          buildId: catalog.buildId,
           catalog,
         },
         nextGeneration,
@@ -422,7 +438,7 @@ export function App() {
       });
       // Swap React state only after the SW acknowledges this exact handle/catalog.
       siteGenerationRef.current = nextGeneration;
-      setSiteIgId(project.projectId);
+      setSiteIgId(capture.projectId);
       setSitePages(pages);
       setSelectedSitePage((current) => {
         if (pages.some((page) => page.path === current)) return current;
@@ -433,16 +449,15 @@ export function App() {
       setPreviewStale(false);
     } catch (e) {
       if (lease.isLatest()) {
-        if (e instanceof PrepareError && e.compiled) showCompiled(e.compiled);
+        if (e instanceof BuildFailure && e.detail.successfulCompilation) {
+          showCompiled(e.detail.successfulCompilation);
+        }
         setSiteError(String(e));
         setPreviewStale(true);
         throw e; // let selectTemplate see the failure so it can fall back
       }
     } finally {
-      // The queue does not start the next engine operation until this returns, so
-      // clearing transient flags/callbacks here cannot clobber a newer task.
       setSiteBuilding(false);
-      engine.setProgress(null);
     }
   }, []);
 
@@ -452,8 +467,7 @@ export function App() {
     genId: string,
   ) => {
     const capture = workspace.capture(1700000000);
-    const project = capture.revision;
-    const selectedTemplate = project.projectId === TINY_PROJECT_ID
+    const selectedTemplate = capture.projectId === TINY_PROJECT_ID
       ? tinyTemplateRef.current
       : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     await buildQueueRef.current.enqueue((lease) =>
@@ -506,9 +520,8 @@ export function App() {
     // Snapshot before entering the queue: loading another IG or typing while an
     // older wasm operation finishes cannot change this request's inputs midway.
     const capture = workspace.capture(1700000000);
-    const project = capture.revision;
-    const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(project.projectId);
-    const selectedTemplate = project.projectId === TINY_PROJECT_ID
+    const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(capture.projectId);
+    const selectedTemplate = capture.projectId === TINY_PROJECT_ID
       ? tinyTemplateRef.current
       : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     let failure: unknown = null;
@@ -519,14 +532,13 @@ export function App() {
         if (lease.isLatest()) setBlockedPackages([]);
       } catch (e) {
         failure = e;
-        if (lease.isLatest() && e instanceof PrepareError && e.stage === 'compile') {
+        if (lease.isLatest() && e instanceof BuildFailure && e.detail.phase === 'compilation') {
           setPredefinedResources([]);
           setCompile({
             resources: [],
             diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
-            buildMs: 0,
-            fileCount: 0,
           });
+          setCompileMs(0);
         }
       } finally {
         if (lease.isLatest()) setCompiling(false);
@@ -577,7 +589,7 @@ export function App() {
     setOpeningSince(Date.now());
     setOpenError(null); // clear any prior failure the moment a new open starts
     setSiteError(null);
-    const emit = (ev: ProgressEvent) => {
+    const emit = (ev: BuildEvent) => {
       if (openRequestRef.current !== requestId) return;
       recordRuntimeMetric(ev);
       setProgress(ev);
@@ -647,7 +659,6 @@ export function App() {
       setOpenError({ projectId, message });
     } finally {
       if (openRequestRef.current === requestId) {
-        engine?.setProgress(null);
         setOpeningSince(null);
       }
     }
@@ -667,7 +678,7 @@ export function App() {
   );
 
   const selectFile = useCallback(
-    (path: string, knownOwner?: CompiledResource | null) => {
+    (path: string, knownOwner?: ResourceView | null) => {
       if (!projectWorkspace) return;
       setActivePath(path);
       setActiveText(projectWorkspace.read(path) ?? '');
@@ -682,7 +693,7 @@ export function App() {
   );
 
   const navigateTo = useCallback(
-    (file: string, line: number, owner: CompiledResource | null) => {
+    (file: string, line: number, owner: ResourceView | null) => {
       selectFile(file, owner);
       // force a new object identity so the reveal effect re-fires on same line
       setRevealLine(line);
@@ -783,9 +794,9 @@ export function App() {
               <BuildStatus
                 version={version}
                 initMs={initMs}
-                buildMs={compile?.buildMs ?? null}
+                buildMs={compileMs}
                 resourceCount={compile ? resources.length : null}
-                fileCount={compile?.fileCount ?? null}
+                fileCount={projectLoaded ? paths.filter((path) => path.endsWith('.fsh')).length : null}
                 compiling={compiling}
               />
               <PackageSettings
@@ -1096,7 +1107,7 @@ export function App() {
 
 /** Cold-start progress uses the same honest transport presentation as project
  * opening: work is a status, while byte downloads get a measured counter/bar. */
-function StartupProgress({ progress }: { progress: ProgressEvent }) {
+function StartupProgress({ progress }: { progress: BuildEvent }) {
   const presentation = presentProgress(progress);
   const pct = presentation.fraction != null ? Math.round(presentation.fraction * 100) : null;
   return (
@@ -1118,7 +1129,7 @@ function StartupProgress({ progress }: { progress: ProgressEvent }) {
 /** Human stage labels for the project-open overlay. Keeps the tiny per-item
  *  `message` (which names the specific bundle/file) but headlines the PHASE so a
  *  narrow screen still reads what's happening. */
-const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
+const OPEN_STAGE_LABEL: Record<BuildEvent['stage'], string> = {
   wasm: 'Starting engine',
   manifest: 'Downloading project',
   'project-cache-hit': 'Reusing project',
@@ -1143,7 +1154,7 @@ const OPEN_STAGE_LABEL: Record<ProgressEvent['stage'], string> = {
 /** Project-open progress is deliberately a single signal. Download stages show
  * measured MB (and a bar only when total bytes are known); compile/build stages
  * show their named work phase without a competing indefinite animation. */
-function OpenProgress({ progress, since }: { progress: ProgressEvent; since: number }) {
+function OpenProgress({ progress, since }: { progress: BuildEvent; since: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 500);

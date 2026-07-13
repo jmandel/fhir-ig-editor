@@ -1,17 +1,18 @@
 // Problems panel: exact source navigation plus fail-closed artifact consequences.
 
 import type { OutputDescriptor } from '../site/contract';
-import type { CompiledResource, Diagnostic } from '../worker/protocol';
+import type { Diagnostic } from '../worker/protocol';
+import type { ResourceView } from './resourceView';
 import { primaryPageForResource, resourceForDefinition } from './artifactSelection';
 
 interface Props {
   diagnostics: Diagnostic[];
-  resources: CompiledResource[];
+  resources: ResourceView[];
   pages: OutputDescriptor[] | null;
   publishedLabel: 'Published page' | 'Previous published page';
-  onNavigate: (file: string, line: number, owner: CompiledResource | null) => void;
-  onOpenDefinition: (resource: CompiledResource) => void;
-  onOpenPreview: (page: OutputDescriptor, resource: CompiledResource) => void;
+  onNavigate: (file: string, line: number, owner: ResourceView | null) => void;
+  onOpenDefinition: (resource: ResourceView) => void;
+  onOpenPreview: (page: OutputDescriptor, resource: ResourceView) => void;
 }
 
 const icon: Record<Diagnostic['severity'], string> = {

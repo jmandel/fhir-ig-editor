@@ -1,5 +1,5 @@
-import type { OutputDescriptor, ResourceSubject } from '../site/contract';
-import type { CompiledResource } from '../worker/protocol';
+import type { OutputDescriptor, OutputResourceSubject } from '../site/contract';
+import type { ResourceView } from './resourceView';
 
 /**
  * Stable UI identity for one compiled artifact. Output filenames are a
@@ -8,7 +8,7 @@ import type { CompiledResource } from '../worker/protocol';
  * FHIR subject; source-less generated resources deliberately share the subject
  * identity and are therefore de-duplicated rather than selected arbitrarily.
  */
-export function resourceIdentity(resource: CompiledResource): string {
+export function resourceIdentity(resource: ResourceView): string {
   const subject = subjectOf(resource);
   const source = resource.definition
     ? [
@@ -29,10 +29,10 @@ export function resourceIdentity(resource: CompiledResource): string {
 
 /** Primary entries win when the same exact artifact is present in both sets. */
 export function mergeResourcesByIdentity(
-  primary: CompiledResource[],
-  additional: CompiledResource[],
-): CompiledResource[] {
-  const merged: CompiledResource[] = [];
+  primary: ResourceView[],
+  additional: ResourceView[],
+): ResourceView[] {
+  const merged: ResourceView[] = [];
   const seen = new Set<string>();
   for (const resource of [...primary, ...additional]) {
     const identity = resourceIdentity(resource);
@@ -43,35 +43,38 @@ export function mergeResourcesByIdentity(
   return merged;
 }
 
-export function subjectOf(resource: CompiledResource): ResourceSubject | null {
+export function subjectOf(resource: ResourceView): OutputResourceSubject | null {
   return resource.resourceType && resource.id
     ? { resourceType: resource.resourceType, id: resource.id }
     : null;
 }
 
-export function sameSubject(left: ResourceSubject | null | undefined, right: ResourceSubject | null | undefined): boolean {
+export function sameSubject(
+  left: OutputResourceSubject | null | undefined,
+  right: OutputResourceSubject | null | undefined,
+): boolean {
   return Boolean(left && right && left.resourceType === right.resourceType && left.id === right.id);
 }
 
 export function resourceForSubject(
-  resources: CompiledResource[],
-  subject: ResourceSubject | null | undefined,
-): CompiledResource | null {
+  resources: ResourceView[],
+  subject: OutputResourceSubject | null | undefined,
+): ResourceView | null {
   const matches = resources.filter((resource) => sameSubject(subjectOf(resource), subject));
   return matches.length === 1 ? matches[0] : null;
 }
 
 export function resourceForPage(
-  resources: CompiledResource[],
+  resources: ResourceView[],
   page: OutputDescriptor | null | undefined,
-): CompiledResource | null {
+): ResourceView | null {
   return resourceForSubject(resources, page?.subject);
 }
 
 export function resourceForDefinition(
-  resources: CompiledResource[],
-  definition: CompiledResource['definition'] | null | undefined,
-): CompiledResource | null {
+  resources: ResourceView[],
+  definition: ResourceView['definition'] | null | undefined,
+): ResourceView | null {
   if (!definition) return null;
   const matches = resources.filter((resource) => resource.definition
     && resource.definition.kind === definition.kind
@@ -83,7 +86,7 @@ export function resourceForDefinition(
 
 export function primaryPageForResource(
   pages: OutputDescriptor[] | null,
-  resource: CompiledResource | null,
+  resource: ResourceView | null,
 ): OutputDescriptor | null {
   const subject = resource ? subjectOf(resource) : null;
   if (!subject || !pages) return null;
@@ -92,9 +95,9 @@ export function primaryPageForResource(
 }
 
 export function soleResourceDeclaredIn(
-  resources: CompiledResource[],
+  resources: ResourceView[],
   sourcePath: string,
-): CompiledResource | null {
+): ResourceView | null {
   const matches = resources.filter((resource) => resource.definition?.path === sourcePath);
   return matches.length === 1 ? matches[0] : null;
 }

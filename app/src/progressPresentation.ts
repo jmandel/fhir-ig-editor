@@ -1,6 +1,6 @@
-import type { ProgressEvent } from './worker/protocol';
+import type { BuildEvent } from './worker/protocol';
 
-const DOWNLOAD_STAGES = new Set<ProgressEvent['stage']>([
+const DOWNLOAD_STAGES = new Set<BuildEvent['stage']>([
   'manifest',
   'bundle-fetch',
   'registry-fetch',
@@ -21,7 +21,7 @@ function mb(bytes: number): string {
 /** Derive one honest presentation from a progress event. Work phases are text
  * only. A bar is shown solely for a byte transport with a known total, and its
  * label always comes from bytes already read rather than the declared size. */
-export function presentProgress(progress: ProgressEvent): ProgressPresentation {
+export function presentProgress(progress: BuildEvent): ProgressPresentation {
   const downloading = DOWNLOAD_STAGES.has(progress.stage);
   if (!downloading) return { downloading: false, byteLabel: null, fraction: null };
   // Reserve the download row before the first response chunk arrives. This

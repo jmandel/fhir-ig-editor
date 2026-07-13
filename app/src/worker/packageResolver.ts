@@ -22,7 +22,7 @@ import type {
   MissingPackage,
   MutableVersionRequest,
   PackageMountInput,
-  ProgressEvent,
+  BuildEvent,
   ResolutionStep,
   VersionIndex,
 } from './protocol';
@@ -58,7 +58,7 @@ export interface ResolveOutcome {
 
 /** How the loop reports progress (the resolver emits a subset of the shared
  * progress vocabulary; baked transport adds timing/cache metadata). */
-export type ResolveProgress = (ev: ProgressEvent) => void;
+export type ResolveProgress = (ev: BuildEvent) => void;
 
 /** The seams the loop needs from its host (EngineClient supplies these). */
 export interface ResolverHost {
@@ -97,7 +97,7 @@ export function packageBatchProgress(labels: readonly string[], emit: ResolvePro
     });
   };
   return {
-    report(event: ProgressEvent) {
+    report(event: BuildEvent) {
       if (event.stage === 'package-blocked' || !event.label || !members.has(event.label)) {
         emit(event);
         return;

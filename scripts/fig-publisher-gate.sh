@@ -49,15 +49,14 @@ rendered = result("render")
 finalized = result("finalize")
 build_id = prepared["buildId"]
 assert build_id.startswith("sb1-sha256:")
-assert catalog["buildId"] == rendered["buildId"] == finalized["buildId"] == build_id
+assert catalog["buildId"] == finalized["inputBuildId"] == build_id
 assert any(item["path"] == "en/index.html" for item in catalog["outputs"])
-assert rendered["path"] == "en/index.html"
 
 standalone = (root / "index.html").read_bytes()
 published = (root / "site/en/index.html").read_bytes()
 assert standalone == published
 assert len(standalone) > 500
-assert hashlib.sha256(standalone).hexdigest() == rendered["content"]["sha256"]
+assert hashlib.sha256(standalone).hexdigest() == rendered["sha256"]
 
 receipt = json.loads((root / "site/site-output.json").read_text())
 assert receipt["schemaVersion"] == "site-output/v1"
@@ -65,8 +64,8 @@ assert receipt["inputBuildId"] == build_id
 assert receipt["outputId"] == finalized["outputId"]
 assert receipt["outputId"].startswith("so1-sha256:")
 entry = next(item for item in receipt["files"] if item["path"] == "en/index.html")
-assert entry["content"] == rendered["content"]
-assert len(receipt["files"]) == finalized["files"]
+assert entry["content"] == rendered
+assert len(receipt["files"]) == len(finalized["files"])
 print(
     "FIG PUBLISHER GATE: PASS",
     build_id,

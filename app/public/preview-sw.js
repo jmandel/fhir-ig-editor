@@ -6,10 +6,9 @@ import { preparePreviewHtml } from './preview-controls.js';
 
 const BASE = new URL('./', self.location).pathname;
 const PREVIEW_ROOT = BASE + 'preview/';
-const PREVIEW_SW_PROTOCOL = 5;
-// Protocol 5 adds read-only pointer restoration. The persisted pointer and
-// rendered-response schemas are unchanged from v4, so retain those namespaces
-// across the worker replacement instead of throwing away verified warm state.
+const PREVIEW_SW_PROTOCOL = 6;
+// Protocol 6 removes the redundant build handle: buildId is the only lifecycle
+// address. Older verified pointers are accepted and normalized on next commit.
 const PREVIEW_STORAGE_SCHEMA = 4;
 const STATE_CACHE = `igpreview-state:v${PREVIEW_STORAGE_SCHEMA}`;
 const OUTPUT_CACHE_PREFIX = `igpreview-output:v${PREVIEW_STORAGE_SCHEMA}:`;
@@ -116,9 +115,6 @@ function validatePublication(source, generation) {
   if (typeof source.igId !== 'string' || !source.igId || source.igId.length > 256 || /[\\/\0]/.test(source.igId)) {
     throw new Error('invalid preview IG id');
   }
-  if (typeof source.handle !== 'string' || !source.handle || source.handle.length > 512) {
-    throw new Error('invalid preview build handle');
-  }
   if (typeof source.buildId !== 'string' || !source.buildId || source.buildId.length > 512) {
     throw new Error('invalid preview build id');
   }
@@ -151,7 +147,6 @@ function validatePublication(source, generation) {
     generation,
     source: {
       igId: source.igId,
-      handle: source.handle,
       buildId: source.buildId,
       catalog: {
         buildId: source.catalog.buildId,
@@ -238,7 +233,7 @@ async function handlePreview(url) {
   if (cached) return outputResponse(cached.bytes, output, parsed, publication.generation, 'build-cache', cached.ref);
 
   // Assets and auxiliary files must be complete in the catalog. Only an
-  // explicitly unresolved page is allowed to invoke the renderer handle.
+  // explicitly unresolved page is allowed to invoke its retained Build.
   if (output.kind !== 'page') return unavailableOutput(parsed, output);
   const rendered = await requestFromEditor(publication, output, 'igpreview:render');
   if (rendered) {
@@ -352,7 +347,6 @@ async function requestFromEditor(publication, output, type) {
       client.postMessage({
         type,
         igId: publication.source.igId,
-        handle: publication.source.handle,
         buildId: publication.source.buildId,
         path: output.path,
         ...(output.content ? { content: output.content } : {}),

@@ -10,7 +10,7 @@ describe('template PreparedPackage transport', () => {
     expect(SOURCE).toContain('if (!forceRaw)');
     expect(SOURCE).toContain('findPreparedPackage(entry.label, transportIdentity)');
     expect(SOURCE).toContain("return { kind: 'prepared', pointer }");
-    expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true)');
+    expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true, report)');
 
     const warmLookup = SOURCE.indexOf('findPreparedPackage(entry.label, transportIdentity)');
     const networkFetch = SOURCE.indexOf('resp = await fetch(url)');
@@ -27,7 +27,7 @@ describe('template PreparedPackage transport', () => {
   });
 
   test('recovers a bad prepared artifact only from original transports', () => {
-    expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true)');
+    expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true, report)');
     expect(RESOLVER_SOURCE).toContain('if (hasLocalPackage(label))');
     expect(RESOLVER_SOURCE).toContain('await fetchFromRegistry(label, missing');
     expect(SOURCE).not.toContain('bundleCache');

@@ -1,9 +1,9 @@
 import type { OutputDescriptor } from '../site/contract';
-import type { CompiledResource } from '../worker/protocol';
+import type { ResourceView } from './resourceView';
 import type { WorkspaceMode } from './ProjectOverview';
 
 interface Props {
-  resource: CompiledResource | null;
+  resource: ResourceView | null;
   page: OutputDescriptor | null;
   currentMode: WorkspaceMode;
   activeSourcePath: string | null;

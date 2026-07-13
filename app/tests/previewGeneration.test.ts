@@ -25,7 +25,6 @@ const ref = (digit: string, byteLength = 12): ContentRef => ({
 
 const source = (content: ContentRef | null = ref('a')) => ({
   igId: 'uscore',
-  handle: 'build-handle-1',
   buildId: 'sb1-sha256:one',
   catalog: {
     buildId: 'sb1-sha256:one',
@@ -236,7 +235,7 @@ test('publication resolves each open successor page once and leaves the full cat
     ['en/index.html', 'en/index.html'],
     async (_handle, path) => {
       calls.push(path);
-      return { path, mediaType: 'text/html; charset=utf-8', content: ref('b') };
+      return { ...ref('b'), mediaType: 'text/html; charset=utf-8' };
     },
   );
   expect(calls).toEqual(['en/index.html']);
@@ -252,7 +251,7 @@ test('stale open-page resolution cannot publish a partial successor', async () =
     ['en/index.html'],
     async (_handle, path) => {
       current = false;
-      return { path, mediaType: 'text/html; charset=utf-8', content: ref('b') };
+      return { ...ref('b'), mediaType: 'text/html; charset=utf-8' };
     },
     () => current,
   );

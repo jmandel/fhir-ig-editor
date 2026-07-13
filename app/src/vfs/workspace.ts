@@ -1,5 +1,5 @@
-import type { ProjectRevision } from '../site/contract';
-import type { CompileResult } from '../worker/protocol';
+import type { ProjectRevision } from '../site/contract.generated';
+import type { ResourceView } from '../views/resourceView';
 
 export interface ProjectFile {
   path: string;
@@ -29,8 +29,10 @@ export interface WorkspaceInstallResult {
 }
 
 export interface WorkspaceCapture {
+  projectId: string;
+  buildEpochSecs: number;
   revision: ProjectRevision;
-  predefinedDisplay: CompileResult['resources'];
+  predefinedDisplay: ResourceView[];
 }
 
 const OPFS_ROOT = 'fhir-ig-editor-workspaces';
@@ -646,7 +648,7 @@ export class Workspace {
     const files: Record<string, string> = {};
     const predefined: Record<string, unknown> = {};
     const siteFiles: Record<string, string> = {};
-    const predefinedDisplay: CompileResult['resources'] = [];
+    const predefinedDisplay: ResourceView[] = [];
     for (const [path, text] of this.text) {
       if (path.endsWith('.fsh')) files[path] = text;
       const predefinedPath = (
@@ -679,14 +681,12 @@ export class Workspace {
     for (const [path, base64] of this.binary) siteFiles[path] = base64;
     predefinedDisplay.sort((left, right) => left.filename.localeCompare(right.filename));
     const revision: ProjectRevision = Object.freeze({
-      projectId: this.projectId,
       config: this.text.get('sushi-config.yaml') ?? '',
-      files: Object.freeze(files),
+      fsh: Object.freeze(files),
       predefined: Object.freeze(predefined),
       siteFiles: Object.freeze(siteFiles),
-      buildEpochSecs,
     });
-    return { revision, predefinedDisplay };
+    return { projectId: this.projectId, buildEpochSecs, revision, predefinedDisplay };
   }
 
   private stateSnapshot(): WorkspaceState {

@@ -9,7 +9,7 @@ import {
   type Workspace,
   WorkspaceRepository,
 } from './workspace';
-import type { ProgressEvent } from '../worker/protocol';
+import type { BuildEvent } from '../worker/protocol';
 import { loadGithubIg, type GithubIgSpec } from './githubIg';
 import igCatalog from '../igCatalog.json';
 import { readResponseBytes, sha256Hex } from '../worker/bundleIntegrity';
@@ -97,7 +97,7 @@ function parseSourceDescriptor(value: unknown, ig: CatalogIg): CatalogSourceDesc
 async function loadTgzProject(
   workspaces: WorkspaceRepository,
   ig: CatalogIg,
-  onProgress?: (ev: ProgressEvent) => void,
+  onProgress?: (ev: BuildEvent) => void,
 ): Promise<DemoIgMeta> {
   const descriptorStarted = performance.now();
   const existing = await workspaces.open(ig.id);
@@ -241,7 +241,7 @@ export interface DemoIgMeta {
 export async function loadProject(
   workspaces: WorkspaceRepository,
   projectId: string,
-  onProgress?: (ev: ProgressEvent) => void,
+  onProgress?: (ev: BuildEvent) => void,
 ): Promise<DemoIgMeta> {
   // Dispatch: a catalog IG loads from its CI-baked same-origin source.tgz; a
   // GITHUB_PROJECTS entry loads live from GitHub (generic fallback for anything

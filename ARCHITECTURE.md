@@ -52,23 +52,28 @@ and package lock. SiteBuild v2 makes each locked package's `content` the exact
 deterministic PreparedPackage carrier mounted by execution. The carrier is the
 single package handoff: its directory is validated without expansion, member
 bytes remain compressed until read, and no normalized-payload or renderer-input
-side artifact exists beside it. `SiteEngine::restore(ClosedSiteBuild, ContentStore)` strictly
-reconstructs either target's ordinary bounded runtime in a fresh process. This
-is handle lifecycle admission, not a fifth host operation or another value.
+side artifact exists beside it. `SiteEngine::restore(ClosedSiteBuild,
+ContentStore)` strictly reconstructs either target's ordinary bounded runtime
+in a fresh process. This is lifecycle admission, not a fifth host operation or
+another value.
 
 ## The only host API
 
 ```text
-prepare(project, generatorSpec) -> BuildHandle
-outputs(handle)                 -> OutputCatalog
-render(handle, path)            -> Output
-finalize(handle)                -> SiteOutput
+prepare(project, generatorSpec) -> Build
+build.outputs()                 -> OutputCatalog
+build.render(path)              -> ContentRef
+build.finalize()                -> SiteOutput
 ```
 
-`BuildHandle`, `OutputCatalog`, and `Output` are scoped API views, not stored
-domain values. A handle names one immutable `SiteBuild`; it is never authority
-independent of that value. `Output` returns a path, media type, and `ContentRef`
-whose bytes are already in the host's `ContentStore`.
+`Build` is one immutable host facade over a retained `SiteBuild`, not a stored
+domain value or serialized handoff. It does not expose a handle or generator
+field. A handle may exist inside a worker/process registry strictly for
+open/restore/release lifecycle routing; `OutputCatalog.buildId` names the exact
+closed input when preview publication needs that routing value. It is never
+authority independent of `ClosedSiteBuild + ContentStore`. `OutputCatalog`
+declares path and media type; `render(path)` returns only the resulting
+`ContentRef`, whose bytes are already in the host's `ContentStore`.
 
 The complete immutable `ProjectRevision` crosses the site-execution boundary
 once, through `prepare`. Browser package acquisition has a private config-only
@@ -76,8 +81,8 @@ handshake before that call: Rust computes the resolver fixpoint and template
 chain, while the host fetches and transactionally mounts any missing exact
 coordinates. This is package transport, not a second site operation. FSH,
 predefined resources, and authored site bytes cross only in `prepare`; later
-site operations accept only its handle and never consult ambient "last build"
-state.
+site operations are methods of that build and never consult ambient "last
+build" state.
 
 `outputs` is complete and collision-checked before rendering begins. Pages,
 CSS, JavaScript, images, fonts, machine-readable resources, and auxiliary text
@@ -92,22 +97,51 @@ page. Implementations may memoize private work by exact identity.
 verified. It returns the one canonical `SiteOutput`; publication writes its
 content first and advances a pointer only after complete verification.
 
+Compilation outcome and diagnostics are immutable inspection metadata returned
+with `prepare`; they are not another build lifecycle or renderer handoff. The
+editor may expose them through its `Build` view so Author/Explore can become
+useful before site publication finishes.
+
+## Platform adapters and transport seams
+
+Only three storage/platform capabilities sit below the host API:
+
+| Seam | Native | Browser | What remains in Rust |
+| --- | --- | --- | --- |
+| `ProjectSource` | captures one regular, non-symlink filesystem tree | captures one transactional `Workspace` generation | source validation and canonical `ProjectRevision` |
+| `PackageProvider` | reads exact selected coordinates from an explicit package cache | fetches/mounts authenticated prepared packages | dependency/version/template selection and exact closure |
+| `ContentStore` | filesystem SHA-256 object directory | OPFS-backed verified CAS | every `ContentRef`, closure check, and `SiteOutput` |
+
+These are capabilities, not domain layers. Concrete filesystem and Workspace
+implementations stay inside their host. Package transport is a private
+missing-coordinate handshake driven by Rust; it never becomes a functional
+result of `prepare`.
+
+Rust generates the cross-language TypeScript declarations and Draft 2020-12
+schema from the canonical serialization types. TypeScript may define UI-only
+views and operation tables, but it may not copy a Rust payload structure by
+hand. Independent digest and runtime validation deliberately remain separate
+implementations. All operation observations use `BuildEvent`; all four
+operations fail with typed `BuildError`.
+
 ## Renderer implementations
 
 Cycle and Publisher templates share the host contract, not an implementation.
 
 Cycle receives a callback-free, eagerly closed `cycle-site/v2` `SiteBuild` and
 renders through the one shared LiquidJS/React implementation used by browser
-and CLI. LiquidJS implements `outputs` and `render`; Rust admits the closed
-handle and implements `finalize`, so Rust is the sole production constructor of
-the canonical `SiteOutput`. TypeScript independently validates the receipt and
-every staged byte before atomic publication. Native external finalization names
-the exact renderer-opened `inputBuildId`; Rust must restore that same identity
-before it authenticates the staged tree, and the caller must verify the returned
-build id. Native execution re-hashes the renderer recipe around fresh
-finalization and immediately before cached publication, and the atomic rename
-requires an adopted Rust receipt. `cycle-site/v1`, `site.db`, row
-projections, SQL capabilities, and dual v1/v2 dispatch are removed.
+and CLI. Its private renderer port is `open(ClosedSiteBuild, ContentStore)`,
+`outputs()`, and `render(path) -> ContentRef`. The host binds that immutable
+output path set to the retained Rust runtime once and admits each completed,
+verified `SiteOutputFile` as it renders. The ordinary no-argument `finalize()`
+then checks exact set equality and constructs `SiteOutput`; there is no public
+bulk external-finalization plan. The native Bun/Rust process boundary carries
+the same completed references through one hidden IPC command, not a Fig user
+operation. TypeScript independently validates closed inputs, receipts, and
+digests. A staging tree is permitted only as a final receipt-driven atomic
+publication adapter, never as a renderer/finalizer handoff or source of output
+identity. `cycle-site/v1`, `site.db`, row projections, SQL capabilities, and
+dual v1/v2 dispatch are removed.
 
 Publisher templates render with the Rust Liquid implementation. Registered
 generated-fragment names resolve synchronously through the immutable typed
@@ -146,14 +180,15 @@ Numeric UI generations order commits but never identify semantic content. The
 Service Worker serves immutable output content and atomically follows a small
 current-output pointer. Its in-memory state is an optimization, not authority.
 
-A native external builder may probe `SiteOutputCache` within `outputs` from the verified closed
-`SiteBuild`, exact renderer implementation/recipe, output schema, and options;
-on a miss Rust `finalize` authenticates the complete renderer tree, constructs
-the ordinary canonical `SiteOutput`, and publishes its addressed bytes.
-Materialization is into the host's existing private atomic
-publication transaction and is re-verified there. A staged mutable tree without
-a closed `SiteBuild` (including legacy `fig render`) has no truthful pre-render
-key and is not covered by this seam.
+A native host may privately derive a lookup pointer from the verified closed
+`SiteBuild`, exact renderer recipe, output schema, and options. The pointer and
+its filesystem implementation are not public types, operations, or fields of
+`SiteOutput`. A hit is accepted only after independently parsing the canonical
+receipt and verifying every referenced ContentStore object. On a miss, ordinary
+no-argument `finalize` constructs the receipt and the host advances the private
+pointer last. Materialization happens once, from that receipt, inside the
+existing atomic publication transaction. A staged mutable tree has no truthful
+pre-render identity and is never cache authority.
 
 ## Ownership
 
@@ -188,6 +223,8 @@ place.
 | Cycle `cycle-site/v1`, `compat.site_db/rows.json`, `JsonSiteBuildView`, `SqliteSiteBuildView`, `SITE_DB`, SQL Liquid capability, and v1/v2 dispatch | one strict `cycle-site/v2` closed `SiteBuild` view |
 | reverse `site.db -> PreparedGuide` and v1 SiteBuild projections/features | direct `PreparedGuide -> cycle-site/v2 SiteBuild` only |
 | TypeScript receipt sealing/creation and public `fig output-cache publish` | Rust `finalize` constructs/publishes the receipt; TypeScript independently validates it |
+| public `OutputCacheKey`, `SiteOutputCache`, and `FileSiteOutputCache` | private host lookup pointer derived from functional receipt inputs |
+| optional `finalize(handle, RendererOutput)` and public external-finalization flags | private renderer bind/admit transport followed by the same no-argument `finalize()` |
 | native Fig staged `engine`, `fragment(s)`, `produce`, build-root `render`, template-dir materialization, and `watch` | closed-bundle `fig prepare/outputs/render/finalize` over SiteEngine |
 | generation-specific HTML cache identity and regex normalization | canonical renderer bytes plus response-time preview control injection |
 | overlapping normative architecture prose in root/subproject READMEs and `SPEC.md` | this document; other docs orient, operate, or explain one implementation |

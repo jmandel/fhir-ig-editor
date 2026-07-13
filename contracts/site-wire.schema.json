@@ -1,0 +1,3362 @@
+{
+  "schemaVersion": "fhir-site-wire-schemas/v1",
+  "schemas": {
+    "ProjectRevision": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ProjectRevision",
+      "description": "One complete immutable project input captured by a `prepare` request. Site\nbytes are carried here even though only their normalized page listing\naffects semantic compilation.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "fsh": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "predefined": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "siteFiles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "fsh",
+        "predefined",
+        "siteFiles"
+      ]
+    },
+    "CompilationOutcome": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "CompilationOutcome",
+      "type": "object",
+      "properties": {
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompilationResource"
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompilationDiagnostic"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "resources",
+        "diagnostics"
+      ],
+      "$defs": {
+        "CompilationResource": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "definition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "filename",
+            "text"
+          ]
+        },
+        "CompilationDefinition": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/CompilationDefinitionKind"
+            },
+            "path": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "column": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "path",
+            "line",
+            "column"
+          ]
+        },
+        "CompilationDefinitionKind": {
+          "type": "string",
+          "enum": [
+            "fsh-declaration"
+          ]
+        },
+        "CompilationDiagnostic": {
+          "type": "object",
+          "properties": {
+            "severity": {
+              "$ref": "#/$defs/CompilationDiagnosticSeverity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "ownerDefinition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "severity",
+            "message"
+          ]
+        },
+        "CompilationDiagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ]
+        }
+      }
+    },
+    "PreparedProjectResult": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "PreparedProjectResult",
+      "type": "object",
+      "properties": {
+        "compiled": {
+          "$ref": "#/$defs/CompilationOutcome"
+        },
+        "site": {
+          "$ref": "#/$defs/PrepareResult"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BuildEvent"
+          }
+        }
+      },
+      "required": [
+        "compiled",
+        "site",
+        "events"
+      ],
+      "$defs": {
+        "CompilationOutcome": {
+          "type": "object",
+          "properties": {
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompilationResource"
+              }
+            },
+            "diagnostics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompilationDiagnostic"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "resources",
+            "diagnostics"
+          ]
+        },
+        "CompilationResource": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "definition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "filename",
+            "text"
+          ]
+        },
+        "CompilationDefinition": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/CompilationDefinitionKind"
+            },
+            "path": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "column": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "path",
+            "line",
+            "column"
+          ]
+        },
+        "CompilationDefinitionKind": {
+          "type": "string",
+          "enum": [
+            "fsh-declaration"
+          ]
+        },
+        "CompilationDiagnostic": {
+          "type": "object",
+          "properties": {
+            "severity": {
+              "$ref": "#/$defs/CompilationDiagnosticSeverity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "ownerDefinition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "severity",
+            "message"
+          ]
+        },
+        "CompilationDiagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ]
+        },
+        "PrepareResult": {
+          "type": "object",
+          "properties": {
+            "buildId": {
+              "type": "string"
+            },
+            "generator": {
+              "$ref": "#/$defs/GeneratorKind"
+            },
+            "siteBuild": {
+              "$ref": "#/$defs/ClosedSiteBuild"
+            }
+          },
+          "required": [
+            "buildId",
+            "generator",
+            "siteBuild"
+          ]
+        },
+        "GeneratorKind": {
+          "type": "string",
+          "enum": [
+            "cycle",
+            "publisher"
+          ]
+        },
+        "ClosedSiteBuild": {
+          "description": "Proof that a [`SiteBuild`]'s render-plan closure is fully materialized. This\nwrapper is the value an external builder should accept when callbacks are not\npart of its architecture.",
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "$ref": "#/$defs/SchemaVersion"
+            },
+            "buildId": {
+              "$ref": "#/$defs/BuildId"
+            },
+            "project": {
+              "$ref": "#/$defs/ProjectIdentity"
+            },
+            "packageLock": {
+              "$ref": "#/$defs/PackageLock"
+            },
+            "renderTarget": {
+              "$ref": "#/$defs/RenderTarget"
+            },
+            "renderPlan": {
+              "$ref": "#/$defs/RenderPlan"
+            },
+            "artifacts": {
+              "$ref": "#/$defs/ArtifactCatalog"
+            },
+            "diagnostics": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/BuildDiagnostic"
+              }
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "buildId",
+            "project",
+            "packageLock",
+            "renderTarget",
+            "renderPlan",
+            "artifacts",
+            "diagnostics"
+          ]
+        },
+        "SchemaVersion": {
+          "description": "Wire-format discriminator. A new incompatible contract requires a new enum\nvariant rather than silently changing existing hashing semantics.",
+          "type": "string",
+          "enum": [
+            "site-build/v2"
+          ]
+        },
+        "BuildId": {
+          "description": "Deterministic identity of the complete SiteBuild document (except this field).",
+          "type": "string"
+        },
+        "ProjectIdentity": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string"
+            },
+            "revision": {
+              "description": "An SCM revision when available; otherwise a caller-defined immutable\nrevision label. Exact source hashes remain authoritative.",
+              "type": "string"
+            },
+            "sources": {
+              "$ref": "#/$defs/SourceManifest"
+            }
+          },
+          "required": [
+            "projectId",
+            "revision",
+            "sources"
+          ]
+        },
+        "SourceManifest": {
+          "description": "Exact source bytes that define a project revision.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SourceEntry"
+          }
+        },
+        "SourceEntry": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/SourceKind"
+            },
+            "content": {
+              "$ref": "#/$defs/ContentRef"
+            }
+          },
+          "required": [
+            "kind",
+            "content"
+          ]
+        },
+        "SourceKind": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "fsh"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "config"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "predefined_resource"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "page"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "template"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ContentRef": {
+          "description": "Exact immutable-content reference shared by compilers, renderers, and hosts.",
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "description": "The algorithm is fixed to SHA-256 and encoded in the field name.",
+              "type": "string"
+            },
+            "byteLength": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "mediaType": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha256",
+            "byteLength"
+          ]
+        },
+        "PackageLock": {
+          "description": "Exact package closure. Keys are repeated in each value so a key/value mismatch\ncannot be hidden by a serialization adapter.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/LockedPackage"
+          }
+        },
+        "LockedPackage": {
+          "type": "object",
+          "properties": {
+            "coordinate": {
+              "$ref": "#/$defs/PackageCoordinate"
+            },
+            "content": {
+              "description": "Exact deterministic prepared-package carrier. This content-addressed\nvalue binds the complete package representation consumed by execution,\nnot merely its registry name/version or a normalized semantic subset.",
+              "$ref": "#/$defs/ContentRef"
+            },
+            "dependencies": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/PackageCoordinate"
+              }
+            }
+          },
+          "required": [
+            "coordinate",
+            "content"
+          ]
+        },
+        "PackageCoordinate": {
+          "description": "An exact FHIR package coordinate (`package.id#version`).",
+          "type": "string"
+        },
+        "RenderTarget": {
+          "type": "object",
+          "properties": {
+            "renderer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "mode": {
+              "$ref": "#/$defs/RenderMode"
+            },
+            "fhirVersion": {
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/PackageCoordinate"
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "renderer",
+            "mode",
+            "fhirVersion"
+          ]
+        },
+        "ProducerRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "version"
+          ]
+        },
+        "RenderMode": {
+          "type": "string",
+          "enum": [
+            "native_template",
+            "external_builder"
+          ]
+        },
+        "RenderPlan": {
+          "description": "Artifacts a renderer promises it can consume without discovering undeclared\nrequirements. Sealing also follows their typed artifact read dependencies,\nso this set contains roots rather than requiring callers to duplicate the\ntransitive closure manually.",
+          "type": "object",
+          "properties": {
+            "requiredArtifacts": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ArtifactKey"
+              }
+            }
+          },
+          "required": [
+            "requiredArtifacts"
+          ]
+        },
+        "ArtifactKey": {
+          "description": "Typed identity of one semantic or rendered artifact.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "semantic_model"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resource": {
+                  "$ref": "#/$defs/ResourceKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "resource"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "$ref": "#/$defs/FragmentScope"
+                },
+                "fragment": {
+                  "$ref": "#/$defs/FragmentKind"
+                },
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "fragment"
+                }
+              },
+              "required": [
+                "kind",
+                "scope",
+                "fragment"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "page"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "$ref": "#/$defs/AssetNamespace"
+                },
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                }
+              },
+              "required": [
+                "kind",
+                "namespace",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "data"
+                }
+              },
+              "required": [
+                "kind",
+                "namespace",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ResourceKey": {
+          "type": "object",
+          "properties": {
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "resourceType",
+            "id"
+          ]
+        },
+        "FragmentScope": {
+          "description": "The subject of a generated fragment. Some Publisher includes describe the\nguide as a whole (for example dependency/summary material) rather than one\nresource, so resource scope must not be fabricated for them.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "whole_ig"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resource": {
+                  "$ref": "#/$defs/ResourceKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "resource"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ]
+            }
+          ]
+        },
+        "FragmentKind": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "narrative"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "dictionary"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "terminology"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "table"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "SourcePath": {
+          "description": "Canonical project-relative path. Paths are POSIX-style even on native hosts.",
+          "type": "string"
+        },
+        "AssetNamespace": {
+          "description": "Asset ownership is part of identity. Identical relative paths from a template,\nauthored input, Publisher runtime, and generator are distinct artifacts until\nan explicit assembly policy chooses which one is served.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "authored"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "template"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "publisher_runtime"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "generated"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ArtifactCatalog": {
+          "description": "Sorted typed artifact catalog. The wire shape is a list because complex enum\nkeys cannot be represented faithfully as JSON object property names.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRecord"
+          }
+        },
+        "ArtifactRecord": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/ArtifactKey"
+            },
+            "state": {
+              "$ref": "#/$defs/ArtifactState"
+            },
+            "provenance": {
+              "$ref": "#/$defs/ArtifactProvenance"
+            },
+            "reads": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ReadDependency"
+              }
+            }
+          },
+          "required": [
+            "key",
+            "state",
+            "provenance"
+          ]
+        },
+        "ArtifactState": {
+          "description": "State is exhaustive on purpose. There is no absent/null state that a consumer\ncould accidentally interpret as either \"not requested\" or \"failed\".",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "$ref": "#/$defs/ContentRef"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "status",
+                "content"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "deferred"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "unsupported"
+                }
+              },
+              "required": [
+                "status",
+                "capability",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "diagnostics": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "#/$defs/BuildDiagnostic"
+                  }
+                },
+                "status": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "status",
+                "diagnostics"
+              ]
+            }
+          ]
+        },
+        "BuildDiagnostic": {
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "description": "Stable producer-assigned emission order. Keeping it in the value preserves\nmeaningful diagnostic order while making collection insertion irrelevant.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "severity": {
+              "$ref": "#/$defs/DiagnosticSeverity"
+            },
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "location": {
+              "$ref": "#/$defs/SourceLocation"
+            }
+          },
+          "required": [
+            "sequence",
+            "severity",
+            "code",
+            "message"
+          ]
+        },
+        "DiagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "information",
+            "warning",
+            "error"
+          ]
+        },
+        "SourceLocation": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/SourcePath"
+            },
+            "line": {
+              "description": "One-based, matching SUSHI's source line reporting.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "column": {
+              "description": "Zero-based, matching the parser/ANTLR column convention.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "path",
+            "line",
+            "column"
+          ]
+        },
+        "ArtifactProvenance": {
+          "type": "object",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "recipe": {
+              "type": "string"
+            },
+            "attributes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "producer",
+            "recipe"
+          ]
+        },
+        "ReadDependency": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "source"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "coordinate": {
+                  "$ref": "#/$defs/PackageCoordinate"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "package"
+                }
+              },
+              "required": [
+                "kind",
+                "coordinate"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "$ref": "#/$defs/ArtifactKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "artifact"
+                }
+              },
+              "required": [
+                "kind",
+                "key"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sha256": {
+                  "$ref": "#/$defs/Sha256Digest"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "content"
+                }
+              },
+              "required": [
+                "kind",
+                "sha256"
+              ]
+            }
+          ]
+        },
+        "Sha256Digest": {
+          "description": "A validated, lowercase SHA-256 digest.",
+          "type": "string"
+        },
+        "BuildEvent": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "description": "Functional operation when this observation belongs to an immutable\nBuild. Lifecycle/package/project-source events omit it.",
+              "$ref": "#/$defs/BuildOperation"
+            },
+            "buildId": {
+              "description": "Immutable build identity when one exists. Acquisition events that occur\nbefore prepare establishes an identity omit it.",
+              "type": "string"
+            },
+            "stage": {
+              "$ref": "#/$defs/BuildStage"
+            },
+            "label": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "totalBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "message": {
+              "type": "string"
+            },
+            "fraction": {
+              "type": "number",
+              "format": "double"
+            },
+            "fromCache": {
+              "type": "boolean"
+            },
+            "durationMs": {
+              "type": "number",
+              "format": "double"
+            },
+            "inputBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "outputBytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "fileCount": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "metrics": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stage",
+            "message"
+          ]
+        },
+        "BuildOperation": {
+          "type": "string",
+          "enum": [
+            "lifecycle",
+            "prepare",
+            "outputs",
+            "render",
+            "finalize"
+          ]
+        },
+        "BuildStage": {
+          "type": "string",
+          "enum": [
+            "wasm",
+            "manifest",
+            "project-cache-hit",
+            "project-verify",
+            "project-unpack",
+            "project-store",
+            "compile",
+            "snapshot",
+            "site-build",
+            "preview-publish",
+            "resolve",
+            "bundle-fetch",
+            "bundle-cache-hit",
+            "bundle-unpack",
+            "bundle-mount",
+            "registry-fetch",
+            "package-blocked",
+            "ready",
+            "lazy-fetch"
+          ]
+        }
+      }
+    },
+    "TemplateResolution": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "TemplateResolution",
+      "type": "object",
+      "properties": {
+        "satisfied": {
+          "type": "boolean"
+        },
+        "chain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "satisfied",
+        "chain"
+      ]
+    },
+    "ResolutionStep": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ResolutionStep",
+      "description": "One iteration's answer: the two well-defined sets, what is still missing, and\nwhether the closure is complete.",
+      "type": "object",
+      "properties": {
+        "resolver_schema": {
+          "description": "Schema for the resolver semantics represented by this result. Hosts may\npersist an exact closure as an optimization, but must discard it when\nthis value changes and must still re-run this resolver before use.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "compile_set": {
+          "description": "Stock-SUSHI COMPILE load set (non-transitive), in stock load order. Every\nentry is a concrete `pkg#ver` the compile needs mounted.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackageRequest"
+          }
+        },
+        "context_closure": {
+          "description": "Transitive snapshot/render context closure rooted at the exact compile\nset and walked over the MOUNTED packages (R4-compat filtered,\ncore-canonicalized), with core first then discovery order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackageRequest"
+          }
+        },
+        "resolution_support": {
+          "description": "Mounted package manifests read while proving `context_closure`, including\npackages later excluded by compatibility rules. Replaying a cached\nresolution must mount these witnesses too; the final closure alone is\nnot sufficient to prove that an excluded dependency remains excluded.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackageRequest"
+          }
+        },
+        "missing": {
+          "description": "Packages referenced by either set that are not yet mounted (or whose version\ncould not be resolved). Fetch these, mount, and resolve again.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MissingPackage"
+          }
+        },
+        "satisfied": {
+          "description": "True iff nothing is missing — the mounted set fully satisfies both closures\nand the host loop has reached its fixpoint.",
+          "type": "boolean"
+        },
+        "mutable_requests": {
+          "description": "Every non-concrete version request which influenced this step. A cached\nclosure is not fresh merely because its concrete packages still exist:\nthe host must refresh the candidate universe for these requests before\nasking Rust to verify the closure again.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MutableVersionRequest"
+          }
+        }
+      },
+      "required": [
+        "resolver_schema",
+        "compile_set",
+        "context_closure",
+        "resolution_support",
+        "missing",
+        "satisfied",
+        "mutable_requests"
+      ],
+      "$defs": {
+        "PackageRequest": {
+          "description": "Ordered package request produced from a project's SUSHI dependency rules.\n\nThis is the acquisition-side counterpart to `PackageStore::for_project`: it\npreserves stock SUSHI's load order, but leaves mutable coordinates such as\n`latest`, `current`, and `dev` unresolved so the acquisition layer can resolve\nthem against registries/CAS and record a lock.",
+          "type": "object",
+          "properties": {
+            "package_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "version"
+          ]
+        },
+        "MissingPackage": {
+          "description": "One resolvable package coordinate the host must acquire + mount.",
+          "type": "object",
+          "properties": {
+            "package_id": {
+              "type": "string"
+            },
+            "version": {
+              "description": "The concrete version the resolver selected (if it could resolve one), or the\nraw requested coordinate when it could not (`latest`/`current` with no index).",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Why this package is in `missing`: the exact, host-renderable reason.",
+              "$ref": "#/$defs/MissingReason"
+            },
+            "set": {
+              "description": "The set that referenced it (`compile` or `context`), for the host's UI.",
+              "$ref": "#/$defs/RequestedSet"
+            }
+          },
+          "required": [
+            "package_id",
+            "version",
+            "reason",
+            "set"
+          ]
+        },
+        "MissingReason": {
+          "description": "The precise reason a package could not be satisfied from the mounted set.",
+          "oneOf": [
+            {
+              "description": "The coordinate is fully resolved (concrete version) but not yet mounted —\nthe host should fetch + mount it, then resolve again.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "not_mounted"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "The request needs version resolution (`latest`/`current`/`M.N.x`) and no\nhost [`VersionIndex`] entry (or no matching version) was available. The host\nmust supply an index (registry query) and resolve again. NEVER a guess.",
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "unresolved_version"
+                }
+              },
+              "required": [
+                "kind",
+                "requested"
+              ]
+            }
+          ]
+        },
+        "RequestedSet": {
+          "description": "Which resolution set surfaced a missing package.",
+          "oneOf": [
+            {
+              "description": "Needed for the SUSHI compile load (configured/auto deps + core).",
+              "type": "string",
+              "const": "compile"
+            },
+            {
+              "description": "Needed for the transitive snapshot/render context closure.",
+              "type": "string",
+              "const": "context"
+            }
+          ]
+        },
+        "MutableVersionRequest": {
+          "description": "A version request whose answer can change without the project config\nchanging (`latest`, `current`, `dev`, `x`, or `*`).",
+          "type": "object",
+          "properties": {
+            "package_id": {
+              "type": "string"
+            },
+            "requested": {
+              "type": "string"
+            },
+            "resolved_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "set": {
+              "$ref": "#/$defs/RequestedSet"
+            }
+          },
+          "required": [
+            "package_id",
+            "requested",
+            "resolved_version",
+            "set"
+          ]
+        }
+      }
+    },
+    "VersionIndex": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "VersionIndex",
+      "description": "A host-supplied index of the versions available for a package id, used to\nresolve `latest` / `current` / `M.N.x` requests without the resolver doing any\nI/O of its own (data in, decisions in Rust). The host populates this from\nwhatever it can see — a registry manifest, the set of cached/mounted dirs, a\ncommitted lockfile — and the resolver picks the winning version by the SAME\nrule stock SUSHI/FPL use (highest semver, release over pre-release).\n\nAbsent an entry for a package whose request needs resolution, the resolver\nreports a precise `missing` reason rather than guessing.",
+      "type": "object",
+      "properties": {
+        "versions": {
+          "description": "package id -> the list of available version strings (order irrelevant; the\nresolver sorts).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {}
+        }
+      }
+    },
+    "PackageMountResult": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "PackageMountResult",
+      "description": "Runtime footprint and lazy-inflate counters for all compact prepared layers.\nBackings shared by several package layers are counted exactly once.",
+      "type": "object",
+      "properties": {
+        "mounted": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "added": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "packages": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "manifestJsonBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retainedBlobBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "indexedMembers": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memberBodyCopies": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "manifestParseMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "decodeValidateMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "mountMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "compressedRetainedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "declaredRawBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "chunksInflated": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rawInflatedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cacheHits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cachedRawBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "mounted",
+        "added",
+        "packages",
+        "manifestJsonBytes",
+        "artifactBytes",
+        "retainedBlobBytes",
+        "indexedMembers",
+        "memberBodyCopies",
+        "manifestParseMs",
+        "decodeValidateMs",
+        "mountMs",
+        "compressedRetainedBytes",
+        "declaredRawBytes",
+        "chunksInflated",
+        "rawInflatedBytes",
+        "cacheHits",
+        "cachedRawBytes"
+      ]
+    },
+    "PrepareMountResult": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "PrepareMountResult",
+      "type": "object",
+      "properties": {
+        "mounted": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "added": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreparedExport"
+          }
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "preparedMembers": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inputJsonBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "base64Bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "decodedSourceBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "normalizedBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mountMemberBodyCopies": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "jsonParseMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "base64DecodeMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "normalizationMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "indexingMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "artifactEncodeMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "decodeValidatePrepareMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "mountMs": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "mounted",
+        "added",
+        "artifacts",
+        "artifactBytes",
+        "preparedMembers",
+        "inputJsonBytes",
+        "base64Bytes",
+        "decodedSourceBytes",
+        "normalizedBytes",
+        "mountMemberBodyCopies",
+        "jsonParseMs",
+        "base64DecodeMs",
+        "normalizationMs",
+        "indexingMs",
+        "artifactEncodeMs",
+        "decodeValidatePrepareMs",
+        "mountMs"
+      ],
+      "$defs": {
+        "PreparedExport": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "cacheKey": {
+              "type": "string"
+            },
+            "artifactSha256": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "label",
+            "cacheKey",
+            "artifactSha256",
+            "bytes"
+          ]
+        }
+      }
+    },
+    "GeneratorSpec": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "GeneratorSpec",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "buildEpochSecs": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "liquidAssetDirs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "revision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "generator": {
+              "type": "string",
+              "const": "cycle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "generator",
+            "buildEpochSecs",
+            "liquidAssetDirs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "templateCoordinate": {
+              "type": "string"
+            },
+            "buildEpochSecs": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "activeTables": {
+              "type": "boolean"
+            },
+            "runUuid": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "generator": {
+              "type": "string",
+              "const": "publisher"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "generator",
+            "templateCoordinate",
+            "buildEpochSecs",
+            "activeTables"
+          ]
+        }
+      ]
+    },
+    "ClosedSiteBuild": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ClosedSiteBuild",
+      "description": "Proof that a [`SiteBuild`]'s render-plan closure is fully materialized. This\nwrapper is the value an external builder should accept when callbacks are not\npart of its architecture.",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "buildId": {
+          "$ref": "#/$defs/BuildId"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectIdentity"
+        },
+        "packageLock": {
+          "$ref": "#/$defs/PackageLock"
+        },
+        "renderTarget": {
+          "$ref": "#/$defs/RenderTarget"
+        },
+        "renderPlan": {
+          "$ref": "#/$defs/RenderPlan"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/ArtifactCatalog"
+        },
+        "diagnostics": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/BuildDiagnostic"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "buildId",
+        "project",
+        "packageLock",
+        "renderTarget",
+        "renderPlan",
+        "artifacts",
+        "diagnostics"
+      ],
+      "$defs": {
+        "SchemaVersion": {
+          "description": "Wire-format discriminator. A new incompatible contract requires a new enum\nvariant rather than silently changing existing hashing semantics.",
+          "type": "string",
+          "enum": [
+            "site-build/v2"
+          ]
+        },
+        "BuildId": {
+          "description": "Deterministic identity of the complete SiteBuild document (except this field).",
+          "type": "string"
+        },
+        "ProjectIdentity": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string"
+            },
+            "revision": {
+              "description": "An SCM revision when available; otherwise a caller-defined immutable\nrevision label. Exact source hashes remain authoritative.",
+              "type": "string"
+            },
+            "sources": {
+              "$ref": "#/$defs/SourceManifest"
+            }
+          },
+          "required": [
+            "projectId",
+            "revision",
+            "sources"
+          ]
+        },
+        "SourceManifest": {
+          "description": "Exact source bytes that define a project revision.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SourceEntry"
+          }
+        },
+        "SourceEntry": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/SourceKind"
+            },
+            "content": {
+              "$ref": "#/$defs/ContentRef"
+            }
+          },
+          "required": [
+            "kind",
+            "content"
+          ]
+        },
+        "SourceKind": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "fsh"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "config"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "predefined_resource"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "page"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "template"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ContentRef": {
+          "description": "Exact immutable-content reference shared by compilers, renderers, and hosts.",
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "description": "The algorithm is fixed to SHA-256 and encoded in the field name.",
+              "type": "string"
+            },
+            "byteLength": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "mediaType": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha256",
+            "byteLength"
+          ]
+        },
+        "PackageLock": {
+          "description": "Exact package closure. Keys are repeated in each value so a key/value mismatch\ncannot be hidden by a serialization adapter.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/LockedPackage"
+          }
+        },
+        "LockedPackage": {
+          "type": "object",
+          "properties": {
+            "coordinate": {
+              "$ref": "#/$defs/PackageCoordinate"
+            },
+            "content": {
+              "description": "Exact deterministic prepared-package carrier. This content-addressed\nvalue binds the complete package representation consumed by execution,\nnot merely its registry name/version or a normalized semantic subset.",
+              "$ref": "#/$defs/ContentRef"
+            },
+            "dependencies": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/PackageCoordinate"
+              }
+            }
+          },
+          "required": [
+            "coordinate",
+            "content"
+          ]
+        },
+        "PackageCoordinate": {
+          "description": "An exact FHIR package coordinate (`package.id#version`).",
+          "type": "string"
+        },
+        "RenderTarget": {
+          "type": "object",
+          "properties": {
+            "renderer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "mode": {
+              "$ref": "#/$defs/RenderMode"
+            },
+            "fhirVersion": {
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/PackageCoordinate"
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "renderer",
+            "mode",
+            "fhirVersion"
+          ]
+        },
+        "ProducerRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "version"
+          ]
+        },
+        "RenderMode": {
+          "type": "string",
+          "enum": [
+            "native_template",
+            "external_builder"
+          ]
+        },
+        "RenderPlan": {
+          "description": "Artifacts a renderer promises it can consume without discovering undeclared\nrequirements. Sealing also follows their typed artifact read dependencies,\nso this set contains roots rather than requiring callers to duplicate the\ntransitive closure manually.",
+          "type": "object",
+          "properties": {
+            "requiredArtifacts": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ArtifactKey"
+              }
+            }
+          },
+          "required": [
+            "requiredArtifacts"
+          ]
+        },
+        "ArtifactKey": {
+          "description": "Typed identity of one semantic or rendered artifact.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "semantic_model"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resource": {
+                  "$ref": "#/$defs/ResourceKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "resource"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "$ref": "#/$defs/FragmentScope"
+                },
+                "fragment": {
+                  "$ref": "#/$defs/FragmentKind"
+                },
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "fragment"
+                }
+              },
+              "required": [
+                "kind",
+                "scope",
+                "fragment"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "page"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "$ref": "#/$defs/AssetNamespace"
+                },
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                }
+              },
+              "required": [
+                "kind",
+                "namespace",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "data"
+                }
+              },
+              "required": [
+                "kind",
+                "namespace",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ResourceKey": {
+          "type": "object",
+          "properties": {
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "resourceType",
+            "id"
+          ]
+        },
+        "FragmentScope": {
+          "description": "The subject of a generated fragment. Some Publisher includes describe the\nguide as a whole (for example dependency/summary material) rather than one\nresource, so resource scope must not be fabricated for them.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "whole_ig"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resource": {
+                  "$ref": "#/$defs/ResourceKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "resource"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ]
+            }
+          ]
+        },
+        "FragmentKind": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "narrative"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "dictionary"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "terminology"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "table"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "SourcePath": {
+          "description": "Canonical project-relative path. Paths are POSIX-style even on native hosts.",
+          "type": "string"
+        },
+        "AssetNamespace": {
+          "description": "Asset ownership is part of identity. Identical relative paths from a template,\nauthored input, Publisher runtime, and generator are distinct artifacts until\nan explicit assembly policy chooses which one is served.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "authored"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "template"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "publisher_runtime"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "generated"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        },
+        "ArtifactCatalog": {
+          "description": "Sorted typed artifact catalog. The wire shape is a list because complex enum\nkeys cannot be represented faithfully as JSON object property names.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRecord"
+          }
+        },
+        "ArtifactRecord": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/ArtifactKey"
+            },
+            "state": {
+              "$ref": "#/$defs/ArtifactState"
+            },
+            "provenance": {
+              "$ref": "#/$defs/ArtifactProvenance"
+            },
+            "reads": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/ReadDependency"
+              }
+            }
+          },
+          "required": [
+            "key",
+            "state",
+            "provenance"
+          ]
+        },
+        "ArtifactState": {
+          "description": "State is exhaustive on purpose. There is no absent/null state that a consumer\ncould accidentally interpret as either \"not requested\" or \"failed\".",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "$ref": "#/$defs/ContentRef"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "status",
+                "content"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "deferred"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "const": "unsupported"
+                }
+              },
+              "required": [
+                "status",
+                "capability",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "diagnostics": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "#/$defs/BuildDiagnostic"
+                  }
+                },
+                "status": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "status",
+                "diagnostics"
+              ]
+            }
+          ]
+        },
+        "BuildDiagnostic": {
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "description": "Stable producer-assigned emission order. Keeping it in the value preserves\nmeaningful diagnostic order while making collection insertion irrelevant.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "severity": {
+              "$ref": "#/$defs/DiagnosticSeverity"
+            },
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "location": {
+              "$ref": "#/$defs/SourceLocation"
+            }
+          },
+          "required": [
+            "sequence",
+            "severity",
+            "code",
+            "message"
+          ]
+        },
+        "DiagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "information",
+            "warning",
+            "error"
+          ]
+        },
+        "SourceLocation": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/SourcePath"
+            },
+            "line": {
+              "description": "One-based, matching SUSHI's source line reporting.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "column": {
+              "description": "Zero-based, matching the parser/ANTLR column convention.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "path",
+            "line",
+            "column"
+          ]
+        },
+        "ArtifactProvenance": {
+          "type": "object",
+          "properties": {
+            "producer": {
+              "$ref": "#/$defs/ProducerRef"
+            },
+            "recipe": {
+              "type": "string"
+            },
+            "attributes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "producer",
+            "recipe"
+          ]
+        },
+        "ReadDependency": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "$ref": "#/$defs/SourcePath"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "source"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "coordinate": {
+                  "$ref": "#/$defs/PackageCoordinate"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "package"
+                }
+              },
+              "required": [
+                "kind",
+                "coordinate"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "$ref": "#/$defs/ArtifactKey"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "artifact"
+                }
+              },
+              "required": [
+                "kind",
+                "key"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sha256": {
+                  "$ref": "#/$defs/Sha256Digest"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "content"
+                }
+              },
+              "required": [
+                "kind",
+                "sha256"
+              ]
+            }
+          ]
+        },
+        "Sha256Digest": {
+          "description": "A validated, lowercase SHA-256 digest.",
+          "type": "string"
+        }
+      }
+    },
+    "ContentRef": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ContentRef",
+      "description": "Exact immutable-content reference shared by compilers, renderers, and hosts.",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "description": "The algorithm is fixed to SHA-256 and encoded in the field name.",
+          "type": "string"
+        },
+        "byteLength": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mediaType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "byteLength"
+      ]
+    },
+    "OutputCatalog": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "OutputCatalog",
+      "type": "object",
+      "properties": {
+        "buildId": {
+          "type": "string"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutputDescriptor"
+          }
+        }
+      },
+      "required": [
+        "buildId",
+        "outputs"
+      ],
+      "$defs": {
+        "OutputDescriptor": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/OutputKind"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "content": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "title": {
+              "type": "string"
+            },
+            "subject": {
+              "$ref": "#/$defs/OutputResourceSubject"
+            },
+            "subjectPage": {
+              "$ref": "#/$defs/OutputSubjectPage"
+            },
+            "pageKind": {
+              "$ref": "#/$defs/OutputPageKind"
+            }
+          },
+          "required": [
+            "path",
+            "kind",
+            "mediaType"
+          ]
+        },
+        "OutputKind": {
+          "type": "string",
+          "enum": [
+            "page",
+            "asset",
+            "auxiliary"
+          ]
+        },
+        "ContentRef": {
+          "description": "Exact immutable-content reference shared by compilers, renderers, and hosts.",
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "description": "The algorithm is fixed to SHA-256 and encoded in the field name.",
+              "type": "string"
+            },
+            "byteLength": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "mediaType": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha256",
+            "byteLength"
+          ]
+        },
+        "OutputResourceSubject": {
+          "type": "object",
+          "properties": {
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "resourceType",
+            "id"
+          ]
+        },
+        "OutputSubjectPage": {
+          "type": "string",
+          "enum": [
+            "primary",
+            "companion"
+          ]
+        },
+        "OutputPageKind": {
+          "type": "string",
+          "enum": [
+            "narrative",
+            "artifacts",
+            "profile",
+            "profile-companion",
+            "valueset",
+            "codesystem",
+            "example",
+            "toc",
+            "validation",
+            "generic"
+          ]
+        }
+      }
+    },
+    "SiteOutput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SiteOutput",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SiteOutputSchemaVersion"
+        },
+        "inputBuildId": {
+          "type": "string"
+        },
+        "renderer": {
+          "$ref": "#/$defs/RendererImplementation"
+        },
+        "outputSchema": {
+          "type": "string"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SiteOutputFile"
+          }
+        },
+        "outputId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "inputBuildId",
+        "renderer",
+        "outputSchema",
+        "options",
+        "files",
+        "outputId"
+      ],
+      "$defs": {
+        "SiteOutputSchemaVersion": {
+          "type": "string",
+          "enum": [
+            "site-output/v1"
+          ]
+        },
+        "RendererImplementation": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "recipeSha256": {
+              "description": "Digest of the exact renderer code/assets/toolchain recipe used for this\ninvocation. Human version labels alone are not cache-safe.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version",
+            "recipeSha256"
+          ]
+        },
+        "SiteOutputFile": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "content": {
+              "$ref": "#/$defs/RequiredMediaContentRefSchema"
+            },
+            "producer": {
+              "$ref": "#/$defs/OutputProducer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "content",
+            "producer"
+          ]
+        },
+        "RequiredMediaContentRefSchema": {
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "type": "string"
+            },
+            "byteLength": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "mediaType": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha256",
+            "byteLength",
+            "mediaType"
+          ]
+        },
+        "OutputProducer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ]
+        }
+      }
+    },
+    "BuildEvent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "BuildEvent",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "description": "Functional operation when this observation belongs to an immutable\nBuild. Lifecycle/package/project-source events omit it.",
+          "$ref": "#/$defs/BuildOperation"
+        },
+        "buildId": {
+          "description": "Immutable build identity when one exists. Acquisition events that occur\nbefore prepare establishes an identity omit it.",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/BuildStage"
+        },
+        "label": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "totalBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "message": {
+          "type": "string"
+        },
+        "fraction": {
+          "type": "number",
+          "format": "double"
+        },
+        "fromCache": {
+          "type": "boolean"
+        },
+        "durationMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "inputBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outputBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fileCount": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "message"
+      ],
+      "$defs": {
+        "BuildOperation": {
+          "type": "string",
+          "enum": [
+            "lifecycle",
+            "prepare",
+            "outputs",
+            "render",
+            "finalize"
+          ]
+        },
+        "BuildStage": {
+          "type": "string",
+          "enum": [
+            "wasm",
+            "manifest",
+            "project-cache-hit",
+            "project-verify",
+            "project-unpack",
+            "project-store",
+            "compile",
+            "snapshot",
+            "site-build",
+            "preview-publish",
+            "resolve",
+            "bundle-fetch",
+            "bundle-cache-hit",
+            "bundle-unpack",
+            "bundle-mount",
+            "registry-fetch",
+            "package-blocked",
+            "ready",
+            "lazy-fetch"
+          ]
+        }
+      }
+    },
+    "BuildError": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "BuildError",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/BuildOperation"
+        },
+        "phase": {
+          "$ref": "#/$defs/BuildErrorPhase"
+        },
+        "code": {
+          "$ref": "#/$defs/BuildErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "successfulCompilation": {
+          "$ref": "#/$defs/CompilationOutcome"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "phase",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "$defs": {
+        "BuildOperation": {
+          "type": "string",
+          "enum": [
+            "lifecycle",
+            "prepare",
+            "outputs",
+            "render",
+            "finalize"
+          ]
+        },
+        "BuildErrorPhase": {
+          "type": "string",
+          "enum": [
+            "lifecycle",
+            "input",
+            "package-resolution",
+            "package-transport",
+            "compilation",
+            "preparation",
+            "renderer",
+            "content-store",
+            "publication",
+            "finalization"
+          ]
+        },
+        "BuildErrorCode": {
+          "type": "string",
+          "enum": [
+            "invalid-input",
+            "unavailable",
+            "integrity",
+            "compile-failed",
+            "renderer-failed",
+            "unknown-build",
+            "cancelled",
+            "internal"
+          ]
+        },
+        "CompilationOutcome": {
+          "type": "object",
+          "properties": {
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompilationResource"
+              }
+            },
+            "diagnostics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompilationDiagnostic"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "resources",
+            "diagnostics"
+          ]
+        },
+        "CompilationResource": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "resourceType": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "definition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "filename",
+            "text"
+          ]
+        },
+        "CompilationDefinition": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/CompilationDefinitionKind"
+            },
+            "path": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "column": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "path",
+            "line",
+            "column"
+          ]
+        },
+        "CompilationDefinitionKind": {
+          "type": "string",
+          "enum": [
+            "fsh-declaration"
+          ]
+        },
+        "CompilationDiagnostic": {
+          "type": "object",
+          "properties": {
+            "severity": {
+              "$ref": "#/$defs/CompilationDiagnosticSeverity"
+            },
+            "message": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "ownerDefinition": {
+              "$ref": "#/$defs/CompilationDefinition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "severity",
+            "message"
+          ]
+        },
+        "CompilationDiagnosticSeverity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -13,9 +13,18 @@ declare const __ENGINE_COMMIT__: string;
 declare const __ENGINE_RECIPE__: string;
 declare const __CYCLE_RENDER_RECIPE__: string;
 
-import type { EngineOps, Op, WorkerRequest, WorkerReply, PackageMountInput, PreparedMountMetrics, CompileResult } from './protocol';
+import type {
+  CompileResult,
+  EngineOps,
+  Op,
+  PackageMountInput,
+  PackageMountResult,
+  PrepareMountResult,
+  PreparedStageResult,
+  WorkerReply,
+  WorkerRequest,
+} from './protocol';
 import { ClosedBuildHandle } from '@cycle/core/closed-build';
-import type { ClosedSiteBuild } from '@cycle/core/closed-build';
 import { openCycleGenerator } from '@cycle/core/open-site-build';
 import type { CycleGenerator, CycleGeneratorOutput } from '@cycle/core/open-site-build';
 import {
@@ -28,18 +37,19 @@ import {
   rendererOutputDeclaration,
 } from '@cycle/core/output-receipt';
 import type {
+  BuildError,
   ContentRef,
   OutputCatalog,
   OutputDescriptor,
-  RenderedOutput,
-  RustPrepareMetrics,
+  PreparedProjectResult,
   SiteOutput,
-  SiteOutputFile,
-} from '../site/contract';
+} from '../site/contract.generated';
+import { PREPARED_PACKAGE_FORMAT_VERSION } from '../site/contract.generated';
 import { contentStore } from '../storage/contentStore';
 import { assertClosedNonPageCatalog } from '../site/catalog';
 import { MountedLabels } from './mountedLabels';
 import { BuildRuntimeRegistry } from './buildRuntimeRegistry';
+import { unwrapApiEnvelope } from './envelope';
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -52,18 +62,25 @@ interface WasmSession {
   stagePreparedMount(bytes: Uint8Array, expectedKey: string): string;
   commitPreparedMount(): string;
   abortPreparedMount(): string;
-  packageStorageMetrics(): string;
   prepareArtifacts(bundlesJson: string): string;
   prepareAndMount(bundlesJson: string): string;
   takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
   resolveTemplate(coordinate: string): string;
-  prepareProject(filesJson: string, config: string, predefinedJson: string, siteFilesJson: string, generatorSpecJson: string): string;
+  prepareProject(projectRevisionJson: string, generatorSpecJson: string): string;
   snapshot(input: string): string;
   outputs(handle: string): string;
   render(handle: string, path: string): string;
-  finalize(handle: string, externalInputJson?: string): string;
+  finalize(handle: string): string;
   readContent(handle: string, sha256: string): Uint8Array;
+  openRenderer(
+    handle: string,
+    rendererJson: string,
+    outputSchema: string,
+    optionsJson: string,
+    pathsJson: string,
+  ): void;
+  admitOutput(handle: string, fileJson: string, bytes: Uint8Array): void;
   expandValueSet(valueSetJson: string, resourcesJson: string): string;
 }
 
@@ -74,17 +91,6 @@ type WasmModule = {
 
 let session: WasmSession | null = null;
 let wasmMod: WasmModule | null = null;
-
-// console_error_panic_hook reports the useful Rust panic text to this worker's
-// console before wasm aborts with an otherwise opaque `RuntimeError: unreachable`.
-// Preserve that request-local text so the ordinary typed error reply can expose
-// it to the UI and browser gate.
-const workerConsoleError = console.error.bind(console);
-let lastWorkerConsoleError = '';
-console.error = (...args: unknown[]) => {
-  lastWorkerConsoleError = args.map((value) => String(value)).join(' ');
-  workerConsoleError(...args);
-};
 
 async function ensureSession(): Promise<WasmSession> {
   if (session) return session;
@@ -104,12 +110,24 @@ async function ensureSession(): Promise<WasmSession> {
  *  we re-throw them here so the worker's single catch turns them into the
  *  protocol's error reply. */
 function unwrap<T>(envelopeJson: string): T {
-  const env = JSON.parse(envelopeJson) as
-    | { apiVersion: number; ok: true; op: string; result: T }
-    | { apiVersion: number; ok: false; op: string; error: { message: string } };
-  if (env.apiVersion !== 1) throw new Error(`unsupported engine apiVersion ${env.apiVersion}`);
-  if (!env.ok) throw new Error(`${env.op}: ${env.error.message}`);
-  return env.result;
+  return unwrapApiEnvelope<T, { message: string }>(
+    envelopeJson,
+    (error, operation) => new Error(`${operation}: ${error.message}`),
+  );
+}
+
+class EngineBuildFailure extends Error {
+  constructor(readonly detail: BuildError<CompileResult>) {
+    super(detail.message);
+    this.name = 'EngineBuildFailure';
+  }
+}
+
+function unwrapBuild<T>(envelopeJson: string): T {
+  return unwrapApiEnvelope<T, BuildError<CompileResult>>(
+    envelopeJson,
+    (error) => new EngineBuildFailure(error),
+  );
 }
 
 /** Labels currently mounted in the engine, keeping transactional package
@@ -122,8 +140,7 @@ interface CycleBuildRuntime {
   buildId: string;
   catalog: CycleGeneratorOutput[];
   publicCatalog: OutputCatalog;
-  rendered: Map<string, RenderedOutput>;
-  rendererPackageId: string;
+  rendered: Map<string, ContentRef>;
 }
 
 interface PublisherBuildRuntime {
@@ -133,39 +150,6 @@ interface PublisherBuildRuntime {
 
 type SiteBuildRuntime = CycleBuildRuntime | PublisherBuildRuntime;
 const siteBuilds = new BuildRuntimeRegistry<SiteBuildRuntime>();
-
-class PrepareOperationError extends Error {
-  constructor(
-    message: string,
-    readonly stage: 'compile' | 'site',
-    readonly compiled?: CompileResult,
-  ) {
-    super(message);
-    this.name = 'PrepareOperationError';
-  }
-}
-
-interface RustPrepareResult {
-  handle: string;
-  buildId: string;
-  generator: 'cycle' | 'publisher';
-  siteBuild: ClosedSiteBuild;
-  metrics: RustPrepareMetrics;
-}
-
-type RustPreparedProjectWire =
-  | {
-      status: 'prepared';
-      compiled: Record<string, unknown>;
-      site: RustPrepareResult;
-      compileMs: number;
-    }
-  | {
-      status: 'siteFailed';
-      compiled: Record<string, unknown>;
-      compileMs: number;
-      error: string;
-    };
 
 interface LoadedCycleRendererPackage {
   package: CycleRendererPackage;
@@ -272,26 +256,42 @@ function publicCycleDescriptor(
   };
 }
 
-async function renderCycleOutput(runtime: CycleBuildRuntime, path: string): Promise<RenderedOutput> {
+async function renderCycleOutput(
+  session: WasmSession,
+  buildId: string,
+  runtime: CycleBuildRuntime,
+  path: string,
+): Promise<ContentRef> {
   const prior = runtime.rendered.get(path);
   if (prior) return prior;
   const descriptor = runtime.publicCatalog.outputs.find((output) => output.path === path);
+  const rendererDescriptor = runtime.catalog.find((output) => output.file === path);
   if (!descriptor) throw new Error(`render: path ${path} is not declared by outputs`);
+  if (!rendererDescriptor) throw new Error(`render: Cycle renderer omitted ${path}`);
   if (descriptor.content) {
-    const ready = { path, mediaType: descriptor.mediaType, content: descriptor.content };
-    runtime.rendered.set(path, ready);
-    return ready;
+    const stored = await contentStore.get(descriptor.content);
+    if (!stored) throw new Error(`ContentStore is missing Cycle output ${path}`);
+    const { mediaType: _mediaType, ...file } = rendererOutputDeclaration(rendererDescriptor);
+    session.admitOutput(
+      buildId,
+      JSON.stringify({ ...file, content: descriptor.content }),
+      new Uint8Array(stored),
+    );
+    runtime.rendered.set(path, descriptor.content);
+    return descriptor.content;
   }
-  const output = runtime.generator.render(path);
-  const bytes = typeof output.content === 'string'
-    ? new TextEncoder().encode(output.content)
-    : output.content;
-  const content = await contentStore.put(bytes, output.mime);
-  if (!content) throw new Error(`ContentStore could not publish Cycle output ${path}`);
-  const ready = { path, mediaType: output.mime, content };
-  runtime.rendered.set(path, ready);
+  const content = await runtime.generator.render(path);
+  const stored = await contentStore.get(content);
+  if (!stored) throw new Error(`ContentStore is missing Cycle output ${path}`);
+  const { mediaType: _mediaType, ...file } = rendererOutputDeclaration(rendererDescriptor);
+  session.admitOutput(
+    buildId,
+    JSON.stringify({ ...file, content }),
+    new Uint8Array(stored),
+  );
+  runtime.rendered.set(path, content);
   descriptor.content = content;
-  return ready;
+  return content;
 }
 
 async function finalizeCycleOutput(
@@ -299,21 +299,13 @@ async function finalizeCycleOutput(
   handle: string,
   runtime: CycleBuildRuntime,
 ): Promise<SiteOutput> {
-  const files: SiteOutputFile[] = [];
   for (const descriptor of runtime.catalog) {
-    const rendered = await renderCycleOutput(runtime, descriptor.file);
-    files.push({
-      ...rendererOutputDeclaration(descriptor),
-      content: rendered.content,
-    });
+    const rendered = await renderCycleOutput(session, handle, runtime, descriptor.file);
+    if (!rendered.mediaType) {
+      throw new Error(`Cycle renderer emitted ${descriptor.file} without a media type`);
+    }
   }
-  return unwrap<SiteOutput>(session.finalize(handle, JSON.stringify({
-    renderer: { ...CYCLE_RENDERER_IDENTITY, recipeSha256: __CYCLE_RENDER_RECIPE__ },
-    outputSchema: CYCLE_OUTPUT_SCHEMA,
-    options: { rendererPackageId: runtime.rendererPackageId },
-    catalog: runtime.catalog.map((output) => output.file),
-    files,
-  })));
+  return unwrapBuild<SiteOutput>(session.finalize(handle));
 }
 
 // ---- op handlers (exactly the protocol's EngineOps table) -------------------
@@ -329,7 +321,17 @@ const handlers: Handlers = {
     const wasmMs = performance.now() - wasmStarted;
     mountedLabels.replace([]);
     const version = JSON.parse(wasmMod!.Session.version());
-    return { mounted, version, initMs: performance.now() - t0, serializeMs: 0, wasmMs, inputBytes: 2 };
+    return {
+      mounted,
+      version,
+      events: [{
+        stage: 'wasm',
+        message: 'Started compiler engine.',
+        durationMs: performance.now() - t0,
+        inputBytes: 2,
+        metrics: { workerSerializeMs: 0, wasmMs },
+      }],
+    };
   },
 
   /** Preferred package seam. Warm compact `.fpp` artifacts are authenticated in
@@ -343,7 +345,17 @@ const handlers: Handlers = {
       item,
     })));
     if (fresh.length === 0) {
-      return { mounted: mountedLabels.size, newlyMounted: [], mountMs: 0, serializeMs: 0, wasmMs: 0, inputBytes: 0 };
+      return {
+        mounted: mountedLabels.size,
+        newlyMounted: [],
+        events: [{
+          stage: 'bundle-mount',
+          message: 'Packages already mounted.',
+          durationMs: 0,
+          fromCache: true,
+          inputBytes: 0,
+        }],
+      };
     }
     const inputs = fresh.map(({ item }) => item);
     const rawCount = inputs.filter((item) => item.kind === 'raw').length;
@@ -366,42 +378,7 @@ const handlers: Handlers = {
       indexingMs: 0,
       artifactEncodeMs: 0,
     };
-    type ColdArtifactResult = {
-      artifacts: Array<{ label: string; cacheKey: string; artifactSha256: string; bytes: number }>;
-      artifactBytes: number;
-      preparedMembers: number;
-      inputJsonBytes: number;
-      base64Bytes: number;
-      decodedSourceBytes: number;
-      normalizedBytes: number;
-      mountMemberBodyCopies: number;
-      decodeValidatePrepareMs: number;
-      jsonParseMs: number;
-      base64DecodeMs: number;
-      normalizationMs: number;
-      indexingMs: number;
-      artifactEncodeMs: number;
-    };
-    type PreparedCommitResult = {
-      mounted: number;
-      added: number;
-      packages: number;
-      manifestJsonBytes: number;
-      artifactBytes: number;
-      retainedBlobBytes: number;
-      indexedMembers: number;
-      memberBodyCopies: number;
-      manifestParseMs: number;
-      decodeValidateMs: number;
-      mountMs: number;
-      compressedRetainedBytes: number;
-      declaredRawBytes: number;
-      chunksInflated: number;
-      rawInflatedBytes: number;
-      cacheHits: number;
-      cachedRawBytes: number;
-    };
-    let commitResult!: PreparedCommitResult;
+    let commitResult!: PackageMountResult;
     let commitSucceeded = false;
     let maxStagedArtifactBytes = 0;
     unwrap(s.beginPreparedMount(inputs.length));
@@ -416,7 +393,7 @@ const handlers: Handlers = {
           if (!artifact) throw new Error(`prepared-package cache miss: ${pointer.label}`);
           inputBytes += artifact.byteLength;
           maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, artifact.byteLength);
-          const staged = unwrap<{ label: string }>(
+          const staged = unwrap<PreparedStageResult>(
             s.stagePreparedMount(new Uint8Array(artifact), pointer.cacheKey),
           );
           if (staged.label !== pointer.label) {
@@ -431,7 +408,7 @@ const handlers: Handlers = {
         const serializeStarted = performance.now();
         const input = JSON.stringify([spec]);
         serializeMs += performance.now() - serializeStarted;
-        const result = unwrap<ColdArtifactResult>(s.prepareArtifacts(input));
+        const result = unwrap<PrepareMountResult>(s.prepareArtifacts(input));
         if (result.artifacts.length !== 1 || result.artifacts[0].label !== spec.label) {
           throw new Error(`prepareArtifacts returned the wrong artifact for ${spec.label}`);
         }
@@ -453,7 +430,7 @@ const handlers: Handlers = {
         const bytes = s.takePrepared(artifact.label);
         maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
         await cache.writePreparedPackage({
-          schema: 3,
+          schema: PREPARED_PACKAGE_FORMAT_VERSION,
           label: artifact.label,
           transportIdentity,
           cacheKey: artifact.cacheKey,
@@ -462,7 +439,7 @@ const handlers: Handlers = {
         }, bytes).catch(() => {});
         unwrap(s.stagePreparedMount(bytes, artifact.cacheKey));
       }
-      commitResult = unwrap<PreparedCommitResult>(s.commitPreparedMount());
+      commitResult = unwrap<PackageMountResult>(s.commitPreparedMount());
       commitSucceeded = true;
     } finally {
       if (!commitSucceeded) {
@@ -471,49 +448,54 @@ const handlers: Handlers = {
     }
     const wasmMs = performance.now() - wasmStarted;
     const mounted = commitResult.mounted;
-    const preparedMetrics: PreparedMountMetrics = {
-      mode: rawCount === 0 ? 'warm-binary' : preparedCount === 0 ? 'cold-prepare' : 'mixed',
-      added: commitResult.added,
-      packages: commitResult.packages,
-      artifactBytes: commitResult.artifactBytes,
-      preparedMembers: totals.preparedMembers,
-      inputJsonBytes: totals.inputJsonBytes,
-      base64Bytes: totals.base64Bytes,
-      decodedSourceBytes: totals.decodedSourceBytes,
-      normalizedBytes: totals.normalizedBytes,
-      mountMemberBodyCopies: commitResult.memberBodyCopies,
-      decodeValidatePrepareMs: totals.decodeValidatePrepareMs,
-      jsonParseMs: totals.jsonParseMs,
-      base64DecodeMs: totals.base64DecodeMs,
-      normalizationMs: totals.normalizationMs,
-      indexingMs: totals.indexingMs,
-      artifactEncodeMs: totals.artifactEncodeMs,
-      engineMountMs: commitResult.mountMs,
-      retainedBlobBytes: commitResult.retainedBlobBytes,
-      maxStagedArtifactBytes,
-      jsBatchBytes: 0,
-      compressedRetainedBytes: commitResult.compressedRetainedBytes,
-      declaredRawBytes: commitResult.declaredRawBytes,
-      chunksInflated: commitResult.chunksInflated,
-      rawInflatedBytes: commitResult.rawInflatedBytes,
-      chunkCacheHits: commitResult.cacheHits,
-      cachedRawBytes: commitResult.cachedRawBytes,
-      indexedMembers: commitResult.indexedMembers,
-      memberBodyCopies: commitResult.memberBodyCopies,
-      manifestJsonBytes: commitResult.manifestJsonBytes,
-      manifestParseMs: commitResult.manifestParseMs,
-      decodeValidateMs: commitResult.decodeValidateMs,
-    };
     const committedLabels = fresh.map(({ label }) => ({ label }));
     mountedLabels.add(committedLabels);
     return {
       mounted,
       newlyMounted: committedLabels.map(({ label }) => label),
-      mountMs: performance.now() - t0,
-      serializeMs,
-      wasmMs,
-      inputBytes,
-      preparedMetrics,
+      events: [{
+        stage: 'bundle-mount',
+        message: `Mounted ${committedLabels.map(({ label }) => label).join(', ')}.`,
+        durationMs: performance.now() - t0,
+        inputBytes,
+        metrics: {
+          workerSerializeMs: serializeMs,
+          wasmMs,
+          preparedWarmBinary: rawCount === 0 ? 1 : 0,
+          preparedColdPrepare: preparedCount === 0 ? 1 : 0,
+          preparedMixed: rawCount > 0 && preparedCount > 0 ? 1 : 0,
+          preparedAdded: commitResult.added,
+          preparedPackages: commitResult.packages,
+          preparedArtifactBytes: commitResult.artifactBytes,
+          preparedMembers: totals.preparedMembers,
+          preparedInputJsonBytes: totals.inputJsonBytes,
+          preparedBase64Bytes: totals.base64Bytes,
+          preparedDecodedSourceBytes: totals.decodedSourceBytes,
+          preparedNormalizedBytes: totals.normalizedBytes,
+          preparedMountMemberBodyCopies: commitResult.memberBodyCopies,
+          preparedDecodeValidatePrepareMs: totals.decodeValidatePrepareMs,
+          preparedJsonParseMs: totals.jsonParseMs,
+          preparedBase64DecodeMs: totals.base64DecodeMs,
+          preparedNormalizationMs: totals.normalizationMs,
+          preparedIndexingMs: totals.indexingMs,
+          preparedArtifactEncodeMs: totals.artifactEncodeMs,
+          preparedEngineMountMs: commitResult.mountMs,
+          preparedRetainedBlobBytes: commitResult.retainedBlobBytes,
+          preparedMaxStagedArtifactBytes: maxStagedArtifactBytes,
+          preparedJsBatchBytes: 0,
+          preparedCompressedRetainedBytes: commitResult.compressedRetainedBytes,
+          preparedDeclaredRawBytes: commitResult.declaredRawBytes,
+          preparedChunksInflated: commitResult.chunksInflated,
+          preparedRawInflatedBytes: commitResult.rawInflatedBytes,
+          preparedChunkCacheHits: commitResult.cacheHits,
+          preparedCachedRawBytes: commitResult.cachedRawBytes,
+          preparedIndexedMembers: commitResult.indexedMembers,
+          preparedMemberBodyCopies: commitResult.memberBodyCopies,
+          preparedManifestJsonBytes: commitResult.manifestJsonBytes,
+          preparedManifestParseMs: commitResult.manifestParseMs,
+          preparedDecodeValidateMs: commitResult.decodeValidateMs,
+        },
+      }],
     };
   },
 
@@ -566,48 +548,41 @@ const handlers: Handlers = {
 
   async prepare(project, spec) {
     const s = await ensureSession();
-    const rustSpec = { ...spec, buildEpochSecs: project.buildEpochSecs };
     const rustBoundaryStarted = performance.now();
-    let result: RustPreparedProjectWire;
-    try {
-      result = unwrap<RustPreparedProjectWire>(s.prepareProject(
-        JSON.stringify(project.files),
-        project.config,
-        JSON.stringify(project.predefined),
-        JSON.stringify(project.siteFiles),
-        JSON.stringify(rustSpec),
-      ));
-    } catch (error) {
-      // A failed outer envelope means Rust never reported a successful compile.
-      // Site failures use the typed `siteFailed` result below.
-      throw new PrepareOperationError(String(error), 'compile');
-    }
+    let result: PreparedProjectResult;
+    result = unwrapBuild<PreparedProjectResult>(s.prepareProject(
+      JSON.stringify(project),
+      JSON.stringify(spec),
+    ));
     const rustBoundaryMs = performance.now() - rustBoundaryStarted;
-    const compiled = {
-      ...result.compiled,
-      buildMs: result.compileMs,
-      fileCount: Object.keys(project.files).length,
-    } as CompileResult;
-    if (result.status === 'siteFailed') {
-      throw new PrepareOperationError(result.error, 'site', compiled);
-    }
+    const compiled = result.compiled;
     const prepared = result.site;
     try {
-      compiled.packageStorage = unwrap(s.packageStorageMetrics());
-      if (prepared.generator !== spec.generator || prepared.handle !== prepared.buildId) {
-        throw new Error('prepare: Rust returned an inconsistent immutable build handle');
+      if (prepared.generator !== spec.generator) {
+        throw new Error('prepare: Rust returned a different generator');
       }
       const hostPrepareStarted = performance.now();
       if (prepared.generator === 'cycle') {
         const rendererPackage = await loadCycleRendererPackage();
         const closed = await ClosedBuildHandle.open(prepared.siteBuild, {
           get: async (content) => {
-            const bytes = s.readContent(prepared.handle, content.sha256);
+            const bytes = s.readContent(prepared.buildId, content.sha256);
             await storeExactContent(bytes, content);
             return bytes;
           },
         });
-        const generator = await openCycleGenerator(closed, rendererPackage.package);
+        const generator = await openCycleGenerator(closed, rendererPackage.package, {
+          get: async (content) => {
+            const bytes = await contentStore.get(content);
+            return bytes ? new Uint8Array(bytes) : null;
+          },
+          put: async (bytes, mediaType) => {
+            const content = await contentStore.put(bytes, mediaType);
+            if (!content) throw new Error('Cycle output ContentStore is unavailable');
+            if (!content.mediaType) throw new Error('Cycle output ContentStore omitted media type');
+            return { ...content, mediaType: content.mediaType };
+          },
+        });
         const catalog = generator.outputs();
         const publicCatalog: OutputCatalog = {
           buildId: prepared.buildId,
@@ -616,6 +591,13 @@ const handlers: Handlers = {
             rendererPackage.contentByPath.get(output.file),
           )),
         };
+        s.openRenderer(
+          prepared.buildId,
+          JSON.stringify({ ...CYCLE_RENDERER_IDENTITY, recipeSha256: __CYCLE_RENDER_RECIPE__ }),
+          CYCLE_OUTPUT_SCHEMA,
+          JSON.stringify({ rendererPackageId: rendererPackage.manifest.packageId }),
+          JSON.stringify(catalog.map((output) => output.file)),
+        );
         const runtime: CycleBuildRuntime = {
           kind: 'cycle',
           generator,
@@ -623,34 +605,47 @@ const handlers: Handlers = {
           catalog,
           publicCatalog,
           rendered: new Map(),
-          rendererPackageId: rendererPackage.manifest.packageId,
         };
         // Preview assets are a closed catalog, never a live mutable-adapter query.
         // Materialize every non-page before publication; pages alone stay lazy.
         for (const output of catalog) {
-          if (output.kind !== 'page') await renderCycleOutput(runtime, output.file);
+          if (output.kind !== 'page') {
+            await renderCycleOutput(s, prepared.buildId, runtime, output.file);
+          }
         }
         assertClosedNonPageCatalog(publicCatalog);
-        siteBuilds.install(prepared.handle, runtime);
+        siteBuilds.install(prepared.buildId, runtime);
       } else {
-        siteBuilds.install(prepared.handle, { kind: 'publisher', buildId: prepared.buildId });
+        siteBuilds.install(prepared.buildId, { kind: 'publisher', buildId: prepared.buildId });
       }
       return {
-        handle: prepared.handle,
         buildId: prepared.buildId,
         generator: prepared.generator,
         compiled,
-        metrics: {
-          compileProjectMs: compiled.buildMs,
-          // The combined Rust boundary includes compilation. Report only the
-          // remaining site-preparation boundary under this metric's name.
-          rustPrepareMs: Math.max(0, rustBoundaryMs - compiled.buildMs),
-          hostPrepareMs: performance.now() - hostPrepareStarted,
-          rust: prepared.metrics,
-        },
+        events: [
+          ...result.events,
+          {
+            stage: 'site-build',
+            label: prepared.buildId,
+            message: `Opened ${prepared.generator} renderer for ${prepared.buildId}.`,
+            durationMs: performance.now() - hostPrepareStarted,
+            metrics: {
+              rustBoundaryMs,
+              hostPrepareMs: performance.now() - hostPrepareStarted,
+            },
+          },
+        ],
       };
     } catch (error) {
-      throw new PrepareOperationError(String(error), 'site', compiled);
+      if (error instanceof EngineBuildFailure) throw error;
+      throw new EngineBuildFailure({
+        operation: 'prepare',
+        phase: 'renderer',
+        code: 'renderer-failed',
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+        successfulCompilation: compiled,
+      });
     }
   },
 
@@ -659,7 +654,7 @@ const handlers: Handlers = {
     const runtime = siteBuilds.get(handle);
     if (!runtime) throw new Error(`outputs: unknown build handle ${handle}`);
     if (runtime.kind === 'cycle') return runtime.publicCatalog;
-    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
+    const catalog = unwrapBuild<OutputCatalog>(s.outputs(handle));
     for (const output of catalog.outputs) {
       if (output.content) await publishRustContent(s, handle, output.content);
     }
@@ -671,10 +666,10 @@ const handlers: Handlers = {
     const s = await ensureSession();
     const runtime = siteBuilds.get(handle);
     if (!runtime) throw new Error(`render: unknown build handle ${handle}`);
-    if (runtime.kind === 'cycle') return renderCycleOutput(runtime, path);
-    const rendered = unwrap<RenderedOutput>(s.render(handle, path));
-    await publishRustContent(s, handle, rendered.content);
-    return rendered;
+    if (runtime.kind === 'cycle') return renderCycleOutput(s, handle, runtime, path);
+    const content = unwrapBuild<ContentRef>(s.render(handle, path));
+    await publishRustContent(s, handle, content);
+    return content;
   },
 
   async finalize(handle) {
@@ -682,41 +677,51 @@ const handlers: Handlers = {
     const runtime = siteBuilds.get(handle);
     if (!runtime) throw new Error(`finalize: unknown build handle ${handle}`);
     if (runtime.kind === 'cycle') return finalizeCycleOutput(s, handle, runtime);
-    const catalog = unwrap<OutputCatalog>(s.outputs(handle));
+    const catalog = unwrapBuild<OutputCatalog>(s.outputs(handle));
     for (const output of catalog.outputs) {
       if (!output.content) {
-        const rendered = unwrap<RenderedOutput>(s.render(handle, output.path));
-        await publishRustContent(s, handle, rendered.content);
+        const content = unwrapBuild<ContentRef>(s.render(handle, output.path));
+        await publishRustContent(s, handle, content);
       } else {
         await publishRustContent(s, handle, output.content);
       }
     }
-    return unwrap<SiteOutput>(s.finalize(handle));
+    return unwrapBuild<SiteOutput>(s.finalize(handle));
   },
 };
 
 async function handleRequest(msg: WorkerRequest): Promise<void> {
   const reply = (r: WorkerReply) => (self as unknown as Worker).postMessage(r);
-  lastWorkerConsoleError = '';
   try {
     const handler = handlers[msg.op] as (...args: unknown[]) => Promise<unknown>;
     if (!handler) throw new Error(`unknown op: ${msg.op}`);
     reply({ id: msg.id, ok: true, result: await handler(...msg.args) });
   } catch (err) {
-    const e2 = err as Error;
-    const detail = err instanceof PrepareOperationError
-      ? err.stage === 'site'
-        ? { operation: 'prepare' as const, stage: 'site' as const, compiled: err.compiled! }
-        : { operation: 'prepare' as const, stage: 'compile' as const }
-      : undefined;
-    const consoleContext = lastWorkerConsoleError
-      ? `\nWorker console: ${lastWorkerConsoleError}`
-      : '';
+    const operation = (
+      msg.op === 'prepare'
+      || msg.op === 'outputs'
+      || msg.op === 'render'
+      || msg.op === 'finalize'
+    ) ? msg.op : 'lifecycle';
+    const error: BuildError<CompileResult> = err instanceof EngineBuildFailure
+      ? err.detail
+      : {
+      operation,
+      phase: operation === 'render'
+        ? 'renderer'
+        : operation === 'finalize'
+          ? 'finalization'
+          : operation === 'prepare'
+            ? 'preparation'
+            : 'lifecycle',
+      code: 'internal',
+      message: err instanceof Error ? err.message : String(err),
+      retryable: false,
+    };
     reply({
       id: msg.id,
       ok: false,
-      error: `${String(e2?.stack ?? e2)}${consoleContext}`,
-      ...(detail ? { detail } : {}),
+      error,
     });
   }
 }

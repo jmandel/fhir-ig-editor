@@ -27,15 +27,135 @@ PreparedGuide -> SiteBuild -> SiteOutput
 The site host surface is exactly:
 
 ```text
-prepare(project, generatorSpec) -> handle
-outputs(handle)                  -> catalog
-render(handle, path)             -> output ContentRef
-finalize(handle)                 -> SiteOutput
+prepare(project, generatorSpec) -> Build
+build.outputs()                 -> catalog
+build.render(path)              -> ContentRef
+build.finalize()                -> SiteOutput
 ```
 
 `ARCHITECTURE.md` is the one normative cross-repository contract and deletion
 ledger. Do not restore compatibility wrappers, v1 values, mutable adapters,
 asset side channels, host callbacks, or parallel serialized build formats.
+
+## Active API convergence (landing 2026-07-12)
+
+**FINAL CONVERGENCE CERTIFICATION (2026-07-12):** the
+functional app contract is now one immutable `Build` with compilation
+inspection plus `outputs/render/finalize`; its public barrel fell from 52
+exports to 13 canonical UI/functional names. Worker, package, renderer, and
+envelope transports import the generated Rust declarations directly. Cycle has
+one read-only `ContentStore` capability and one writable refinement (four
+parallel interfaces deleted), and native cache-hit/fresh execution both pass
+through one private frozen `outputs -> render -> finalize` Build facade. A
+cache hit reconstructs and verifies the exact renderer catalog before returning
+authenticated refs; it does not infer a lossy catalog from file MIME types.
+ProjectSource alone owns the operation lease, so five cancellation checkpoints
+remain while the duplicate PackageProvider callback is deleted.
+
+The final dependency commits are sushi-rs
+`a1bf34ec96b695209be9bd2f6709333949c515de` and Cycle
+`090453f1d64326b96c37887ebfe44b8702b4ffc3`; both are pushed on `main`
+(and the engine is also pushed on `snapshot-gen`). The editor's rebuilt WASM
+identifies engine `a1bf34ec`. Its exact committed-stamp Pages-subpath receipt is
+`/tmp/fhir-api-convergence-stamped-browser-final3.log` (`E2E GATE: PASS`). It
+proves Tiny and Cycle edits (892/659 ms), exact private Publisher reuse, US Core
+1,535/1,535 images and 85/85 assets, one html/body/header/footer on CarePlan,
+real mCODE without fallback/dependency error, protocol-6 upgrade/restart,
+dirty Workspace A -> B/C -> A plus reload, scroll 640 -> 640, and stable 390px
+and 320px mobile geometry. Native Cycle's real two-pass 91-file output is
+identical and its second pass verifies the full catalog then skips Liquid.
+Native Publisher independently finalizes 1,799 files. Rust workspace/all-target/
+wasm32/fmt, generated-contract drift/schema, byte parity 10/10, consistency,
+Cycle 240/240 plus typecheck/bundles, and editor 104/104 plus TypeScript/Pages
+build are green.
+
+The repeatable performance receipt is
+`/tmp/fhir-api-convergence-uscore.json`: cold US Core 78.398 s, persistent hard
+reload 8.999 s with prior verified UI/page at 0.998/1.089 s, and same-worker
+Cycle -> US Core 1.562 s with a 155 ms retained SiteBuild prepare. Relative to
+the recorded pre-optimization floors, persistent reload is down from 15.8 s,
+same-worker reopen from 5.348 s, and the exercised Publisher prose edit from
+about 1.8 s to 0.897 s. The loaded US Core semantic profile edit remains
+5.702 s (1.637 s compile plus 2.204 s Rust preparation dominate); do not claim
+that path improved in this architecture-only slice. Local implementation,
+dependency landing, commit-stamped WASM rebuild, and certification are
+complete; the editor commit, Pages monitoring, and live-origin verification
+remain.
+
+**NO-ARG FINALIZE + PRIVATE CACHE CHECKPOINT (2026-07-12):**
+the public web and Fig `Build` facades no longer expose lifecycle build ids or
+generator fields; preview publication uses `OutputCatalog.buildId`. Cycle's
+generator likewise has only `outputs()` and `render(path) -> ContentRef`.
+SiteEngine now has one no-argument `finalize(handle)` for Publisher and Cycle.
+The external renderer binds its immutable path catalog once and admits each
+verified `SiteOutputFile` as it renders; the former public serialized
+`RendererOutput` bulk plan and optional-finalize argument are deleted through
+Rust, WASM, and the Worker. Native Bun transport is a hidden Fig IPC command,
+absent from normal CLI help, rather than a fifth public finalization mode.
+
+`OutputCacheKey`, `SiteOutputCache`, `FileSiteOutputCache`, and every public
+cache accessor are deleted from `site_build`. `SiteOutput` contains only its
+functional receipt and `so1` identity. Fig privately derives/publishes the
+verified native optimization pointer; Cycle's exported native resolution view
+contains only `{receipt, store}`. Fig's concrete filesystem ProjectSource and
+PackageProvider implementations are private behind one path-based `prepare`.
+Generated schema exactness is now tested for omitted/non-null options, the
+nullable input allowlist, concrete compilation errors, and BuildEvent required
+fields. Current focused evidence: SiteEngine 23 pass/1 ignored, SiteBuild
+16+4+4, WASM 6+8, Fig 10+4, app 102/102 (509 assertions), TypeScript, contract
+generation drift, and diff integrity. Rebuilt WASM/native Cycle/full Chromium
+certification remains pending; do not land yet.
+
+A follow-up wire/documentation audit reran only the generated-contract drift
+check, the four exporter schema-exactness tests, Fig's four shared-envelope
+tests, and editor TypeScript; all passed. The generated editor/Cycle
+declarations remain identical,
+`PrepareResult.generator` is the closed generated `GeneratorKind`, and no cache
+field/type, bulk renderer plan, or optional-finalize payload appears in
+generated `SiteOutput` or its schemas. This follow-up did not rerun app tests or
+production build, WASM, native Cycle, Chromium, or deployment gates.
+
+**GENERATED-CONTRACT CHECKPOINT (SUPERSEDED BY NO-ARG FINALIZE ABOVE):** the
+generated contract now covers the complete
+ClosedSiteBuild/SiteOutput graph in both editor and Cycle, and SiteOutput no
+longer serializes its private `sok1` lookup key. Rust derives that key only for
+private cache addressing; `so1` now hashes exactly the functional receipt plus
+files. Rust and Cycle independent identity/cache fixtures pass. `outputs`,
+`render`, and `finalize` now return the same typed `BuildError` envelope as
+`prepare`; the Worker uses `unwrapBuild` for all four and no longer fabricates
+phases/codes from strings. The unused standalone WASM `compileProject` route is
+deleted and the byte-parity gate calls atomic `prepareProject`.
+
+All preparation, package-storage, init, and prepared-mount observations now
+travel as generated `BuildEvent`; flat prepare/mount/storage result metrics and
+the ambient `EngineClient.progressCb/setProgress` channel are deleted. Event
+sinks are explicit per operation, functional build events name operation and
+build id, and the browser Build registry is bounded to two generations. Focused
+evidence at this checkpoint: SiteEngine 21 pass/1 ignored, WASM 6+5+8, Fig
+10+4, SiteBuild 16+4+6, app 102/102 plus TypeScript, and Cycle core/native
+orchestration 60/60 plus both entrypoint bundles. This older checkpoint is
+superseded by “NO-ARG FINALIZE + PRIVATE CACHE” above; its named deletion work
+is complete. Full rebuilt-WASM/browser certification has not run.
+
+Feature-gated Rust derives now generate `app/src/site/contract.generated.ts`
+and Draft 2020-12 schemas at `contracts/site-wire.schema.json`;
+`scripts/generate-wire-contract.sh --check` gates drift. Generated roots cover
+ProjectRevision, GeneratorSpec, ContentRef, output catalog/SiteOutput,
+BuildEvent, and typed BuildError. The browser's former five-argument prepare
+transport is one ProjectRevision plus one normalized GeneratorSpec; workspace
+id is adapter metadata, render epoch belongs to GeneratorSpec, and FSH is
+consistently `fsh`. The second Rust ProjectRevision name embedded in SiteBuild
+is now `ProjectIdentity`.
+
+Render now returns only ContentRef through Rust, WASM, worker, client, preview,
+and Fig. Web and Fig expose immutable Build facades; raw build ids remain
+lifecycle addressing. Rust PrepareResult and preview protocol 6 no longer carry
+duplicate handle/buildId fields. Progress uses generated BuildEvent and worker
+failures use generated typed BuildError. Focused Rust checks, app TypeScript,
+and 102/102 app tests pass; rebuilt-WASM/full browser certification has not run.
+The Cycle staging-tree external plan named by this older checkpoint has since
+been deleted in favor of renderer writes to ContentStore references and the
+single no-argument finalization path described above.
 
 ## Active performance/UX certification (2026-07-12)
 
@@ -390,9 +510,9 @@ The performance work composes existing contracts only:
 - the browser may restore the Service Worker's already-validated immutable
   preview pointer before engine initialization, but it must remain visibly
   previous/stale until the current `prepare` and publication succeed;
-- native Cycle may look up and publish only canonical `SiteOutput` through
-  `FileSiteOutputCache`, keyed from the verified closed `SiteBuild` and exact
-  renderer recipe/options; and
+- native Cycle may look up and publish only canonical `SiteOutput` through a
+  private host pointer derived from the verified closed `SiteBuild` and exact
+  renderer recipe/options; no cache type belongs to `site_build`; and
 - prose-only rebuilds may privately reuse snapshot-completed local resources
   only under compiled-resource, exact-package-closure, resolver-order, and
   snapshot-recipe identity. Current authored inputs must still construct a new

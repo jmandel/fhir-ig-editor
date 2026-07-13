@@ -90,7 +90,7 @@ for (const root of ['input/resources', 'input/examples']) {
     }
   }
 }
-// `compileProject` is the one complete compiler boundary. Capture every
+// `prepareProject` is the one complete compiler + SiteBuild boundary. Capture every
 // authored input byte except FSH (already supplied as parsed text above), so
 // predefined overlap, page listing, and future authored roles cannot make this
 // parity gate exercise a narrower obsolete API.
@@ -104,14 +104,16 @@ if (fs.existsSync(inputDir)) {
   }
 }
 
-const compileEnv = JSON.parse(session.compileProject(
-  JSON.stringify(files),
-  config,
-  JSON.stringify(predefined),
-  JSON.stringify(siteFiles),
+const prepareEnv = JSON.parse(session.prepareProject(
+  JSON.stringify({ config, fsh: files, predefined, siteFiles }),
+  JSON.stringify({
+    generator: 'cycle',
+    buildEpochSecs: 1783555200,
+    liquidAssetDirs: [],
+  }),
 ));
-if (!compileEnv.ok) throw new Error(`session.compileProject failed: ${compileEnv.error?.message}`);
-const out = compileEnv.result;
+if (!prepareEnv.ok) throw new Error(`session.prepareProject failed: ${prepareEnv.error?.message}`);
+const out = prepareEnv.result.compiled;
 
 let match = 0, diff = 0, miss = 0;
 for (const r of out.resources) {

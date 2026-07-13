@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
-import type { CompiledResource, Diagnostic } from '../worker/protocol';
+import type { Diagnostic } from '../worker/protocol';
 import type { OutputDescriptor } from '../site/contract';
+import type { ResourceView } from './resourceView';
 
 export type WorkspaceMode = 'author' | 'explore' | 'preview';
 export type BuildState = 'checking' | 'building' | 'ready' | 'stale' | 'rebuilding' | 'failed' | 'failed-preview';
@@ -43,7 +44,7 @@ interface Props {
   projectId: string;
   projectName: string;
   paths: string[];
-  resources: CompiledResource[];
+  resources: ResourceView[];
   pages: OutputDescriptor[] | null;
   diagnostics: Diagnostic[];
   buildState: BuildState;
@@ -144,7 +145,7 @@ function Stat({ value, label, pending = false }: { value: number; label: string;
 
 export function summarizeProject(
   paths: string[],
-  resources: CompiledResource[],
+  resources: ResourceView[],
   pages: OutputDescriptor[] | null,
   diagnostics: Diagnostic[],
 ) {

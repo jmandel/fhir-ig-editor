@@ -12,7 +12,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { EngineClient } from '../worker/client';
-import type { CompiledResource, ExpandResult, ExpansionConcept, NotEnumerable, UsedCodeSystem } from '../worker/protocol';
+import type { ExpandResult, ExpansionConcept, NotEnumerable, UsedCodeSystem } from '../worker/protocol';
+import type { ResourceView } from './resourceView';
 import { getTxEndpoint, txServerIdentity } from '../vfs/txSettings';
 import { cacheKey, readTxCache, writeTxCache, deleteTxCache, type TxCacheEntry } from '../vfs/txCache';
 import { txExpand } from '../vfs/txClient';
@@ -36,7 +37,7 @@ function referencedSystems(vs: unknown): { systems: Set<string>; valueSets: Set<
 
 /** From all compiled resources, gather the CodeSystem/ValueSet bodies the compose
  *  references (by url), which both tiers need as local content. */
-function gatherReferenced(vs: unknown, all: CompiledResource[]): unknown[] {
+function gatherReferenced(vs: unknown, all: ResourceView[]): unknown[] {
   const { systems, valueSets } = referencedSystems(vs);
   const out: unknown[] = [];
   for (const r of all) {
@@ -224,8 +225,8 @@ export function ValueSetExpansion({
   engine,
   settingsVersion,
 }: {
-  resource: CompiledResource;
-  allResources: CompiledResource[];
+  resource: ResourceView;
+  allResources: ResourceView[];
   engine: EngineClient;
   /** Bumped when tx settings change, to re-evaluate the endpoint-gated UI. */
   settingsVersion: number;

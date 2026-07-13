@@ -128,13 +128,14 @@ describe('project workspace and immutable revision', () => {
       { path: 'sushi-config.yaml', text: 'name: Before' },
       { path: 'input/fsh/a.fsh', text: 'Profile: Before' },
     ]);
-    const captured = workspace.capture(1700000000).revision;
+    const capture = workspace.capture(1700000000);
+    const captured = capture.revision;
     await workspace.write('input/fsh/a.fsh', 'Profile: After');
 
-    expect(captured.projectId).toBe('revision-a');
-    expect(captured.files['input/fsh/a.fsh']).toBe('Profile: Before');
+    expect(capture.projectId).toBe('revision-a');
+    expect(captured.fsh['input/fsh/a.fsh']).toBe('Profile: Before');
     expect(Object.isFrozen(captured)).toBe(true);
-    expect(Object.isFrozen(captured.files)).toBe(true);
+    expect(Object.isFrozen(captured.fsh)).toBe(true);
   });
 
   test('an invalid replacement is rejected without replacing the committed workspace', async () => {

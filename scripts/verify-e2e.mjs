@@ -18,7 +18,7 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
-const PREVIEW_SW_PROTOCOL = 5;
+const PREVIEW_SW_PROTOCOL = 6;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const timeoutScale = Math.max(1, requestedCpuThrottle);
 // Preserve the release budget on normal CI. An explicitly throttled functional
@@ -32,7 +32,10 @@ function assessWarmEditMetrics(events) {
   const metrics = [...(events || [])]
     .reverse()
     .map((entry) => entry?.event)
-    .find((event) => event?.stage === 'site-build' && event.metrics)?.metrics;
+    .find((event) => event?.operation === 'prepare'
+      && event?.stage === 'site-build'
+      && event.metrics
+      && Object.hasOwn(event.metrics, 'snapshotCompletedLocalCacheHit'))?.metrics;
   const phaseNames = [
     'outputCatalogMs',
     'publisherArtifactsMs',
@@ -2202,7 +2205,7 @@ try {
     && tiny.profileTextLength > 500
     && tiny.narrative
     && tiny.templatePreferencePreserved
-    // compileProject exposes the four authored FSH products; the generated
+    // prepare exposes the four authored FSH products; the generated
     // ImplementationGuide is deliberately a disk/native-only SUSHI output.
     && results.tinyResourceCount === 4
     && results.tinyCleanDiagnostics === 0
@@ -2337,7 +2340,7 @@ try {
       console.error('assert: profile page did not contain exactly one correctly-scoped hot-reload control block —', JSON.stringify(pw.profileHotReloadPayloads)); ok = false;
     }
     if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
-    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=5(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
+    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=6(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
       console.error('assert: preview worker did not restart at the current module protocol —', pw.previewWorkerRestart); ok = false;
     }
     if (!(pw.persistedAfterRestart
