@@ -79,8 +79,12 @@ about 1.8 s to 0.897 s. The loaded US Core semantic profile edit remains
 5.702 s (1.637 s compile plus 2.204 s Rust preparation dominate); do not claim
 that path improved in this architecture-only slice. Local implementation,
 dependency landing, commit-stamped WASM rebuild, and certification are
-complete; the editor commit, Pages monitoring, and live-origin verification
-remain.
+complete. Editor commit `54b77862f67d352896d7902a1882335dbfac5b9a` is pushed
+on `main`. Pages run `29218151254` passed the Rust, native Fig, package-list,
+WASM, byte-parity, Cycle, app, Chromium, artifact-upload, and deploy jobs. The
+live origin serves app `assets/index-DN3nLCvl.js`, worker
+`assets/engine.worker-CrUU-4x0.js`, and reports engine
+`rust_sushi + snapshot_gen (walk) · a1bf34e`.
 
 **NO-ARG FINALIZE + PRIVATE CACHE CHECKPOINT (2026-07-12):**
 the public web and Fig `Build` facades no longer expose lifecycle build ids or
