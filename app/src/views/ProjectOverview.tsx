@@ -37,7 +37,8 @@ export function settledBuildStatus(state: BuildState, projectName: string): stri
  * would claim compilation found no definitions when compilation has not
  * produced an answer. Rebuilds retain their previous exact result instead. */
 export function definitionsArePending(state: BuildState, resourceCount: number): boolean {
-  return (state === 'checking' || state === 'building') && resourceCount === 0;
+  return (state === 'checking' || state === 'building' || state === 'rebuilding')
+    && resourceCount === 0;
 }
 
 interface Props {

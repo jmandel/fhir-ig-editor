@@ -17,6 +17,8 @@ describe('template PreparedPackage transport', () => {
     expect(warmLookup).toBeGreaterThan(-1);
     expect(networkFetch).toBeGreaterThan(warmLookup);
     expect(SOURCE).not.toContain('readCachedBundle');
+    expect(SOURCE).not.toContain("import('./inflate')");
+    expect(SOURCE).toContain("return { kind: 'tgz', label: entry.label, bytes: compressed, transportIdentity }");
   });
 
   test('uses complete prepared packages for live template acquisition', () => {

@@ -15,6 +15,38 @@ in `vendor/sushi-rs/AGENTS.md`.
 
 ## Current objective
 
+**TINY COLD-START REGRESSION FIX (EDITOR READY TO LAND 2026-07-14):** a fresh live
+mobile profile reproduced the reported apparently-hung Tiny Explore pane. It
+was not deadlocked: Ready arrived at 23.05s while all HTTP requests completed
+within 0.67s. The dominant work was host inflate -> base64 object -> JSON
+serialization/clone -> Rust JSON/base64 decode for about 36.2 MB compressed and
+269 MB of transient wire input. The active fix carries baked and registry TGZ
+bytes directly to the Worker/WASM and uses one bounded
+`package_store::read_package_tgz` parser shared with native acquisition. Raw
+local-drop bundles remain a compatibility input; they are not used by the
+published Tiny path. All-cold pinned batches transfer their ArrayBuffers;
+registry batches retain bytes only while typed decode failure may continue at
+the next registry. Prepared-pointer fallback and mount commit remain the same
+atomic transaction.
+
+The progress surface now reports transport, `Located ...; ready to prepare`,
+package preparation/mount, and combined compilation/site preparation without
+the frozen `Loaded` claim or duplicate Explore placeholder. Persisted boot uses
+the same visible progress surface. The parser rejects unsafe/duplicate paths,
+more than 65,536 entries, any entry over 128 MiB, or more than 256 MiB expanded
+before allocation/read; rejection leaves Session state unchanged. Current
+evidence: Rust workspace release tests green (SiteEngine 24/25 with one explicit
+fixture ignore), all-target check, wasm32, and fmt; editor 107/107, TypeScript,
+Pages build, and diff checks. The engine is committed and pushed on
+`snapshot-gen` and `main` as `cbfadd9e`. The exact committed-stamp full browser
+receipt is `/tmp/fhir-tgz-full-browser-committed.log` (`E2E GATE: PASS`): the
+browser reports engine `cbfadd9e`, Tiny Ready in 10.445s, all five cold mount
+batches have zero JSON/base64/serialization, Cycle edit is 803ms with scroll
+640 -> 640, US Core has 1,535/1,535 images and 85/85 assets plus one CarePlan
+shell, and real mCODE/restart/workspace/mobile gates remain green. Commit and
+push the editor submodule pin and app changes, then require the complete Pages
+run and a fresh live-origin Tiny check before declaring the regression fixed.
+
 Complete and certify the deletion-first architecture overhaul. The only domain
 values are:
 

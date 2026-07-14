@@ -163,8 +163,12 @@ describe('canonical build observations and failures', () => {
     expect(mount).toContain('unwrap(s.beginPreparedMount(inputs.length))');
     expect(mount).toContain('for (const item of inputs)');
     expect(mount).toContain("if (item.kind === 'prepared')");
-    expect(mount).toContain('const { spec, transportIdentity } = item');
+    expect(mount).toContain("if (item.kind === 'tgz')");
+    expect(mount).toContain('s.prepareTgzArtifact(item.label, new Uint8Array(item.bytes))');
+    expect(mount).toContain('s.prepareArtifacts(input)');
     expect(mount).toContain('s.commitPreparedMount()');
     expect(CLIENT).not.toContain('if (hasRaw && hasPrepared)');
+    expect(CLIENT).toContain('coldCarriers.length === transaction.length');
+    expect(CLIENT).toContain("this.request('mountPackages', [transaction], transfer)");
   });
 });

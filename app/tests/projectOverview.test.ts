@@ -24,6 +24,7 @@ test('a settled project without a current preview is checking, never ready', () 
 test('missing definitions are pending until the first compile answers, never zero', () => {
   expect(definitionsArePending('checking', 0)).toBe(true);
   expect(definitionsArePending('building', 0)).toBe(true);
+  expect(definitionsArePending('rebuilding', 0)).toBe(true);
   expect(definitionsArePending('rebuilding', 4)).toBe(false);
   expect(definitionsArePending('failed', 0)).toBe(false);
   expect(definitionsArePending('ready', 4)).toBe(false);

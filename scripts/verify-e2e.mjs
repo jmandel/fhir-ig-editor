@@ -778,8 +778,16 @@ try {
   );
   results.packageBatchProgress = await evalJs(ws, `(() => (window.__igDebug?.metrics || [])
     .map((entry) => entry.event)
-    .filter((event) => /(?:Loading|Loaded) \\d+ of \\d+ dependencies/.test(event.message || ''))
+    .filter((event) => /(?:(?:Loading|Loaded) \\d+ of \\d+|Located \\d+) dependencies/.test(event.message || ''))
     .map((event) => ({ message: event.message, bytes: event.bytes ?? null, totalBytes: event.totalBytes ?? null })))()`);
+  results.tinyColdBinaryMounts = await evalJs(ws, `(() => (window.__igDebug?.metrics || [])
+    .map((entry) => entry.event)
+    .filter((event) => event.stage === 'bundle-mount' && event.metrics?.preparedColdPrepare === 1)
+    .map((event) => ({
+      inputJsonBytes: event.metrics?.preparedInputJsonBytes ?? null,
+      base64Bytes: event.metrics?.preparedBase64Bytes ?? null,
+      workerSerializeMs: event.metrics?.workerSerializeMs ?? null,
+    })))()`);
   await evalJs(ws, `document.querySelectorAll('.artifact-trail-step')[2]?.click()`);
   try {
     await waitFor(ws, `(() => {
@@ -865,12 +873,20 @@ try {
       tinyReadyMs: results.tinyReadyMs,
       tinyCompileMs: results.tinyCompileMs,
       packageBatchProgress: results.packageBatchProgress,
+      tinyColdBinaryMounts: results.tinyColdBinaryMounts,
       tinyReload: results.tinyReload,
       mobile390: results.mobile390,
     }, null, 2));
     if (!results.packageBatchProgress.some((event) => /of [2-9] dependencies/.test(event.message))
       || results.packageBatchProgress.some((event) => event.totalBytes != null)) {
       throw new Error('parallel package progress was not presented as one honest aggregate');
+    }
+    if (results.packageBatchProgress.some((event) => /^Loaded /.test(event.message))
+      || results.tinyColdBinaryMounts.length === 0
+      || results.tinyColdBinaryMounts.some((event) => event.inputJsonBytes !== 0
+        || event.base64Bytes !== 0
+        || event.workerSerializeMs !== 0)) {
+      throw new Error('Tiny cold packages did not stay compressed/binary through Worker preparation');
     }
     if (!mobileLayoutPass(results.mobile390)) throw new Error('390px single-surface layout failed');
     console.log('\nMOBILE LAYOUT GATE: PASS');
@@ -2211,6 +2227,16 @@ try {
     && results.tinyCleanDiagnostics === 0
   )) {
     console.error('assert: tiny Source -> Definition -> standard Publisher page story failed —', JSON.stringify(tiny)); ok = false;
+  }
+  if (!results.packageBatchProgress.some((event) => /of [2-9] dependencies/.test(event.message))
+    || results.packageBatchProgress.some((event) => event.totalBytes != null || /^Loaded /.test(event.message))) {
+    console.error('assert: Tiny package progress was not one truthful aggregate —', JSON.stringify(results.packageBatchProgress)); ok = false;
+  }
+  if (results.tinyColdBinaryMounts.length === 0
+    || results.tinyColdBinaryMounts.some((event) => event.inputJsonBytes !== 0
+      || event.base64Bytes !== 0
+      || event.workerSerializeMs !== 0)) {
+    console.error('assert: Tiny cold package carriers expanded through JS JSON/base64 —', JSON.stringify(results.tinyColdBinaryMounts)); ok = false;
   }
   if (results.resourceCount < 5) { console.error('assert: too few resources'); ok = false; }
   // ONLINE fragment-content gate: a compiled profile page must render real table

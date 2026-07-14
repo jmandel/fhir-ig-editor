@@ -18,7 +18,6 @@
 // + why + the three remedies), surfaced to the UI — never a silent failure.
 
 import type {
-  BundleSpec,
   MissingPackage,
   MutableVersionRequest,
   PackageMountInput,
@@ -26,7 +25,7 @@ import type {
   ResolutionStep,
   VersionIndex,
 } from './protocol';
-import { BakedBundleTransportError } from './bundleIntegrity';
+import { BakedBundleTransportError, readResponseBytes } from './bundleIntegrity';
 import type { BakedBundleEntry } from './bundleIntegrity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
 import {
@@ -60,6 +59,18 @@ export interface ResolveOutcome {
  * progress vocabulary; baked transport adds timing/cache metadata). */
 export type ResolveProgress = (ev: BuildEvent) => void;
 
+/** Registry retry position belongs to host transport, not to the package
+ * carrier crossing the Worker boundary. Key it by the exact ArrayBuffer so a
+ * typed Rust TGZ preparation failure can continue with the next configured
+ * registry without adding registry policy to PackageMountInput. */
+interface RegistryCarrierOrigin {
+  label: string;
+  missing: MissingPackage;
+  nextRegistryIndex: number;
+}
+
+const registryCarrierOrigins = new WeakMap<ArrayBuffer, RegistryCarrierOrigin>();
+
 /** The seams the loop needs from its host (EngineClient supplies these). */
 export interface ResolverHost {
   /** Ask the engine to resolve against the currently mounted set. */
@@ -91,8 +102,10 @@ export function packageBatchProgress(labels: readonly string[], emit: ResolvePro
     const bytes = [...bytesByLabel.values()].reduce((sum, value) => sum + value, 0);
     const done = completed.size === unique.length;
     emit({
-      stage: 'bundle-fetch',
-      message: `${done ? 'Loaded' : 'Loading'} ${completed.size} of ${unique.length} dependencies${done ? '.' : '…'}`,
+      stage: done ? 'resolve' : 'bundle-fetch',
+      message: done
+        ? `Located ${unique.length} dependencies; ready to prepare.`
+        : `Loading ${completed.size} of ${unique.length} dependencies…`,
       ...(bytesByLabel.size > 0 ? { bytes } : {}),
     });
   };
@@ -216,7 +229,11 @@ export async function acquireForProject(
     if (obtained.length) {
       await host.mount(obtained);
       for (const packageInput of obtained) {
-        const label = packageInput.kind === 'raw' ? packageInput.spec.label : packageInput.pointer.label;
+        const label = packageInput.kind === 'raw'
+          ? packageInput.spec.label
+          : packageInput.kind === 'tgz'
+            ? packageInput.label
+            : packageInput.pointer.label;
         mountedAll.push(label);
         mergeLabelsIntoIndex(index, [label]);
       }
@@ -379,10 +396,8 @@ async function obtainPackage(
   }
 
   // (c)/(d) direct FHIR registry (optionally via the configured proxy).
-  const spec = await fetchFromRegistry(label, missing, onProgress);
-  if (spec) {
-    return { kind: 'raw', spec, transportIdentity: 'unpinned' };
-  }
+  const carrier = await fetchFromRegistry(label, missing, onProgress);
+  if (carrier) return carrier;
 
   // Blocked: no source could supply it. Precise UI state.
   blocked.push(
@@ -407,9 +422,25 @@ export async function obtainRawPackageByLabel(label: string): Promise<PackageMou
     reason: { kind: 'not_mounted' },
     set: 'context',
   };
-  const spec = await fetchFromRegistry(label, missing, () => {});
-  if (!spec) return null;
-  return { kind: 'raw', spec, transportIdentity: 'unpinned' };
+  return fetchFromRegistry(label, missing, () => {});
+}
+
+/** Continue an exact registry acquisition after Rust rejected the downloaded
+ * TGZ during decode/normalization. Baked and local carriers deliberately have
+ * no entry in this side table and therefore cannot silently downgrade. */
+export async function retryRegistryTgzCarrier(
+  carrier: PackageMountInput,
+  onProgress: ResolveProgress,
+): Promise<PackageMountInput | null> {
+  if (carrier.kind !== 'tgz') return null;
+  const origin = registryCarrierOrigins.get(carrier.bytes);
+  if (!origin || origin.label !== carrier.label) return null;
+  return fetchFromRegistry(
+    origin.label,
+    origin.missing,
+    onProgress,
+    origin.nextRegistryIndex,
+  );
 }
 
 /** Obtain and mount one exact coordinate requested by Rust's private template
@@ -436,25 +467,28 @@ export async function obtainAndMountPackage(
 }
 
 /** Fetch a package tarball from the configured registries (packages.fhir.org →
- *  packages2 → …), each optionally wrapped through the proxy. Returns a mountable
- *  spec, or null if every registry failed. */
+ *  packages2 → …), each optionally wrapped through the proxy. Returns the
+ *  compressed carrier, or null if every registry failed. */
 async function fetchFromRegistry(
   label: string,
   missing: MissingPackage,
   onProgress: ResolveProgress,
-): Promise<BundleSpec | null> {
+  startRegistryIndex = 0,
+): Promise<PackageMountInput | null> {
   const { package_id: id, version } = missing;
-  for (const registry of getRegistries()) {
+  const registries = getRegistries();
+  for (
+    let registryIndex = startRegistryIndex;
+    registryIndex < registries.length;
+    registryIndex += 1
+  ) {
+    const registry = registries[registryIndex];
     const direct = tarballUrl(registry, id, version);
     const url = viaProxy(direct);
     onProgress({ stage: 'registry-fetch', label, message: `Fetching ${label} from ${registry}…` });
     try {
       const resp = await fetch(url, { redirect: 'follow' });
       if (!resp.ok) continue;
-      // A raw registry npm tarball roots files under `package/`; our inflate
-      // strips that prefix, and the engine derives the `.derived-index.json`
-      // sidecar in-memory (verified byte-parity vs repacked bundles), so a plain
-      // registry tarball mounts identically to a baked bundle.
       const contentLength = resp.headers.get('content-length');
       const total = contentLength == null ? Number.NaN : Number(contentLength);
       const totalBytes = Number.isSafeInteger(total) && total > 0 ? total : undefined;
@@ -465,26 +499,37 @@ async function fetchFromRegistry(
         totalBytes,
         message: `Downloading ${label} from ${registry}…`,
       });
-      const { inflateBundleResponse } = await import('./inflate');
-      const files = await inflateBundleResponse(
+      const bytes = await readResponseBytes(
         resp,
-        (bytes) => {
+        (read) => {
           onProgress({
             stage: 'registry-fetch',
             label,
-            bytes,
+            bytes: read,
             totalBytes,
             message: `Downloading ${label} from ${registry}…`,
           });
         },
-        () => onProgress({
-          stage: 'bundle-unpack',
-          label,
-          message: `Unpacking ${label}…`,
-        }),
+        totalBytes,
       );
-      onProgress({ stage: 'bundle-unpack', label, message: `Unpacked ${label}.` });
-      return { label, files };
+      onProgress({
+        stage: 'resolve',
+        label,
+        message: `Downloaded ${label}; ready to prepare.`,
+        inputBytes: bytes.byteLength,
+      });
+      const carrier: PackageMountInput = {
+        kind: 'tgz',
+        label,
+        bytes,
+        transportIdentity: 'unpinned',
+      };
+      registryCarrierOrigins.set(bytes, {
+        label,
+        missing,
+        nextRegistryIndex: registryIndex + 1,
+      });
+      return carrier;
     } catch {
       /* try the next registry */
     }

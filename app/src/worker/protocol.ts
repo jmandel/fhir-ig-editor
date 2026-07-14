@@ -155,6 +155,7 @@ export type PreparedPackagePointer = PreparedExport & {
 
 export type PackageMountInput =
   | { kind: 'raw'; spec: BundleSpec; transportIdentity: string }
+  | { kind: 'tgz'; label: string; bytes: ArrayBuffer; transportIdentity: string }
   | { kind: 'prepared'; pointer: PreparedPackagePointer };
 
 export type { TemplateResolution } from '../site/contract.generated';

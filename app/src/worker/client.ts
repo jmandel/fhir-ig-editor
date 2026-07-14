@@ -14,7 +14,6 @@ declare const __ENGINE_RECIPE__: string | undefined;
 import EngineWorker from './engine.worker?worker';
 import type {
   BuildError,
-  BundleSpec,
   CompileResult,
   EngineOps,
   ExpandResult,
@@ -116,6 +115,23 @@ export class BuildFailure extends Error {
     super(detail.message);
     this.name = 'BuildFailure';
   }
+}
+
+function failedRegistryTgzCarrier(
+  error: unknown,
+  transaction: PackageMountInput[],
+): Extract<PackageMountInput, { kind: 'tgz' }> | null {
+  if (!(error instanceof BuildFailure)
+    || error.detail.operation !== 'lifecycle'
+    || error.detail.phase !== 'package-transport'
+    || error.detail.code !== 'integrity'
+    || !error.detail.retryable) return null;
+  return transaction.find((item): item is Extract<PackageMountInput, { kind: 'tgz' }> => (
+    item.kind === 'tgz'
+      && error.detail.message.startsWith(
+        `TGZ package ${JSON.stringify(item.label)} could not be prepared:`,
+      )
+  )) ?? null;
 }
 
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
@@ -238,15 +254,30 @@ export class EngineClient {
   /** ONE call path for every engine operation (ledger #2): the op table in
    *  protocol.ts types both the args and the result. */
   private call<K extends Op>(op: K, ...args: EngineOps[K]['args']): Promise<EngineOps[K]['result']> {
+    return this.request(op, args);
+  }
+
+  private request<K extends Op>(
+    op: K,
+    args: EngineOps[K]['args'],
+    transfer: Transferable[] = [],
+  ): Promise<EngineOps[K]['result']> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.worker.postMessage({ id, op, args });
+      try {
+        this.worker.postMessage({ id, op, args }, transfer);
+      } catch (error) {
+        // A synchronous structured-clone/transfer failure never reaches the
+        // Worker, so it must not leave an unreachable pending request behind.
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
-  /** Select a complete PreparedPackage or fetch/authenticate/inflate its exact
-   * baked transport into a mountable BundleSpec. */
+  /** Select a complete PreparedPackage or fetch/authenticate its exact
+   * compressed carrier. Cold bytes remain binary through Worker preparation. */
   private async loadBundle(
     entry: BakedBundleEntry,
     stageLabel: string,
@@ -318,20 +349,14 @@ export class EngineClient {
         inputBytes: entry.bytes,
       }),
     );
-    const { inflateBundle } = await import('./inflate');
-    const files = await inflateBundle(compressed);
-    const spec: BundleSpec = { label: entry.label, files };
     report?.({
-      stage: 'bundle-unpack',
+      stage: 'resolve',
       label: entry.label,
-      message: `${stageLabel} ${entry.label} loaded and inflated.`,
+      message: `${stageLabel} ${entry.label} verified; ready to prepare.`,
       durationMs: performance.now() - started,
       inputBytes: compressed.byteLength,
-      fileCount: Object.keys(files).length,
     });
-    // The Worker prepares and persists the binary execution artifact while
-    // mounting. There is no inflated/base64 persistence layer.
-    return { kind: 'raw', spec, transportIdentity };
+    return { kind: 'tgz', label: entry.label, bytes: compressed, transportIdentity };
   }
 
   /** The only incremental mount path on the main thread. Keep resolution,
@@ -342,23 +367,64 @@ export class EngineClient {
   ): Promise<MountResult> {
     let transaction = packages;
     const started = performance.now();
+    const labelOf = (item: PackageMountInput) => item.kind === 'raw'
+      ? item.spec.label
+      : item.kind === 'tgz'
+        ? item.label
+        : item.pointer.label;
+    report?.({
+      stage: 'bundle-mount',
+      message: `Preparing and mounting ${packages.length} package${packages.length === 1 ? '' : 's'}…`,
+      inputBytes: packages.reduce((sum, item) => sum + (
+        item.kind === 'tgz' ? item.bytes.byteLength : item.kind === 'prepared' ? item.pointer.bytes : 0
+      ), 0),
+      fileCount: packages.length,
+    });
     let result: MountResult;
-    try {
-      result = await this.call('mountPackages', transaction);
-    } catch (error) {
-      // A missing/corrupt prepared artifact is an optimization miss. Reacquire
-      // only the prepared members, then retry the same atomic mixed batch.
-      if (!transaction.some((item) => item.kind === 'prepared')) throw error;
-      const fallbacks = await Promise.all(transaction.map(async (item) => {
-        if (item.kind === 'raw') return item;
-        try {
-          return await this.rawFallbackForPrepared(item.pointer.label);
-        } catch {
-          throw error;
+    for (;;) {
+      const coldCarriers = transaction.filter(
+        (item): item is Extract<PackageMountInput, { kind: 'tgz' }> => item.kind === 'tgz',
+      );
+      // An all-cold batch has no same-call fallback that could reuse its input;
+      // transfer exact pinned carriers to the Worker instead of copying them.
+      // Registry carriers remain attached because a typed Rust decode failure
+      // may continue at the next configured registry; the rest of the atomic
+      // batch must remain reusable for that retry.
+      const transfer = coldCarriers.length === transaction.length
+        && coldCarriers.every((item) => item.transportIdentity !== 'unpinned')
+        ? coldCarriers.map((item) => item.bytes)
+        : [];
+      try {
+        result = await this.request('mountPackages', [transaction], transfer);
+        break;
+      } catch (error) {
+        // A missing/corrupt prepared artifact is an optimization miss. Reacquire
+        // only prepared members and retry the unchanged atomic order.
+        if (transaction.some((item) => item.kind === 'prepared')) {
+          transaction = await Promise.all(transaction.map(async (item) => {
+            if (item.kind !== 'prepared') return item;
+            try {
+              return await this.rawFallbackForPrepared(item.pointer.label);
+            } catch {
+              throw error;
+            }
+          }));
+          continue;
         }
-      }));
-      transaction = fallbacks;
-      result = await this.call('mountPackages', fallbacks);
+
+        // Only the Worker/Rust typed package-transport integrity failure may
+        // advance registry order. Baked/local TGZ carriers have no registry
+        // continuation and remain fail-closed.
+        const failed = failedRegistryTgzCarrier(error, transaction);
+        if (!failed) throw error;
+        const { retryRegistryTgzCarrier } = await import('./packageResolver');
+        const replacement = await retryRegistryTgzCarrier(
+          failed,
+          (event) => report?.(event),
+        );
+        if (!replacement) throw error;
+        transaction = transaction.map((item) => item === failed ? replacement : item);
+      }
     }
     const rpcMs = performance.now() - started;
     for (const label of result.newlyMounted) this.mountedLabels.add(label);
@@ -370,6 +436,7 @@ export class EngineClient {
     for (const event of result.events) {
       report?.({
         ...event,
+        label: event.label ?? transaction.map(labelOf).join(', '),
         metrics: {
           ...event.metrics,
           workerRoundTripMs: rpcMs,
@@ -441,7 +508,7 @@ export class EngineClient {
       }));
       report?.({
         stage: 'bundle-mount',
-        message: `Mounting ${specs.map((item) => item.kind === 'raw' ? item.spec.label : item.pointer.label).join(', ')}…`,
+        message: `Mounting ${specs.map((item) => item.kind === 'raw' ? item.spec.label : item.kind === 'tgz' ? item.label : item.pointer.label).join(', ')}…`,
       });
       const r = await this.mountPackages(specs, report);
       // Mounted now; clear the deferred list so we don't re-fetch.
@@ -693,6 +760,12 @@ export class EngineClient {
         await this.acquireForProject(project.config, report);
       }
       this.snapshotCache.clear();
+      report?.({
+        operation: 'prepare',
+        stage: 'compile',
+        message: 'Compiling definitions and preparing the site…',
+        fileCount: Object.keys(project.fsh).length,
+      });
       const result = await this.call('prepare', project, spec);
       for (const event of result.events) report?.(event);
       report?.({

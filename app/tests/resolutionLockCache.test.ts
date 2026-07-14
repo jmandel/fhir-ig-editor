@@ -142,7 +142,8 @@ describe('persistent package-resolution lock', () => {
     expect(result.packages).toHaveLength(3);
     expect(peak).toBeGreaterThan(1);
     expect(mounted).toBeFalse();
-    expect(progress.at(-1)?.message).toBe('Loaded 3 of 3 dependencies.');
+    expect(progress.at(-1)?.message).toBe('Located 3 dependencies; ready to prepare.');
+    expect(progress.at(-1)?.stage).toBe('resolve');
     expect(progress.at(-1)?.bytes).toBe(3);
     expect(progress.every((event) => !/[abc]#1\.0\.0/.test(event.message))).toBeTrue();
     expect(progress.every((event) => event.totalBytes == null)).toBeTrue();

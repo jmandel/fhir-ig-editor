@@ -297,7 +297,10 @@ export function App() {
           setActivePath(first);
           setActiveText(workspace.read(first) ?? '');
         }
-        void runCompile(workspace, engine);
+        setOpeningSince(Date.now());
+        void runCompile(workspace, engine).finally(() => {
+          if (!cancelled) setOpeningSince(null);
+        });
       }
     })();
     return () => {
@@ -392,7 +395,6 @@ export function App() {
       });
     };
     try {
-      report({ stage: 'site-build', message: `Preparing ${genId} site…` });
       const siteStarted = performance.now();
       const build = await engine.prepare(
         project,
@@ -1038,7 +1040,7 @@ export function App() {
                 Definition
                 <select disabled={definitionsPending} value={selectedResource ?? ''} onChange={(event) => setSelectedResource(event.target.value)}>
                   <option value="" disabled>
-                    {definitionsPending ? 'Preparing definitions…' : 'Select a definition…'}
+                    {definitionsPending ? 'Waiting for compilation…' : 'Select a definition…'}
                   </option>
                   {filteredResources.map((resource) => {
                     const identity = resourceIdentity(resource);
@@ -1049,8 +1051,7 @@ export function App() {
               <section className="definition-pane">
                 {workspaceMode === 'explore' && definitionsPending ? (
                   <div className="panel-empty definition-pending">
-                    <strong>Preparing definitions…</strong>
-                    <span>The profile in your source will appear here after the FHIR dependencies above finish loading.</span>
+                    <span>Definitions will appear when compilation completes.</span>
                   </div>
                 ) : workspaceMode === 'explore' && activeResource && engineRef.current ? (
                   <ResourceInspector resource={activeResource} allResources={resources} engine={engineRef.current} settingsVersion={settingsVersion} />
@@ -1143,11 +1144,11 @@ const OPEN_STAGE_LABEL: Record<BuildEvent['stage'], string> = {
   resolve: 'Resolving packages',
   'bundle-fetch': 'Fetching packages',
   'bundle-cache-hit': 'Loading packages',
-  'bundle-unpack': 'Unpacking packages',
+  'bundle-unpack': 'Verifying packages',
   'bundle-mount': 'Mounting packages',
   'registry-fetch': 'Fetching from registry',
   'package-blocked': 'Package unavailable',
-  'lazy-fetch': 'Loading profile dependencies',
+  'lazy-fetch': 'Loading package',
   ready: 'Ready',
 };
 

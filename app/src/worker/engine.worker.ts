@@ -63,6 +63,7 @@ interface WasmSession {
   commitPreparedMount(): string;
   abortPreparedMount(): string;
   prepareArtifacts(bundlesJson: string): string;
+  prepareTgzArtifact(label: string, bytes: Uint8Array): string;
   prepareAndMount(bundlesJson: string): string;
   takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
@@ -121,6 +122,19 @@ class EngineBuildFailure extends Error {
     super(detail.message);
     this.name = 'EngineBuildFailure';
   }
+}
+
+/** A registry may answer an exact coordinate with a corrupt/non-package TGZ.
+ * Keep that failure typed at the private Worker boundary so the host can try
+ * the next registry without treating unrelated mount failures as retryable. */
+function tgzPreparationFailure(label: string, error: unknown): EngineBuildFailure {
+  return new EngineBuildFailure({
+    operation: 'lifecycle',
+    phase: 'package-transport',
+    code: 'integrity',
+    message: `TGZ package ${JSON.stringify(label)} could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+    retryable: true,
+  });
 }
 
 function unwrapBuild<T>(envelopeJson: string): T {
@@ -341,7 +355,7 @@ const handlers: Handlers = {
     const s = await ensureSession();
     const t0 = performance.now();
     const fresh = mountedLabels.fresh(packages.map((item) => ({
-      label: item.kind === 'raw' ? item.spec.label : item.pointer.label,
+      label: item.kind === 'raw' ? item.spec.label : item.kind === 'tgz' ? item.label : item.pointer.label,
       item,
     })));
     if (fresh.length === 0) {
@@ -358,7 +372,7 @@ const handlers: Handlers = {
       };
     }
     const inputs = fresh.map(({ item }) => item);
-    const rawCount = inputs.filter((item) => item.kind === 'raw').length;
+    const rawCount = inputs.filter((item) => item.kind !== 'prepared').length;
     const preparedCount = inputs.length - rawCount;
     let serializeMs = 0;
     const wasmStarted = performance.now();
@@ -404,13 +418,29 @@ const handlers: Handlers = {
           continue;
         }
 
-        const { spec, transportIdentity } = item;
-        const serializeStarted = performance.now();
-        const input = JSON.stringify([spec]);
-        serializeMs += performance.now() - serializeStarted;
-        const result = unwrap<PrepareMountResult>(s.prepareArtifacts(input));
-        if (result.artifacts.length !== 1 || result.artifacts[0].label !== spec.label) {
-          throw new Error(`prepareArtifacts returned the wrong artifact for ${spec.label}`);
+        const transportIdentity = item.transportIdentity;
+        let result: PrepareMountResult;
+        let label: string;
+        if (item.kind === 'tgz') {
+          label = item.label;
+          inputBytes += item.bytes.byteLength;
+          try {
+            result = unwrap<PrepareMountResult>(
+              s.prepareTgzArtifact(item.label, new Uint8Array(item.bytes)),
+            );
+          } catch (error) {
+            throw tgzPreparationFailure(item.label, error);
+          }
+        } else {
+          label = item.spec.label;
+          const serializeStarted = performance.now();
+          const input = JSON.stringify([item.spec]);
+          serializeMs += performance.now() - serializeStarted;
+          inputBytes += input.length;
+          result = unwrap<PrepareMountResult>(s.prepareArtifacts(input));
+        }
+        if (result.artifacts.length !== 1 || result.artifacts[0].label !== label) {
+          throw new Error(`package preparation returned the wrong artifact for ${label}`);
         }
         totals.artifactBytes += result.artifactBytes;
         totals.preparedMembers += result.preparedMembers;
@@ -424,8 +454,6 @@ const handlers: Handlers = {
         totals.normalizationMs += result.normalizationMs;
         totals.indexingMs += result.indexingMs;
         totals.artifactEncodeMs += result.artifactEncodeMs;
-        inputBytes += result.inputJsonBytes;
-
         const artifact = result.artifacts[0];
         const bytes = s.takePrepared(artifact.label);
         maxStagedArtifactBytes = Math.max(maxStagedArtifactBytes, bytes.byteLength);
