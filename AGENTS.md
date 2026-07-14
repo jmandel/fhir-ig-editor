@@ -15,7 +15,7 @@ in `vendor/sushi-rs/AGENTS.md`.
 
 ## Current objective
 
-**TINY COLD-START REGRESSION FIX (EDITOR READY TO LAND 2026-07-14):** a fresh live
+**TINY COLD-START REGRESSION FIX (DEPLOYED 2026-07-14):** a fresh live
 mobile profile reproduced the reported apparently-hung Tiny Explore pane. It
 was not deadlocked: Ready arrived at 23.05s while all HTTP requests completed
 within 0.67s. The dominant work was host inflate -> base64 object -> JSON
@@ -43,9 +43,17 @@ receipt is `/tmp/fhir-tgz-full-browser-committed.log` (`E2E GATE: PASS`): the
 browser reports engine `cbfadd9e`, Tiny Ready in 10.445s, all five cold mount
 batches have zero JSON/base64/serialization, Cycle edit is 803ms with scroll
 640 -> 640, US Core has 1,535/1,535 images and 85/85 assets plus one CarePlan
-shell, and real mCODE/restart/workspace/mobile gates remain green. Commit and
-push the editor submodule pin and app changes, then require the complete Pages
-run and a fresh live-origin Tiny check before declaring the regression fixed.
+shell, and real mCODE/restart/workspace/mobile gates remain green. Editor
+`a976d8d` is pushed on `main`. Pages run `29374339985` passed the Rust/native
+Fig/package/WASM/byte-parity/Cycle/app/browser/artifact-upload and deploy jobs.
+The live origin serves app `assets/index-BomFcmZb.js`, worker
+`assets/engine.worker-D6_vwuJI.js`, preview protocol 6, and the 5,759,418-byte
+WASM stamped `cbfadd9e`. An independent disposable-profile live receipt at
+`/tmp/live-tiny-cbfadd9e-PASS.json` has `pass: true`: engine ready 5.199s, Tiny
+Ready 12.327s, four compiled definitions with `StructureDefinition/editor-user`
+selected and populated, a 51,939-character published profile, five cold mounts
+with zero JSON/base64/Worker serialization, and no app/worker/preview/request
+errors.
 
 Complete and certify the deletion-first architecture overhaul. The only domain
 values are:
