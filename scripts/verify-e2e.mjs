@@ -54,22 +54,143 @@ function assessWarmEditMetrics(events) {
   };
 }
 
+function assessStartupTimeline(events) {
+  const required = [
+    'app.bootstrap',
+    'app.react.commit',
+    'workspace.repository-open',
+    'workspace.open',
+    'engine.manifest.fetch',
+    'engine.manifest.parse',
+    'engine.worker.module',
+    'engine.wasm.glue-import',
+    'engine.wasm.fetch',
+    'engine.wasm.download',
+    'engine.wasm.compile',
+    'engine.wasm.instantiate-and-start',
+    'engine.session.construct',
+    'engine.session.init',
+    'engine.init.rpc',
+    'engine.startup',
+    'engine.ready',
+  ];
+  const byPhase = new Map();
+  for (const entry of events || []) {
+    if (!entry?.phase) continue;
+    const values = byPhase.get(entry.phase) || [];
+    values.push(entry);
+    byPhase.set(entry.phase, values);
+  }
+  const missing = required.filter((phase) => (byPhase.get(phase)?.length ?? 0) !== 1);
+  const invalid = required.filter((phase) => {
+    const event = byPhase.get(phase)?.[0];
+    return !event
+      || !Number.isFinite(event.startMs)
+      || event.startMs < 1_000_000_000_000
+      || (event.durationMs != null
+        && (!Number.isFinite(event.durationMs) || event.durationMs < 0));
+  });
+  const event = (phase) => byPhase.get(phase)?.[0];
+  const end = (phase) => (event(phase)?.startMs ?? Number.NaN)
+    + (event(phase)?.durationMs ?? 0);
+  const ordered = [
+    ['engine.wasm.glue-import', 'engine.wasm.fetch'],
+    ['engine.wasm.compile', 'engine.wasm.instantiate-and-start'],
+    ['engine.wasm.instantiate-and-start', 'engine.session.construct'],
+    ['engine.session.construct', 'engine.session.init'],
+    ['engine.session.init', 'engine.ready'],
+  ].every(([before, after]) => end(before) <= (event(after)?.startMs ?? Number.NaN) + 2);
+  const wasmFetch = event('engine.wasm.fetch');
+  const wasmCompile = event('engine.wasm.compile');
+  return {
+    ok: missing.length === 0
+      && invalid.length === 0
+      && ordered
+      && (wasmFetch?.inputBytes ?? 0) > 1_000_000
+      && wasmCompile?.metrics?.streaming === 1,
+    missing,
+    invalid,
+    ordered,
+    wasmInputBytes: wasmFetch?.inputBytes ?? null,
+    wasmTransferBytes: wasmFetch?.metrics?.transferBytes ?? null,
+    wasmFromCache: wasmFetch?.fromCache ?? null,
+  };
+}
+
 async function cdp(ws, method, params = {}, id = { n: 1 }) {
   return new Promise((resolve, reject) => {
     const msgId = id.n++;
+    const limit = 120_000 * timeoutScale;
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.removeEventListener('message', onMsg);
+      ws.removeEventListener('close', onClose);
+      ws.removeEventListener('error', onError);
+    };
     const onMsg = (ev) => {
       const m = JSON.parse(ev.data);
       if (m.id === msgId) {
-        ws.removeEventListener('message', onMsg);
+        cleanup();
         m.error ? reject(new Error(m.error.message)) : resolve(m.result);
       }
     };
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`CDP target closed during ${method}`));
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`CDP target failed during ${method}`));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`CDP ${method} timed out after ${limit}ms`));
+    }, limit);
     ws.addEventListener('message', onMsg);
-    ws.send(JSON.stringify({ id: msgId, method, params }));
+    ws.addEventListener('close', onClose, { once: true });
+    ws.addEventListener('error', onError, { once: true });
+    try {
+      ws.send(JSON.stringify({ id: msgId, method, params }));
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
   });
 }
 const id = { n: 1 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function connectWebSocket(url, label = 'CDP target') {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.close();
+      reject(new Error(`${label} did not open within 30000ms`));
+    }, 30_000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeEventListener('open', onOpen);
+      socket.removeEventListener('close', onClose);
+      socket.removeEventListener('error', onError);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve(socket);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`${label} closed before opening`));
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`${label} failed before opening`));
+    };
+    socket.addEventListener('open', onOpen, { once: true });
+    socket.addEventListener('close', onClose, { once: true });
+    socket.addEventListener('error', onError, { once: true });
+  });
+}
 
 async function evalJs(ws, expression) {
   const r = await cdp(ws, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, id);
@@ -313,14 +434,9 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
   // A self-contained CDP call over a per-tab WebSocket (independent of the harness's
   // shared single-target `ws`). Each request gets a fresh id + a scoped listener.
   let tabMsgId = 1;
-  const tabConn = (wsUrl) => new Promise((res, rej) => { const w = new WebSocket(wsUrl); w.addEventListener('open', () => res(w)); w.addEventListener('error', rej); });
+  const tabConn = (wsUrl) => connectWebSocket(wsUrl, 'preview-tab CDP target');
   function tabCdp(tws, method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const msgId = tabMsgId++;
-      const onMsg = (ev) => { const m = JSON.parse(ev.data); if (m.id === msgId) { tws.removeEventListener('message', onMsg); m.error ? reject(new Error(m.error.message)) : resolve(m.result); } };
-      tws.addEventListener('message', onMsg);
-      tws.send(JSON.stringify({ id: msgId, method, params }));
-    });
+    return cdp(tws, method, params, { get n() { return tabMsgId; }, set n(value) { tabMsgId = value; } });
   }
   async function newTab(url) {
     const t = await (await fetch(`${cdpHttp}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' })).json();
@@ -567,17 +683,20 @@ for (let i = 0; i < 40; i++) {
   }
   await sleep(250);
 }
-const page = targets.find((t) => t.type === 'page');
-const ws = new WebSocket(page.webSocketDebuggerUrl);
-await new Promise((res) => ws.addEventListener('open', res));
+const page = targets?.find((t) => t.type === 'page');
+if (!page?.webSocketDebuggerUrl) {
+  throw new Error(`CDP exposes no page target at ${cdpHttp}`);
+}
+const ws = await connectWebSocket(page.webSocketDebuggerUrl, 'editor CDP target');
 
 // Capture console + page errors for debugging.
 const logs = [];
 const runtimeExceptions = [];
-// Bundle .tgz fetches, in order — drives the lazy-loading gate (only the
-// compile-critical bundles should be fetched before the first snapshot; r5.core
-// must NOT appear until a snapshot/site build needs it).
+// Bundle .tgz fetches, in order — drives the target-release gate. R4 snapshots
+// must stay within the resolved R4 closure; r5.core is an on-demand candidate
+// only for an actual R5 guide.
 const bundleFetches = [];
+const optionalEditorFetches = [];
 ws.addEventListener('message', (ev) => {
   const m = JSON.parse(ev.data);
   if (m.method === 'Runtime.consoleAPICalled') {
@@ -596,6 +715,10 @@ ws.addEventListener('message', (ev) => {
   }
   if (m.method === 'Network.requestWillBeSent') {
     const url = m.params.request.url;
+    const asset = decodeURIComponent(new URL(url).pathname.split('/').pop() || '');
+    if (/^(?:CodeEditor|ResourceJson|monacoSetup|editor\.worker|json\.worker)-.*\.js$/.test(asset)) {
+      optionalEditorFetches.push({ asset, at: Date.now() });
+    }
     if (/\/data\/bundles\/.*\.tgz/.test(url)) {
       // Decode the bundle label from the (percent-encoded) filename.
       const file = decodeURIComponent(url.split('/data/bundles/')[1].split('?')[0]);
@@ -625,6 +748,16 @@ function fail(msg) {
   console.error('FAIL:', msg);
   console.error('--- page logs ---\n' + logs.join('\n'));
   process.exit(1);
+}
+
+async function waitForOptionalEditorAsset(pattern, label) {
+  const deadline = Date.now() + 30000 * timeoutScale;
+  while (Date.now() < deadline) {
+    const match = optionalEditorFetches.find(({ asset }) => pattern.test(asset));
+    if (match) return match;
+    await sleep(25);
+  }
+  throw new Error(`did not observe optional editor asset ${label}`);
 }
 
 try {
@@ -680,6 +813,26 @@ try {
     'engine ready',
   );
   results.engineReadyMs = Date.now() - t0;
+  results.optionalEditorBeforeProject = [...optionalEditorFetches];
+  if (results.optionalEditorBeforeProject.length !== 0) {
+    throw new Error(`welcome screen eagerly loaded optional editor assets: ${JSON.stringify(results.optionalEditorBeforeProject)}`);
+  }
+  results.startupTimeline = await evalJs(ws, `(() => {
+    const origin = performance.timeOrigin;
+    return (window.__igDebug?.metrics || [])
+      .map((entry) => entry.event)
+      .filter((event) => event.phase && (
+        event.phase.startsWith('app.')
+        || event.phase.startsWith('workspace.')
+        || event.phase.startsWith('engine.')
+      ))
+      .map((event) => ({
+        ...event,
+        relativeStartMs: event.startMs == null ? null : event.startMs - origin,
+        relativeEndMs: event.startMs == null ? null : event.startMs - origin + (event.durationMs || 0),
+      }));
+  })()`);
+  results.startupTimelineAssessment = assessStartupTimeline(results.startupTimeline);
   // A returning browser may have an older worker active for the same scope.
   // The app must wait for the versioned control protocol instead of sending a
   // commit that the old worker silently ignores (mobile timeout regression).
@@ -720,6 +873,13 @@ try {
   // 3. Wait for compile to finish (build status shows a ms value + resources).
   await waitFor(ws, `!!document.querySelector('.res-row')`, 60000, 'compiled resources');
   await sleep(400);
+  await waitForOptionalEditorAsset(/^CodeEditor-/, 'CodeEditor');
+  await waitForOptionalEditorAsset(/^monacoSetup-/, 'monacoSetup');
+  await waitForOptionalEditorAsset(/^editor\.worker-/, 'editor.worker');
+  results.optionalEditorAfterAuthor = [...optionalEditorFetches];
+  if (results.optionalEditorAfterAuthor.some(({ asset }) => /^(?:ResourceJson|json\.worker)-/.test(asset))) {
+    throw new Error(`Author eagerly loaded the JSON viewer: ${JSON.stringify(results.optionalEditorAfterAuthor)}`);
+  }
   results.resourceCount = await evalJs(ws, `document.querySelectorAll('.res-row').length`);
   results.buildMs = await evalJs(
     ws,
@@ -728,8 +888,8 @@ try {
   results.cleanDiagnostics = await evalJs(ws, `document.querySelectorAll('.diag').length`);
   results.r5FetchedBeforeInspector = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
-  // 4. Explore opens the already-compiled differential. Merely entering the
-  //    workspace must not fetch the deferred snapshot/R5 support package.
+  // 4. Explore opens the already-compiled differential. The R4 workspace and
+  //    its full-definition snapshot must never inject an R5 core package.
   await evalJs(ws, `(() => {
     const tab = [...document.querySelectorAll('.inspect-tab')]
       .find((candidate) => candidate.textContent?.trim() === 'Explore');
@@ -741,6 +901,28 @@ try {
     return active?.textContent?.trim() === 'Differential' && !!document.querySelector('.inspector-body');
   })()`, 30000, 'compiled differential inspector');
   results.r5FetchedAfterExplore = bundleFetches.some((b) => /r5\.core/.test(b.file));
+  results.optionalEditorAfterDifferential = [...optionalEditorFetches];
+  if (results.optionalEditorAfterDifferential.some(({ asset }) => /^(?:ResourceJson|json\.worker)-/.test(asset))) {
+    throw new Error(`Differential eagerly loaded the JSON viewer: ${JSON.stringify(results.optionalEditorAfterDifferential)}`);
+  }
+
+  await evalJs(ws, `document.querySelector('#inspector-tab-json')?.click()`);
+  await waitFor(
+    ws,
+    `window.monaco?.editor.getModels().some((model) => model.uri.path.includes('/__view__/')) === true`,
+    30000,
+    'compiled JSON Monaco model',
+  );
+  await waitForOptionalEditorAsset(/^ResourceJson-/, 'ResourceJson');
+  await waitForOptionalEditorAsset(/^json\.worker-/, 'json.worker');
+  results.optionalEditorAfterJson = [...optionalEditorFetches];
+  await evalJs(ws, `document.querySelector('#inspector-tab-differential')?.click()`);
+  await waitFor(
+    ws,
+    `document.querySelector('.inspector-tabs .tab-btn.active')?.textContent?.trim() === 'Differential'`,
+    10000,
+    'return from JSON to differential',
+  );
 
   // Certify the purpose-built first-run story before switching to the larger
   // Cycle compatibility fixture: one exact FSH declaration -> its compiled
@@ -1699,7 +1881,7 @@ try {
     await waitFor(ws, `!!document.querySelector('.snapshot .sd-table tbody tr')`, 30000, 'US Core snapshot tree');
     results.snapshotRows = await evalJs(ws, `document.querySelectorAll('.snapshot .sd-table tbody tr').length`);
     results.snapshotMeta = await evalJs(ws, `document.querySelector('.snapshot-meta')?.textContent || ''`);
-    results.r5FetchedLazily = bundleFetches.some((b) => /r5\.core/.test(b.file));
+    results.r5FetchedForR4Snapshot = bundleFetches.some((b) => /r5\.core/.test(b.file));
 
     // ---- US CORE online content gate (predefined-resource IG renders LIVE) ----
     // US Core is a PREDEFINED-resource IG: 0 FSH, every profile lives as
@@ -2153,7 +2335,9 @@ try {
   // registry. A `latest` request for one must resolve from the SEEDED baked index
   // with ZERO network and ZERO blocked packages. Simulate the live condition by
   // denying the registry origins, then resolve a config that pins tools.r4 at
-  // `latest`, and assert nothing blocks.
+  // `latest`, and assert nothing blocks. This must run before the synthetic
+  // registry gate below switches the single-scope observation cache to its fake
+  // registry source.
   results.bakedSeedResolve = await evalJs(ws, `(async () => {
     const e = window.__igDebug && window.__igDebug.engine;
     if (!e) return { error: 'no-engine' };
@@ -2185,6 +2369,202 @@ try {
       return { error: String(err), registryHits };
     } finally {
       window.fetch = realFetch;
+    }
+  })()`);
+
+  // ---- typed next-registry + atomic Worker mount gate ----------------------
+  // Exercise the complete production seam rather than composing its unit-test
+  // halves: registry transport -> transferred TGZ -> typed Worker rejection ->
+  // next registry -> the same resolver-indexed Rust ticket -> one commit. Hold a
+  // sibling package after it has staged so resolveProject can prove staged bytes
+  // remain invisible until the complete transaction commits.
+  results.registryTgzRetry = await evalJs(ws, `(async () => {
+    const engine = window.__igDebug && window.__igDebug.engine;
+    if (!engine) return { error: 'no-engine' };
+    const retryLabel = 'e2e.registry.retry#1.0.0';
+    const siblingLabel = 'e2e.registry.sibling#1.0.0';
+    const registryOne = 'https://registry-one.invalid';
+    const registryTwo = 'https://registry-two.invalid';
+    const retryFixtureUrl = ${JSON.stringify(new URL('data/fixtures/e2e.registry.retry%231.0.0.tgz', base).href)};
+    const siblingFixtureUrl = ${JSON.stringify(new URL('data/fixtures/e2e.registry.sibling%231.0.0.tgz', base).href)};
+    const deadlineMs = ${JSON.stringify(30_000 * timeoutScale)};
+    const realFetch = window.fetch;
+    const events = [];
+    const requests = [];
+    let acquisition = null;
+    let acquisitionOutcome = null;
+
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise((accept) => { resolve = accept; });
+      return { promise, resolve };
+    };
+    const within = async (promise, label) => {
+      let timer;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('timed out waiting for ' + label)), deadlineMs);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const labelsFrom = (requestsToLabel) => (requestsToLabel || [])
+      .map((request) => request.package_id + '#' + request.version);
+    const retrySecondRequested = deferred();
+    const releaseRetrySecond = deferred();
+    const releaseSiblingFirst = deferred();
+    const siblingStaged = deferred();
+    let midpoint = null;
+
+    try {
+      const loadFixture = async (url) => {
+        const response = await realFetch(url);
+        if (!response.ok) throw new Error('fixture fetch failed: ' + url + ' -> ' + response.status);
+        return response.arrayBuffer();
+      };
+      const [retryBytes, siblingBytes] = await Promise.all([
+        loadFixture(retryFixtureUrl),
+        loadFixture(siblingFixtureUrl),
+      ]);
+      const config = [
+        'id: test.registry.retry',
+        'canonical: https://example.org/registry-retry',
+        'name: RegistryRetryProbe',
+        'status: draft',
+        'version: 0.0.1',
+        'fhirVersion: 4.0.1',
+        'dependencies:',
+        '  hl7.fhir.uv.tools.r4: 1.1.2',
+        '  hl7.terminology.r4: 7.2.0',
+        '  hl7.fhir.uv.extensions.r4: 5.3.0',
+        '  e2e.registry.retry: 1.0.0',
+        '  e2e.registry.sibling: 1.0.0',
+      ].join('\\n');
+      const source = {
+        registries: [registryOne, registryTwo],
+        proxy: '',
+        sourceKey: JSON.stringify([[registryOne, registryTwo], '']),
+      };
+      const initial = await within(engine.resolveStep(config), 'initial resolver step');
+      const initialMissing = labelsFrom(initial.missing);
+      if (initialMissing.length !== 2
+          || !initialMissing.includes(retryLabel)
+          || !initialMissing.includes(siblingLabel)) {
+        throw new Error('retry fixture expected exactly two missing packages, got ' + JSON.stringify(initialMissing));
+      }
+
+      const response = (bytes) => new Response(bytes.slice(0), {
+        status: 200,
+        headers: {
+          'content-length': String(bytes.byteLength),
+          'content-type': 'application/gzip',
+        },
+      });
+      const retryFirst = registryOne + '/e2e.registry.retry/1.0.0';
+      const retrySecond = registryTwo + '/e2e.registry.retry/1.0.0';
+      const siblingFirst = registryOne + '/e2e.registry.sibling/1.0.0';
+      const siblingSecond = registryTwo + '/e2e.registry.sibling/1.0.0';
+      window.fetch = async (input, init) => {
+        const url = input instanceof Request
+          ? input.url
+          : input instanceof URL
+            ? input.href
+            : String(input);
+        if (!url.startsWith(registryOne + '/') && !url.startsWith(registryTwo + '/')) {
+          return realFetch(input, init);
+        }
+        requests.push(url);
+        if (url === retryFirst) {
+          const invalid = new TextEncoder().encode('http-200-but-not-a-tgz');
+          return response(invalid.buffer);
+        }
+        if (url === retrySecond) {
+          retrySecondRequested.resolve();
+          await within(releaseRetrySecond.promise, 'release of retry registry response');
+          return response(retryBytes);
+        }
+        if (url === siblingFirst) {
+          await within(releaseSiblingFirst.promise, 'release of sibling registry response');
+          return response(siblingBytes);
+        }
+        if (url === siblingSecond) {
+          throw new Error('sibling package unexpectedly reached the second registry');
+        }
+        throw new Error('unexpected test-registry request: ' + url);
+      };
+
+      acquisition = engine.acquireForProject(config, (event) => {
+        events.push(event);
+        if (event.phase === 'package.stage' && event.label === siblingLabel) {
+          siblingStaged.resolve();
+        }
+      }, source);
+      acquisitionOutcome = acquisition.then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error }),
+      );
+      const waitForGate = async (gate, label) => {
+        const winner = await within(Promise.race([
+          gate.then(() => ({ kind: 'gate' })),
+          acquisitionOutcome.then((outcome) => ({ kind: 'acquisition', outcome })),
+        ]), label);
+        if (winner.kind === 'gate') return;
+        if (!winner.outcome.ok) throw winner.outcome.error;
+        throw new Error('acquisition completed before ' + label);
+      };
+      await waitForGate(retrySecondRequested.promise, 'typed next-registry request');
+      releaseSiblingFirst.resolve();
+      await waitForGate(siblingStaged.promise, 'sibling package staging');
+
+      // The real Worker has staged the sibling at its resolver slot. The Rust
+      // package generation must nevertheless expose neither candidate yet.
+      midpoint = await within(engine.resolveStep(config), 'mid-transaction resolver step');
+      releaseRetrySecond.resolve();
+      const settled = await within(acquisitionOutcome, 'registry retry acquisition');
+      if (!settled.ok) throw settled.error;
+      const outcome = settled.value;
+      const finalStep = await within(engine.resolveStep(config), 'final resolver step');
+      const countPhase = (phase) => events.filter((event) => event.phase === phase).length;
+      return {
+        initialMissing,
+        requests,
+        requestCounts: {
+          retryFirst: requests.filter((url) => url === retryFirst).length,
+          retrySecond: requests.filter((url) => url === retrySecond).length,
+          siblingFirst: requests.filter((url) => url === siblingFirst).length,
+          siblingSecond: requests.filter((url) => url === siblingSecond).length,
+        },
+        stageOrder: events
+          .filter((event) => event.phase === 'package.stage')
+          .map((event) => event.label),
+        prepareCount: countPhase('package.prepare'),
+        commitCount: countPhase('package.commit'),
+        transactionCount: countPhase('package.mount.transaction'),
+        mountRpcCount: countPhase('package.mount.rpc'),
+        midpointMissing: labelsFrom(midpoint.missing),
+        midpointContext: labelsFrom(midpoint.context_closure),
+        outcomeMounted: outcome.mounted,
+        finalSatisfied: finalStep.satisfied,
+        finalMissing: labelsFrom(finalStep.missing),
+      };
+    } catch (error) {
+      return {
+        error: String(error),
+        requests,
+        stages: events.filter((event) => event.phase === 'package.stage').map((event) => event.label),
+        midpointMissing: labelsFrom(midpoint?.missing),
+      };
+    } finally {
+      releaseSiblingFirst.resolve();
+      releaseRetrySecond.resolve();
+      window.fetch = realFetch;
+      if (acquisitionOutcome) {
+        await within(acquisitionOutcome, 'failed acquisition cleanup').catch(() => undefined);
+      }
     }
   })()`);
 
@@ -2498,10 +2878,17 @@ try {
   if (!results.progressSeen && !results.bootProgressElided) {
     console.error('assert: slow engine boot showed no progress'); ok = false;
   }
+  if (!results.startupTimelineAssessment?.ok) {
+    console.error('assert: startup timeline incomplete or invalid:', JSON.stringify({
+      assessment: results.startupTimelineAssessment,
+      timeline: results.startupTimeline,
+    }));
+    ok = false;
+  }
   if ((results.initBundles || []).length !== 0) {
     console.error('assert: package bodies were fetched before project resolution:', results.initBundles); ok = false;
   }
-  if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init (should be snapshot-phase)'); ok = false; }
+  if (results.r5FetchedAtInit) { console.error('assert: r5.core was fetched at init for an R4 guide'); ok = false; }
   if (results.r5FetchedBeforeInspector) { console.error('assert: r5.core was fetched before the user opened the snapshot inspector'); ok = false; }
   if (results.r5FetchedAfterExplore) { console.error('assert: opening Explore fetched r5.core without an explicit snapshot action'); ok = false; }
 
@@ -2537,7 +2924,7 @@ try {
     if (!(results.usCoreResourceCount >= 0)) { console.error('assert: US Core resource count missing (open failed?)'); ok = false; }
     if (results.usCoreR5FetchedBeforeInspector) { console.error('assert: opening US Core fetched r5.core before inspection'); ok = false; }
     if (results.usCoreR5FetchedAfterExplore) { console.error('assert: exploring the US Core differential fetched r5.core'); ok = false; }
-    if (!results.r5FetchedLazily) { console.error('assert: explicit US Core snapshot did not lazily fetch r5.core'); ok = false; }
+    if (results.r5FetchedForR4Snapshot) { console.error('assert: explicit US Core R4 snapshot injected r5.core'); ok = false; }
   } else {
     console.error('assert: could not click Open US Core button —', results.usCoreClicked); ok = false;
   }
@@ -2552,6 +2939,43 @@ try {
       console.error('assert: baked-only .r4 alias at latest blocked despite the seed (registry was denied):', JSON.stringify(bs.blocked)); ok = false;
     } else if (bs.registryHits !== 0) {
       console.error('assert: baked-only .r4 alias consulted the registry despite the seed:', bs.registryHits); ok = false;
+    }
+  }
+
+  // ---- typed next-registry + atomic Worker mount gate --------------------
+  {
+    const retry = results.registryTgzRetry || {};
+    const expectedLabels = ['e2e.registry.retry#1.0.0', 'e2e.registry.sibling#1.0.0'];
+    const sameMembers = (actual) => Array.isArray(actual)
+      && actual.length === expectedLabels.length
+      && expectedLabels.every((label) => actual.includes(label));
+    if (retry.error) {
+      console.error('assert: typed registry retry gate errored:', retry.error, JSON.stringify(retry)); ok = false;
+    } else if (!sameMembers(retry.initialMissing)) {
+      console.error('assert: registry retry fixture did not begin as the exact missing pair:', JSON.stringify(retry)); ok = false;
+    } else if (!(retry.requestCounts?.retryFirst === 1
+        && retry.requestCounts.retrySecond === 1
+        && retry.requestCounts.siblingFirst === 1
+        && retry.requestCounts.siblingSecond === 0
+        && retry.requests?.length === 3)) {
+      console.error('assert: registry carrier request sequence was not first-reject/next-registry:', JSON.stringify(retry)); ok = false;
+    } else if (!(Array.isArray(retry.stageOrder)
+        && retry.stageOrder.length === 2
+        && retry.stageOrder[0] === 'e2e.registry.sibling#1.0.0'
+        && retry.stageOrder[1] === 'e2e.registry.retry#1.0.0'
+        && retry.prepareCount === 2)) {
+      console.error('assert: valid carriers did not stage once in the controlled arrival order:', JSON.stringify(retry)); ok = false;
+    } else if (!(sameMembers(retry.midpointMissing)
+        && expectedLabels.every((label) => !retry.midpointContext?.includes(label)))) {
+      console.error('assert: staged package leaked into resolver state before commit:', JSON.stringify(retry)); ok = false;
+    } else if (!(retry.commitCount === 1
+        && retry.transactionCount === 1
+        && retry.mountRpcCount === 1
+        && JSON.stringify(retry.outcomeMounted) === JSON.stringify(retry.initialMissing))) {
+      console.error('assert: registry retry did not produce one resolver-ordered atomic commit:', JSON.stringify(retry)); ok = false;
+    } else if (!(retry.finalSatisfied === true
+        && expectedLabels.every((label) => !retry.finalMissing?.includes(label)))) {
+      console.error('assert: registry retry closure was not satisfied after commit:', JSON.stringify(retry)); ok = false;
     }
   }
 

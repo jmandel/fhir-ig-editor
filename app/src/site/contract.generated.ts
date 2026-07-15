@@ -171,6 +171,7 @@ export type OutputPageKind = "narrative" | "artifacts" | "profile" | "profile-co
 export type OutputDescriptor = { path: string, kind: OutputKind, mediaType: string, content?: ContentRef, title?: string, subject?: OutputResourceSubject, subjectPage?: OutputSubjectPage, pageKind?: OutputPageKind, };
 export type OutputCatalog = { buildId: string, outputs: Array<OutputDescriptor>, };
 export type BuildStage = "wasm" | "manifest" | "project-cache-hit" | "project-verify" | "project-unpack" | "project-store" | "compile" | "snapshot" | "site-build" | "preview-publish" | "resolve" | "bundle-fetch" | "bundle-cache-hit" | "bundle-unpack" | "bundle-mount" | "registry-fetch" | "package-blocked" | "ready" | "lazy-fetch";
+export type BuildEventSource = "window" | "worker" | "rust";
 export type BuildEvent = {
 /**
  * Functional operation when this observation belongs to an immutable
@@ -181,7 +182,22 @@ operation?: BuildOperation,
  * Immutable build identity when one exists. Acquisition events that occur
  * before prepare establishes an identity omit it.
  */
-buildId?: string, stage: BuildStage, label?: string, bytes?: number, totalBytes?: number, message: string, fraction?: number, fromCache?: boolean, durationMs?: number, inputBytes?: number, outputBytes?: number, fileCount?: number, metrics?: { [key in string]: number }, };
+buildId?: string,
+/**
+ * Stable machine-readable phase within the operation. `message` remains
+ * presentation text and must not be parsed by benchmarks.
+ */
+phase?: string,
+/**
+ * Clock domain which measured this event. Browser hosts align Window and
+ * Worker clocks through `performance.timeOrigin`; native hosts may omit it.
+ */
+source?: BuildEventSource,
+/**
+ * Unix-epoch milliseconds at the beginning of this measured span. This is
+ * observational only and never participates in build identity.
+ */
+startMs?: number, stage: BuildStage, label?: string, bytes?: number, totalBytes?: number, message: string, fraction?: number, fromCache?: boolean, durationMs?: number, inputBytes?: number, outputBytes?: number, fileCount?: number, metrics?: { [key in string]: number }, };
 export type BuildOperation = "lifecycle" | "prepare" | "outputs" | "render" | "finalize";
 export type BuildErrorPhase = "lifecycle" | "input" | "package-resolution" | "package-transport" | "compilation" | "preparation" | "renderer" | "content-store" | "publication" | "finalization";
 export type BuildErrorCode = "invalid-input" | "unavailable" | "integrity" | "compile-failed" | "renderer-failed" | "unknown-build" | "cancelled" | "internal";

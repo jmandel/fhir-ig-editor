@@ -13,7 +13,7 @@ describe('template PreparedPackage transport', () => {
     expect(SOURCE).toContain('this.loadBundle(entry, stageLabel, true, report)');
 
     const warmLookup = SOURCE.indexOf('findPreparedPackage(entry.label, transportIdentity)');
-    const networkFetch = SOURCE.indexOf('resp = await fetch(url)');
+    const networkFetch = SOURCE.indexOf('transport = await openPackageTransport(entry.label, url)');
     expect(warmLookup).toBeGreaterThan(-1);
     expect(networkFetch).toBeGreaterThan(warmLookup);
     expect(SOURCE).not.toContain('readCachedBundle');
@@ -24,7 +24,8 @@ describe('template PreparedPackage transport', () => {
   test('uses complete prepared packages for live template acquisition', () => {
     expect(RESOLVER_SOURCE).not.toContain("!label.includes('.template#')");
     expect(RESOLVER_SOURCE).not.toContain('unexpectedly selected prepared-only transport');
-    expect(RESOLVER_SOURCE).toContain('await host.mount([packageInput])');
+    expect(RESOLVER_SOURCE).toContain('await acquirePackageBatch(');
+    expect(RESOLVER_SOURCE).toContain('acquired.mounted?.includes(label)');
     expect(RESOLVER_SOURCE).toContain('Promise<boolean>');
   });
 

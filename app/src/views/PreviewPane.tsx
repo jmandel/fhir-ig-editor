@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { OutputDescriptor } from '../site/contract';
 import { previewUrl, ensurePreviewServiceWorker, PREVIEW_ROOT } from '../preview/previewWindow';
+import { epochMs } from '../performance/timeline';
 
 interface Props {
   /** The loaded IG id — the preview URL-scheme key. `preview/<igId>/<path>` is the
@@ -18,6 +19,7 @@ interface Props {
   previewCapable: boolean | null;
   currentPage?: string;
   onSelectPage?: (path: string) => void;
+  onPageLoad?: (path: string, startedMs: number, endedMs: number) => void;
 }
 
 export function summarizeSiteError(error: string): string {
@@ -43,7 +45,16 @@ function PreviewBuildError({ error, previous }: { error: string; previous: boole
   );
 }
 
-export function PreviewPane({ igId, pages, building, error, previewCapable, currentPage, onSelectPage }: Props) {
+export function PreviewPane({
+  igId,
+  pages,
+  building,
+  error,
+  previewCapable,
+  currentPage,
+  onSelectPage,
+  onPageLoad,
+}: Props) {
   const [localCurrent, setLocalCurrent] = useState<string>('index.html');
   const current = currentPage ?? localCurrent;
   const setCurrent = (path: string) => {
@@ -53,6 +64,7 @@ export function PreviewPane({ igId, pages, building, error, previewCapable, curr
   const [loading, setLoading] = useState(false);
   const [swReady, setSwReady] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const loadStartedMsRef = useRef<number | null>(null);
   // The page the iframe is actually showing (parsed from its URL). Prevents a
   // navigation loop: a selector change drives the iframe; a link click inside the
   // iframe drives the selector — both settle here so neither re-fires the other.
@@ -97,6 +109,7 @@ export function PreviewPane({ igId, pages, building, error, previewCapable, curr
     if (shownRef.current !== current || fr.dataset.igId !== igId) {
       fr.dataset.igId = igId;
       setLoading(true);
+      loadStartedMsRef.current = epochMs();
       fr.src = previewUrl(igId, current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -107,19 +120,23 @@ export function PreviewPane({ igId, pages, building, error, previewCapable, curr
   // so reading its location is allowed.
   const onIframeLoad = useCallback(() => {
     setLoading(false);
+    const endedMs = epochMs();
+    const startedMs = loadStartedMsRef.current;
+    loadStartedMsRef.current = null;
     const prefix = `${PREVIEW_ROOT}${encodeURIComponent(igId)}/`;
     try {
       const p = iframeRef.current?.contentWindow?.location?.pathname ?? '';
       if (p.startsWith(prefix)) {
         const page = decodeURIComponent(p.slice(prefix.length));
         shownRef.current = page;
+        if (page && startedMs != null) onPageLoad?.(page, startedMs, endedMs);
         if (page && page !== current) setCurrent(page);
       }
     } catch {
       /* an external link opened in-frame is cross-origin — leave the selector as-is */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, igId]);
+  }, [current, igId, onPageLoad]);
 
   if (error && !pages) {
     return (

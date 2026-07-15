@@ -1,15 +1,20 @@
 // Right-hand inspector for one compiled resource: tabs for JSON, Differential,
 // and Snapshot tree (StructureDefinitions), and Expansion (ValueSets).
 
-import { useState, type KeyboardEvent } from 'react';
+import { lazy, useState, type KeyboardEvent } from 'react';
 import type { ResourceView } from './resourceView';
 import type { EngineClient } from '../worker/client';
-import { ResourceJson } from './ResourceJson';
 import { DifferentialTable } from './DifferentialTable';
 import { SnapshotTree } from './SnapshotTree';
 import { ValueSetExpansion } from './ValueSetExpansion';
 import { isStructureDefinition, type StructureDefinition } from './elements';
 import { resourceIdentity } from './artifactSelection';
+import { LazyPane } from './LazyPane';
+
+const ResourceJson = lazy(async () => {
+  const module = await import('./ResourceJson');
+  return { default: module.ResourceJson };
+});
 
 type Tab = 'json' | 'differential' | 'snapshot' | 'expansion';
 
@@ -25,8 +30,9 @@ export function ResourceInspector({
   settingsVersion: number;
 }) {
   // Differential and JSON are already available from compilation. Snapshot
-  // generation (and its deferred R5 support package) starts only after the user
-  // explicitly chooses that inspector.
+  // generation starts only after the user explicitly chooses that inspector;
+  // it uses the current project's certified package closure rather than
+  // mounting a hidden global R5 core.
   const [tab, setTab] = useState<Tab>('differential');
 
   let sd: StructureDefinition | null = null;
@@ -82,7 +88,11 @@ export function ResourceInspector({
         role="tabpanel"
         aria-labelledby={`inspector-tab-${effectiveTab}`}
       >
-        {effectiveTab === 'json' && <ResourceJson resource={resource} />}
+        {effectiveTab === 'json' && (
+          <LazyPane loading="Loading JSON viewer…">
+            <ResourceJson resource={resource} />
+          </LazyPane>
+        )}
         {effectiveTab === 'differential' && sd && <DifferentialTable sd={sd} />}
         {effectiveTab === 'snapshot' && isSd && sd && (
           <SnapshotTree engine={engine} url={resource.url!} id={resourceIdentity(resource)} />

@@ -6,7 +6,7 @@
   "description": "Static, GitHub-Pages-hosted web editor for FHIR IGs (rust_sushi + snapshot walk engine as WASM).",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node ../scripts/check-worker-bundle.mjs dist",
     "preview": "vite preview"
   },
   "dependencies": {

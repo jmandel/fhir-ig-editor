@@ -2,9 +2,9 @@
 # GENERATE scripts/packages.list from the baked IG's config, using the native Rust
 # resolver (task #32 gate v: lockfile un-handing). The closure is no longer
 # hand-maintained — it is the UNION of the engine's compile_set + context_closure
-# for the Cycle external-builder fixture, PLUS the ONE snapshot-engine special (r5.core for
-# an R4 IG: the walk engine is R5-internal, so R4 profile bases resolve against
-# r5.core during snapshot generation — not derivable from package.json deps).
+# for the Cycle external-builder fixture, PLUS one on-demand R5 core candidate
+# so a real R5 guide can use same-origin bytes. R4 snapshots consume only their
+# certified project closure and never inject this package.
 #
 #   FHIR_CACHE=<packages-dir> scripts/gen-packages-list.sh          # write the file
 #   CHECK=1 FHIR_CACHE=<dir>  scripts/gen-packages-list.sh          # drift gate only
@@ -29,7 +29,7 @@ HEADER="$(cat <<'EOF'
 # A CI drift gate (CHECK=1) fails if this file diverges from the resolver output.
 #
 # The Cycle external-builder fixture's package closure = the native resolver's
-# compile_set ∪ context_closure, PLUS the snapshot-engine special r5.core.
+# compile_set ∪ context_closure, PLUS an on-demand R5 target candidate.
 # Consumed by fetch-packages.sh (download) and bundle-packages.sh (bundle).
 #
 # Why each package:
@@ -37,10 +37,9 @@ HEADER="$(cat <<'EOF'
 #   hl7.fhir.uv.tools.r4    — automatic R4 tooling dependency.
 #   hl7.terminology.r4      — automatic R4 terminology dependency.
 #   hl7.fhir.uv.extensions.r4 — automatic R4 extension dependency.
-#   hl7.fhir.r5.core        — SNAPSHOT-ENGINE SPECIAL (not a package.json dep):
-#                             the walk engine is R5-internal, so R4 profile bases
-#                             resolve against r5.core during snapshot generation.
-#                             Removing it kills the snapshot-tree view.
+#   hl7.fhir.r5.core        — ON-DEMAND ALTERNATE TARGET CORE: not part of this
+#                             R4 fixture's closure. It lets a real R5 guide use
+#                             same-origin bytes; R4 snapshots never inject it.
 #   hl7.fhir.template       — STOCK TEMPLATE CHAIN (#40 live template loader): the
 #   hl7.base.template         default template + its `base` chain. NOT sushi-config
 #   fhir.base.template        deps — the template loader's walk_base_chain decides
@@ -61,7 +60,8 @@ HEADER="$(cat <<'EOF'
 EOF
 )"
 
-# Resolve the project, union compile_set + context_closure, then append r5.core.
+# Resolve the project, union compile_set + context_closure, then append the
+# on-demand R5 target candidate.
 # Resolve through Cargo from the pinned checkout. A target binary can survive a
 # submodule update; executing it by path allowed a schema-2 binary to make a
 # local drift check disagree with schema-3 CI. `cargo run` validates the binary
@@ -70,7 +70,7 @@ STEP_JSON="$(cd "$ENGINE" && cargo run --quiet --release -p rust_sushi -- \
   resolve --cache "$CACHE" --project "$IG_DIR")"
 LABELS="$(printf '%s' "$STEP_JSON" | python3 "$HERE/_union-closure.py")"
 
-# The snapshot-engine special: r5.core, pinned to the cached major.
+# Alternate R5 target core, pinned to the cached major.
 R5_LABEL="hl7.fhir.r5.core#5.0.0"
 if ! grep -q "^hl7.fhir.r5.core#" <<<"$LABELS"; then
   LABELS="$LABELS

@@ -1235,6 +1235,19 @@
               "description": "Immutable build identity when one exists. Acquisition events that occur\nbefore prepare establishes an identity omit it.",
               "type": "string"
             },
+            "phase": {
+              "description": "Stable machine-readable phase within the operation. `message` remains\npresentation text and must not be parsed by benchmarks.",
+              "type": "string"
+            },
+            "source": {
+              "description": "Clock domain which measured this event. Browser hosts align Window and\nWorker clocks through `performance.timeOrigin`; native hosts may omit it.",
+              "$ref": "#/$defs/BuildEventSource"
+            },
+            "startMs": {
+              "description": "Unix-epoch milliseconds at the beginning of this measured span. This is\nobservational only and never participates in build identity.",
+              "type": "number",
+              "format": "double"
+            },
             "stage": {
               "$ref": "#/$defs/BuildStage"
             },
@@ -1302,6 +1315,14 @@
             "outputs",
             "render",
             "finalize"
+          ]
+        },
+        "BuildEventSource": {
+          "type": "string",
+          "enum": [
+            "window",
+            "worker",
+            "rust"
           ]
         },
         "BuildStage": {
@@ -3071,6 +3092,19 @@
           "description": "Immutable build identity when one exists. Acquisition events that occur\nbefore prepare establishes an identity omit it.",
           "type": "string"
         },
+        "phase": {
+          "description": "Stable machine-readable phase within the operation. `message` remains\npresentation text and must not be parsed by benchmarks.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Clock domain which measured this event. Browser hosts align Window and\nWorker clocks through `performance.timeOrigin`; native hosts may omit it.",
+          "$ref": "#/$defs/BuildEventSource"
+        },
+        "startMs": {
+          "description": "Unix-epoch milliseconds at the beginning of this measured span. This is\nobservational only and never participates in build identity.",
+          "type": "number",
+          "format": "double"
+        },
         "stage": {
           "$ref": "#/$defs/BuildStage"
         },
@@ -3138,6 +3172,14 @@
             "outputs",
             "render",
             "finalize"
+          ]
+        },
+        "BuildEventSource": {
+          "type": "string",
+          "enum": [
+            "window",
+            "worker",
+            "rust"
           ]
         },
         "BuildStage": {

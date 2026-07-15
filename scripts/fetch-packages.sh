@@ -24,29 +24,50 @@ REGISTRIES=(
 
 mkdir -p "$CACHE"
 
+package_is_complete() {
+  local label="$1" dest="$2"
+  [ -f "$dest/package/package.json" ] || return 1
+  case "${label%%#*}" in
+    *.core)
+      local asset
+      for asset in fhir.css icon_element.gif tbl_spacer.png; do
+        [ -f "$dest/other/$asset" ] || [ -f "$dest/package/other/$asset" ] || return 1
+      done
+      ;;
+  esac
+}
+
 while IFS= read -r line; do
   label="${line%%[[:space:]]*}"
   case "$label" in ''|'#'*) continue ;; esac
   id="${label%%#*}"; ver="${label##*#}"
   dest="$CACHE/$label"
-  if [ -f "$dest/package/package.json" ]; then
+  if package_is_complete "$label" "$dest"; then
     echo "[fetch-packages] $label already cached — skip"
     continue
+  fi
+  if [ -e "$dest" ]; then
+    echo "[fetch-packages] $label cache entry is incomplete — reacquire"
   fi
   tmp="$(mktemp)"
   ok=0
   for reg in "${REGISTRIES[@]}"; do
     url="$reg/$id/$ver"
     echo "[fetch-packages] GET $url"
-    if curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then ok=1; break; fi
-    echo "[fetch-packages]   failed from $reg — trying next"
+    if curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+      rm -rf "$dest"; mkdir -p "$dest"
+      if tar -xzf "$tmp" -C "$dest" && package_is_complete "$label" "$dest"; then
+        ok=1
+        break
+      fi
+      rm -rf "$dest"
+      echo "[fetch-packages]   incomplete package from $reg — trying next"
+    else
+      echo "[fetch-packages]   failed from $reg — trying next"
+    fi
   done
   [ "$ok" = 1 ] || { echo "FATAL: could not download $label from any registry"; rm -f "$tmp"; exit 2; }
-  rm -rf "$dest"; mkdir -p "$dest"
-  # Registry tarballs root their files under package/ — extract as-is.
-  tar -xzf "$tmp" -C "$dest"
   rm -f "$tmp"
-  [ -f "$dest/package/package.json" ] || { echo "FATAL: $label tarball had no package/package.json"; exit 2; }
   echo "[fetch-packages] $label -> $(du -sh "$dest" | cut -f1)"
 done < "$LIST"
 

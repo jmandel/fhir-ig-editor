@@ -1,5 +1,7 @@
 /** Integrity boundary for same-origin package bundles baked into the app. */
 
+import type { PackageTransportGuard } from './transportInactivity';
+
 export interface BakedBundleEntry {
   label: string;
   tgz: string;
@@ -7,7 +9,7 @@ export interface BakedBundleEntry {
   bytes?: number;
   /** Intended acquisition phase. Compile packages are still resolver-selected;
    * this is purpose metadata, not an instruction to mount them globally. */
-  loadPhase: 'compile' | 'snapshot' | 'on-demand';
+  loadPhase: 'compile' | 'on-demand';
 }
 
 export interface BakedBundleManifest {
@@ -64,7 +66,7 @@ export function parseBakedBundleManifest(value: unknown): BakedBundleManifest {
     if (bytes !== undefined && (!Number.isSafeInteger(bytes) || (bytes as number) < 0)) {
       throw new Error(`package bundle manifest entry ${label} has an invalid byte length`);
     }
-    if (loadPhase !== 'compile' && loadPhase !== 'snapshot' && loadPhase !== 'on-demand') {
+    if (loadPhase !== 'compile' && loadPhase !== 'on-demand') {
       throw new Error(`package bundle manifest entry ${label} has an invalid loadPhase`);
     }
     return {
@@ -90,6 +92,7 @@ export async function readResponseBytes(
   response: Response,
   onProgress?: (bytes: number, totalBytes?: number) => void,
   expectedBytes?: number,
+  transportGuard?: PackageTransportGuard,
 ): Promise<ArrayBuffer> {
   const contentLength = response.headers.get('content-length');
   const headerBytes = contentLength == null ? Number.NaN : Number(contentLength);
@@ -98,7 +101,10 @@ export async function readResponseBytes(
   );
   onProgress?.(0, totalBytes);
   if (!response.body) {
-    const bytes = await response.arrayBuffer();
+    const operation = response.arrayBuffer();
+    const bytes = transportGuard
+      ? await transportGuard.wait(operation, 'response body')
+      : await operation;
     onProgress?.(bytes.byteLength, totalBytes);
     return bytes;
   }
@@ -107,18 +113,28 @@ export async function readResponseBytes(
   let length = 0;
   let reportedLength = 0;
   let reportedAt = performance.now();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value?.byteLength) continue;
-    chunks.push(value);
-    length += value.byteLength;
-    const now = performance.now();
-    if (length === totalBytes || now - reportedAt >= 100) {
-      onProgress?.(length, totalBytes);
-      reportedLength = length;
-      reportedAt = now;
+  try {
+    while (true) {
+      const operation = reader.read();
+      const { done, value } = transportGuard
+        ? await transportGuard.wait(operation, 'response body')
+        : await operation;
+      if (done) break;
+      if (!value?.byteLength) continue;
+      chunks.push(value);
+      length += value.byteLength;
+      const now = performance.now();
+      if (length === totalBytes || now - reportedAt >= 100) {
+        onProgress?.(length, totalBytes);
+        reportedLength = length;
+        reportedAt = now;
+      }
     }
+  } catch (error) {
+    // The fetch's AbortSignal normally terminates the reader. Cancellation also
+    // releases synthetic/test streams that are not connected to that signal.
+    void reader.cancel(error).catch(() => {});
+    throw error;
   }
   if (reportedLength !== length) onProgress?.(length, totalBytes);
   const joined = new Uint8Array(length);
@@ -138,6 +154,7 @@ export async function readVerifiedBundleBytes(
   entry: Pick<BakedBundleEntry, 'label' | 'sha256' | 'bytes'>,
   onProgress?: (bytes: number, totalBytes?: number) => void,
   onVerify?: () => void,
+  transportGuard?: PackageTransportGuard,
 ): Promise<ArrayBuffer> {
   if (!response.ok) {
     throw new BakedBundleTransportError(
@@ -146,7 +163,7 @@ export async function readVerifiedBundleBytes(
   }
   let bytes: ArrayBuffer;
   try {
-    bytes = await readResponseBytes(response, onProgress, entry.bytes);
+    bytes = await readResponseBytes(response, onProgress, entry.bytes, transportGuard);
   } catch (error) {
     throw new BakedBundleTransportError(
       `read baked package ${entry.label}: ${error instanceof Error ? error.message : String(error)}`,

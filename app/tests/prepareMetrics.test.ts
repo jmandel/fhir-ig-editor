@@ -90,17 +90,13 @@ describe('canonical build observations and failures', () => {
     expect(CLIENT).toContain('readonly detail: BuildError<CompileResult>');
   });
 
-  test('keeps the deferred R5 bundle off the site-preparation path', () => {
+  test('keeps snapshots within the already-resolved project release closure', () => {
     const snapshot = CLIENT.slice(
       CLIENT.indexOf('async snapshot('),
       CLIENT.indexOf('async expandValueSet'),
     );
-    const prepare = CLIENT.slice(
-      CLIENT.indexOf('async prepare('),
-      CLIENT.indexOf('open(buildId:'),
-    );
-    expect(snapshot).toContain('await this.ensureSnapshotBundles(report)');
-    expect(prepare).not.toContain('ensureSnapshotBundles');
+    expect(snapshot).not.toContain('ensureSnapshotBundles');
+    expect(CLIENT).not.toContain('snapshotBundles');
     expect(INSPECTOR).toContain("useState<Tab>('differential')");
     expect(INSPECTOR).toContain("effectiveTab === 'snapshot'");
     expect(INSPECTOR).toContain('<SnapshotTree');
@@ -123,7 +119,7 @@ describe('canonical build observations and failures', () => {
     expect(WORKER).toContain("`${content.sha256}\\u0000${content.byteLength}\\u0000${content.mediaType ?? ''}`");
     const publish = WORKER.slice(
       WORKER.indexOf('async function publishRustContent('),
-      WORKER.indexOf('function publicCycleDescriptor'),
+      WORKER.indexOf('// ---- op handlers'),
     );
     expect(publish).toContain('if (publishedRustContent.has(key)) return');
     expect(publish).toContain('if (await contentStore.get(content))');
@@ -142,33 +138,69 @@ describe('canonical build observations and failures', () => {
     expect(CLIENT).toContain('this.preparedConfigs.length >= 2');
   });
 
-  test('rejects a warm pointer whose selected artifact decodes to another label', () => {
-    const stage = WORKER.slice(
-      WORKER.indexOf('for (const item of inputs)'),
-      WORKER.indexOf('commitResult = unwrap<PackageMountResult>(s.commitPreparedMount())'),
+  test('reconciles changed local package authority before the next prepare', () => {
+    const ingest = CLIENT.slice(
+      CLIENT.indexOf('async ingestLocalTgz('),
+      CLIENT.indexOf('  /** Ask the engine to resolve'),
     );
-    expect(stage).toContain('const staged = unwrap<PreparedStageResult>(');
-    expect(stage).toContain('if (staged.label !== pointer.label)');
-    expect(WORKER.indexOf('if (staged.label !== pointer.label)')).toBeLessThan(
-      WORKER.indexOf('commitResult = unwrap<PackageMountResult>(s.commitPreparedMount())'),
+    expect(ingest).toContain('await this.prepareBarrier');
+    expect(ingest.indexOf('await this.prepareBarrier'))
+      .toBeLessThan(ingest.indexOf('await ingestTgz(tgz)'));
+    const prepare = CLIENT.slice(
+      CLIENT.indexOf('async prepare(\n'),
+      CLIENT.indexOf('  open(buildId: string)'),
     );
+    expect(prepare).toContain('this.localPackageAuthority.reconcile');
+    expect(prepare).toContain('() => this.recycleWorker(report)');
+    expect(prepare.indexOf('this.localPackageAuthority.reconcile'))
+      .toBeLessThan(prepare.indexOf('const packageSource = packageSourceSnapshot()'));
+    expect(prepare).toContain('const packageLocalEpoch = localPackageEpoch()');
+    expect(prepare.match(/packageSourceSnapshot\(\)/gu)).toHaveLength(1);
+    expect(prepare).toContain(
+      'this.acquireForProject(project.config, report, packageSource, packageLocalEpoch)',
+    );
+    expect(prepare).toContain('packageSource,\n          packageLocalEpoch,');
+    expect(prepare).toContain('this.localPackageAuthority.commit()');
+    expect(prepare).toContain('this.localPackageAuthority.rollback()');
+    const dispose = CLIENT.slice(
+      CLIENT.indexOf('dispose(reason:'),
+      CLIENT.indexOf('  // ---- runtime package resolution'),
+    );
+    expect(dispose).toContain('this.localPackageAuthority.rollback()');
   });
 
-  test('stages warm and cold package carriers in one atomic ordered transaction', () => {
+  test('passes the expected label into Rust before a warm slot is occupied', () => {
+    expect(WORKER).toContain(
+      's.stagePreparedMount(index, new Uint8Array(artifact), pointer.cacheKey, pointer.label)',
+    );
+    expect(WORKER).not.toContain('if (staged.label !== pointer.label)');
+  });
+
+  test('streams warm and cold carriers through one ordered ticket implementation', () => {
     const mount = WORKER.slice(
-      WORKER.indexOf('async mountPackages(packages: PackageMountInput[])'),
+      WORKER.indexOf('async openPackageMount(labels: string[])'),
       WORKER.indexOf('async resolveProject(config, versionIndex)'),
     );
-    expect(mount).not.toContain('requires an all-raw or all-prepared transaction');
-    expect(mount).toContain('unwrap(s.beginPreparedMount(inputs.length))');
-    expect(mount).toContain('for (const item of inputs)');
+    expect(mount).toContain('unwrap(s.beginPreparedMount(labels.length))');
+    expect(mount).toContain('async stagePackageMount(');
     expect(mount).toContain("if (item.kind === 'prepared')");
     expect(mount).toContain("if (item.kind === 'tgz')");
     expect(mount).toContain('s.prepareTgzArtifact(item.label, new Uint8Array(item.bytes))');
     expect(mount).toContain('s.prepareArtifacts(input)');
+    expect(mount).toContain('s.stagePreparedMount(index, bytes, artifact.cacheKey, artifact.label)');
+    expect(mount).toContain('async commitPackageMount(ticket: number)');
     expect(mount).toContain('s.commitPreparedMount()');
-    expect(CLIENT).not.toContain('if (hasRaw && hasPrepared)');
-    expect(CLIENT).toContain('coldCarriers.length === transaction.length');
-    expect(CLIENT).toContain("this.request('mountPackages', [transaction], transfer)");
+    expect(mount).toContain('async abortPackageMount(ticket: number)');
+    expect(mount).toContain('s.abortPreparedMount()');
+    expect(CLIENT).toContain('private async acquirePackageMountLock()');
+    expect(CLIENT).toContain("'stagePackageMount'");
+    expect(CLIENT).toContain("input.kind === 'tgz' ? [input.bytes] : []");
+    const clientMount = CLIENT.slice(
+      CLIENT.indexOf('private async openPackageMount('),
+      CLIENT.indexOf('private async rawFallbackForPrepared('),
+    );
+    expect(clientMount).toContain("await this.call('abortPackageMount', ticket)");
+    expect(clientMount).toContain('finally {\n        finished = true;\n        release();');
+    expect(CLIENT).not.toContain("this.request('mountPackages'");
   });
 });

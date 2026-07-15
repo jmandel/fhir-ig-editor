@@ -124,6 +124,11 @@ export default defineConfig({
     outDir: 'dist',
     // Monaco is large; keep it in its own chunk so the shell paints fast.
     chunkSizeWarningLimit: 4096,
+    // CommonJS `auto` detects cycles while modules transform concurrently and
+    // can choose different wrappers for identical source builds. Wrapping all
+    // CJS modules preserves Node's lazy-require semantics and makes immutable
+    // chunk identities reproducible.
+    commonjsOptions: { strictRequires: true },
   },
   // COOP/COEP not required: we use a single classic-ish ES worker + wasm, no
   // SharedArrayBuffer. OPFS works without cross-origin isolation.

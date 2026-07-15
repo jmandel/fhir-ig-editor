@@ -31,7 +31,7 @@ function useRegistries(...registries: string[]): void {
 }
 
 describe('registry TGZ fallback', () => {
-  test('retries only the canonical typed Worker integrity failure and retains retry bytes', () => {
+  test('retries only the canonical typed Worker integrity failure per slot', () => {
     const worker = readFileSync(new URL('../src/worker/engine.worker.ts', import.meta.url), 'utf8');
     const client = readFileSync(new URL('../src/worker/client.ts', import.meta.url), 'utf8');
     expect(worker).toContain("phase: 'package-transport'");
@@ -40,7 +40,8 @@ describe('registry TGZ fallback', () => {
     expect(worker).toContain('throw tgzPreparationFailure(item.label, error)');
     expect(client).toContain("error.detail.phase !== 'package-transport'");
     expect(client).toContain("error.detail.code !== 'integrity'");
-    expect(client).toContain("item.transportIdentity !== 'unpinned'");
+    expect(client).toContain('isFailedRegistryTgzCarrier(error, input)');
+    expect(client).toContain("input.kind === 'tgz' ? [input.bytes] : []");
     expect(client).toContain('retryRegistryTgzCarrier(');
   });
 
@@ -62,6 +63,12 @@ describe('registry TGZ fallback', () => {
     if (!first || first.kind !== 'tgz') throw new Error('expected first registry carrier');
     expect(new TextDecoder().decode(first.bytes)).toBe('invalid-tgz');
 
+    structuredClone({ input: first }, { transfer: [first.bytes] });
+    expect(first.bytes.byteLength).toBe(0);
+
+    // Retry stays on the acquisition's immutable source snapshot even if the
+    // user changes settings while Rust is rejecting the first carrier.
+    useRegistries('https://changed.example');
     const second = await retryRegistryTgzCarrier(first, () => {});
     expect(second?.kind).toBe('tgz');
     if (!second || second.kind !== 'tgz') throw new Error('expected second registry carrier');

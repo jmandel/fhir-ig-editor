@@ -66,12 +66,12 @@ done
 # explicit `loadPhase`) — what EngineClient.init fetches. The browser verifies the
 # compressed bytes before inflation and keys its OPFS cache by this digest.
 # `compile` packages are candidates selected by the project's Rust resolver;
-# they are not globally eager. `snapshot` is the R5 walk-engine special.
-# `on-demand` covers template-chain and supersession-shadowed packages.
+# they are not globally eager. `on-demand` covers alternate target releases,
+# template-chain packages, and supersession-shadowed packages.
 #
 # The rule is derived, not hand-listed. A non-template bundle is on-demand iff:
-#  (1) it is an R5 core AND the IG is not itself R5 (removing it cannot change
-#      compile output — r5.core is pulled only by SNAPSHOT generation); OR
+#  (1) it is an R5 core AND the baked fixture is not itself R5 (the package is
+#      retained as an offline candidate for an actual R5 guide); OR
 #  (2) it is a SUPERSESSION-SHADOWED lower version: a package id for which a
 #      strictly HIGHER version of the SAME id is also in the closure (bundle-closure).
 #      The cold-start compile loads auto-deps at `latest` → the HIGHER version
@@ -109,7 +109,7 @@ is_on_demand() {
 load_phase() {
   local label="$1"
   case "$label" in
-    hl7.fhir.r5.core#*) printf 'snapshot'; return ;;
+    hl7.fhir.r5.core#*) printf 'on-demand'; return ;;
     *.template#*) printf 'on-demand'; return ;;
   esac
   if is_on_demand "$label"; then printf 'on-demand'; else printf 'compile'; fi

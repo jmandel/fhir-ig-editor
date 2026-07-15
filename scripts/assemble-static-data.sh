@@ -35,10 +35,13 @@ cp -r "$REPO/expansions/." "$REPO/app/public/data/expansions/" 2>/dev/null || tr
 mkdir -p "$REPO/app/public/data/fixtures"
 rm -rf "$REPO/app/public/data/fixtures"/*
 cp -r "$REPO/scripts/fixtures/bad-ant-template/." "$REPO/app/public/data/fixtures/" 2>/dev/null || true
+node "$HERE/generate-registry-retry-fixtures.mjs" "$REPO/app/public/data/fixtures"
 
 test -f "$REPO/app/public/data/cycle/manifest.json"
 test -f "$REPO/app/public/data/tiny/manifest.json"
 test -f "$REPO/app/public/data/uscore/source.tgz"
 test -f "$REPO/app/public/data/uscore/source.json"
 test -f "$REPO/app/public/data/cycle/renderer-package/manifest.json"
+test -f "$REPO/app/public/data/fixtures/e2e.registry.retry#1.0.0.tgz"
+test -f "$REPO/app/public/data/fixtures/e2e.registry.sibling#1.0.0.tgz"
 echo "[assemble-static-data] complete app/public/data assembled"

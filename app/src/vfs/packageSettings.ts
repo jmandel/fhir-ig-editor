@@ -15,6 +15,15 @@
 const REGISTRY_KEY = 'fhir-ig-editor.pkg-registries';
 const PROXY_KEY = 'fhir-ig-editor.pkg-proxy';
 
+/** Immutable acquisition authority captured once at the start of an operation.
+ * The key has no clock/TTL component: it changes only when the normalized,
+ * resolver-ordered registry/proxy configuration changes. */
+export interface PackageSourceSnapshot {
+  readonly registries: readonly string[];
+  readonly proxy: string;
+  readonly sourceKey: string;
+}
+
 /** The default FHIR package registries, in try order. `packages.fhir.org` first:
  *  its CORS is a clean single `Access-Control-Allow-Origin: *`; packages2 emits a
  *  duplicate ACAO header alongside `*`, which some browsers reject — so it is the
@@ -58,6 +67,37 @@ export function getPackageProxy(): string {
   } catch {
     return '';
   }
+}
+
+function normalizeRegistry(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
+
+function normalizeProxy(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
+
+/** Construct the exact ordered source authority used by both mutable metadata
+ * observation and exact TGZ transport. Exported inputs make deterministic
+ * source-change tests independent of localStorage. */
+export function packageSourceSnapshot(
+  registries: readonly string[] = getRegistries(),
+  proxy: string = getPackageProxy(),
+): PackageSourceSnapshot {
+  const normalizedRegistries = Object.freeze(
+    registries.map(normalizeRegistry).filter(Boolean),
+  );
+  const normalizedProxy = normalizeProxy(proxy);
+  return Object.freeze({
+    registries: normalizedRegistries,
+    proxy: normalizedProxy,
+    sourceKey: JSON.stringify([normalizedRegistries, normalizedProxy]),
+  });
+}
+
+/** Apply the already-captured proxy without consulting mutable settings. */
+export function viaPackageSource(source: PackageSourceSnapshot, url: string): string {
+  return source.proxy ? `${source.proxy}?url=${encodeURIComponent(url)}` : url;
 }
 
 export function setPackageProxy(url: string): void {

@@ -6,6 +6,9 @@
 #   BASE_PATH=/fhir-ig-editor/ CHROME_BIN=/path/to/chrome \
 #     CHROME_NO_SANDBOX=1 \
 #     bash scripts/run-browser-gates.sh app/dist
+#   BROWSER_WORK_ROOT=/disk-backed/scratch may be used when /tmp is a
+#     capacity-constrained tmpfs; Chromium's environment still keeps its normal
+#     TMPDIR while the disposable profile/artifact live below that root.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +19,12 @@ CDP_PORT="${CDP_PORT:-9222}"
 BASE_PATH="${BASE_PATH:-/}"
 BASE_PATH="/${BASE_PATH#/}"
 if [ "$BASE_PATH" != / ]; then BASE_PATH="${BASE_PATH%/}/"; fi
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/fhir-ig-browser.XXXXXX")"
+WORK_ROOT="${BROWSER_WORK_ROOT:-${TMPDIR:-/tmp}}"
+[ -d "$WORK_ROOT" ] && [ -w "$WORK_ROOT" ] || {
+  echo "FATAL: browser work root is not a writable directory: $WORK_ROOT" >&2
+  exit 2
+}
+WORK="$(mktemp -d "$WORK_ROOT/fhir-ig-browser.XXXXXX")"
 SERVER_LOG="$WORK/server.log"
 CHROME_LOG="$WORK/chrome.log"
 

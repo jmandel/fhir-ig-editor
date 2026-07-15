@@ -2,14 +2,16 @@
 // compile/site builds in the worker, publishes only the latest preview
 // generation, and wires Monaco/resource/snapshot/diagnostic views.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { BuildFailure, EngineClient } from './worker/client';
-import type { BlockedPackage } from './worker/client';
-import {
-  type Workspace,
-  type WorkspaceCapture,
+import { lazy, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { BuildFailure } from './worker/client';
+import type { BlockedPackage, EngineClient } from './worker/client';
+import type { EngineStartup, EngineStartupFailure } from './worker/engineStartup';
+import type {
+  Workspace,
+  WorkspaceCapture,
   WorkspaceRepository,
 } from './vfs/workspace';
+import { workspaceStartup } from './vfs/workspaceStartup';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
 import type { GeneratorSpec, OutputDescriptor } from './site/contract';
@@ -38,10 +40,10 @@ const WORKSPACE_MODES: Array<[WorkspaceMode, string]> = [
   ['explore', 'Explore'],
   ['preview', 'Site preview'],
 ];
-import { CodeEditor } from './editor/CodeEditor';
 import { FileTree } from './editor/FileTree';
 import { DiagnosticsPanel } from './views/DiagnosticsPanel';
 import { ResourceInspector } from './views/ResourceInspector';
+import { LazyPane } from './views/LazyPane';
 import { BuildStatus } from './views/BuildStatus';
 import { PreviewPane } from './views/PreviewPane';
 import { TxSettings } from './views/TxSettings';
@@ -65,6 +67,12 @@ import {
 } from './views/ProjectOverview';
 import type { BuildEvent } from './worker/protocol';
 import { presentProgress } from './progressPresentation';
+import { epochMs, pointEvent, spanEvent } from './performance/timeline';
+
+const CodeEditor = lazy(async () => {
+  const module = await import('./editor/CodeEditor');
+  return { default: module.CodeEditor };
+});
 
 
 interface BuildOutcome {
@@ -109,6 +117,20 @@ function initialSourcePath(workspace: Workspace): string | null {
     ?? null;
 }
 
+function startupFailureMessage(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/, '');
+  return message || 'Unknown startup failure.';
+}
+
+type AppStartupStage = EngineStartupFailure['stage'] | 'project-store';
+
+class AppStartupFailure extends Error {
+  constructor(readonly stage: AppStartupStage, cause: unknown) {
+    super(startupFailureMessage(cause), { cause });
+    this.name = 'AppStartupFailure';
+  }
+}
+
 /** Machine-readable trace consumed by the persistent-profile benchmark. */
 function recordRuntimeMetric(event: BuildEvent): void {
   const debug = (window as unknown as {
@@ -117,8 +139,12 @@ function recordRuntimeMetric(event: BuildEvent): void {
   debug?.metrics?.push({ at: performance.now(), event });
 }
 
-export function App() {
-  const engineRef = useRef<EngineClient | null>(null);
+export function App({ startup }: { startup: EngineStartup }) {
+  const engineRef = useRef<EngineClient | null>(startup.engine);
+  const bootstrapMetricsRecordedRef = useRef(false);
+  const previewWorkerStartupRef = useRef<Promise<boolean> | null>(null);
+  const templateCatalogStartupRef = useRef<Promise<Record<string, TemplateCatalog>> | null>(null);
+  const bootFailureHandledRef = useRef(false);
   const problemsRef = useRef<HTMLDetailsElement | null>(null);
   // Engine work is serialized; leases prevent obsolete immutable build handles
   // from publishing UI or Service Worker generations.
@@ -131,6 +157,7 @@ export function App() {
   const [version, setVersion] = useState<EngineVersion | null>(null);
   const [initMs, setInitMs] = useState<number | null>(null);
   const [engineReady, setEngineReady] = useState(false);
+  const [bootError, setBootError] = useState<string | null>(null);
   // Cold-start progress (spec §1): staged phase + per-bundle progress.
   const [progress, setProgress] = useState<BuildEvent | null>(null);
   // Project-open progress: while a baked project is opening/switching (US Core,
@@ -231,12 +258,69 @@ export function App() {
   // ---- boot: engine + project-scoped workspaces ----------------------------
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const engine = new EngineClient();
+    let bootFailed = false;
+    const failBoot = (failure: { error: Error; stage: AppStartupStage }) => {
+      if (cancelled || bootFailed) return;
+      bootFailed = true;
+      // StrictMode replays the effect with the same component state. Replayed
+      // terminal failure must stop that setup too, without emitting a second
+      // failure span or disposing the already-retired owner again.
+      if (bootFailureHandledRef.current) return;
+      bootFailureHandledRef.current = true;
+      const message = startupFailureMessage(failure.error);
+      recordRuntimeMetric(pointEvent('app.boot-failed', 'window', {
+        stage: failure.stage,
+        message,
+      }));
+      buildQueueRef.current.invalidate();
+      engineRef.current = null;
+      setOpeningSince(null);
+      setCompiling(false);
+      setSiteBuilding(false);
+      setEngineReady(false);
+      setBootError(message);
+      // A startup failure or terminal Worker crash can only recover by loading a
+      // fresh page. Retire all page-process ownership while the stable reload
+      // surface remains visible.
+      startup.dispose(failure.error);
+    };
+    const unsubscribeStartup = startup.subscribe((event) => {
+      if (!cancelled) setProgress(event);
+    });
+    const unsubscribeFailure = startup.subscribeFailure(failBoot);
+    void (async () => {
+      if (bootFailed) return;
+      const effectStartedMs = epochMs();
+      const engine = startup.engine;
       engineRef.current = engine;
-      // Debug/verification hook: the e2e + fidelity harnesses drive the engine
-      // directly (render every page, hash outputs) without UI scraping.
-      (window as unknown as { __igDebug?: unknown }).__igDebug = { engine, metrics: [] };
+      const bootstrap = (window as unknown as {
+        __igBootstrapTiming?: {
+          navigationStartedMs: number;
+          mainStartedMs: number;
+          appModuleStartedMs: number;
+          appModuleReadyMs: number;
+          reactRenderStartedMs: number;
+        };
+      }).__igBootstrapTiming;
+      if (bootstrap && !bootstrapMetricsRecordedRef.current) {
+        bootstrapMetricsRecordedRef.current = true;
+        recordRuntimeMetric(spanEvent('app.bootstrap', 'window', bootstrap.navigationStartedMs, {
+          stage: 'manifest',
+          message: 'Loaded application modules.',
+        }, bootstrap.mainStartedMs));
+        recordRuntimeMetric(spanEvent('app.module-import', 'window', bootstrap.appModuleStartedMs, {
+          stage: 'manifest',
+          message: 'Loaded the editor application module.',
+        }, bootstrap.appModuleReadyMs));
+        recordRuntimeMetric(spanEvent('app.react.commit', 'window', bootstrap.reactRenderStartedMs, {
+          stage: 'manifest',
+          message: 'Mounted application shell.',
+        }, effectStartedMs));
+        recordRuntimeMetric(pointEvent('app.boot-effect', 'window', {
+          stage: 'manifest',
+          message: 'Started application boot.',
+        }, effectStartedMs));
+      }
       // Preview-window (task #37): register the SW + render responder early so an
       // "Open site in new window" tab can be answered as soon as it exists.
       wirePreviewResponder((buildId, path) => {
@@ -244,49 +328,74 @@ export function App() {
         if (!build) return Promise.reject(new Error(`unknown build ${buildId}`));
         return build.render(path);
       });
-      void ensurePreviewServiceWorker().then((ok) => {
-        if (!cancelled) setPreviewCapable(ok);
-      });
-      const repository = await WorkspaceRepository.create();
-      const workspace = await repository.open(projectIdRef.current);
-      if (cancelled) return;
-      setWorkspaces(repository);
-      setProjectWorkspace(workspace);
-      projectWorkspaceRef.current = workspace;
-
-      // The preview host survives editor/worker restarts. Restore its validated
-      // immutable pointer immediately so a persisted project can display the
-      // last verified response while exact package resolution + prepare run.
-      // This remains explicitly stale: only the successor prepare/publication
-      // below can establish that today's closed input identity is unchanged.
-      if (workspace) {
-        void restorePersistedPreviewSource(projectIdRef.current).then((publication) => {
-          if (cancelled || !publication || projectIdRef.current !== publication.source.igId) return;
-          const pages = publication.source.catalog.outputs.filter((output) => output.kind === 'page');
-          if (pages.length === 0) return;
-          siteGenerationRef.current = Math.max(siteGenerationRef.current, publication.generation);
-          setSiteIgId(publication.source.igId);
-          setSitePages(pages);
-          setSelectedSitePage((current) => {
-            if (pages.some((page) => page.path === current)) return current;
-            return pages.find((page) => page.path === 'en/index.html' || page.path === 'index.html')?.path
-              ?? pages[0].path;
-          });
-          setPreviewStale(true);
+      if (!previewWorkerStartupRef.current) {
+        const previewWorkerStartedMs = epochMs();
+        previewWorkerStartupRef.current = ensurePreviewServiceWorker().then((ok) => {
+          recordRuntimeMetric(spanEvent('preview.service-worker', 'window', previewWorkerStartedMs, {
+            stage: 'preview-publish',
+            message: ok ? 'Preview Service Worker ready.' : 'Preview Service Worker unavailable.',
+            fromCache: undefined,
+          }));
+          return ok;
         });
       }
-
-      const res = await engine.init((ev) => {
-        recordRuntimeMetric(ev);
-        setProgress(ev);
+      void previewWorkerStartupRef.current.then((ok) => {
+        if (!cancelled) setPreviewCapable(ok);
       });
-      if (cancelled) return;
+      const workspaceResult = workspaceStartup.open(
+        projectIdRef.current,
+        recordRuntimeMetric,
+      ).then((result) => {
+        if (cancelled || bootFailed) return result;
+        const { repository, workspace } = result;
+        setWorkspaces(repository);
+        setProjectWorkspace(workspace);
+        projectWorkspaceRef.current = workspace;
+
+        // The preview host survives editor/worker restarts. Restore its validated
+        // immutable pointer immediately so a persisted project can display the
+        // last verified response while exact package resolution + prepare run.
+        // This remains explicitly stale: only the successor prepare/publication
+        // below can establish that today's closed input identity is unchanged.
+        if (workspace) {
+          const restoreStartedMs = epochMs();
+          void restorePersistedPreviewSource(projectIdRef.current).then((publication) => {
+            recordRuntimeMetric(spanEvent('preview.restore', 'window', restoreStartedMs, {
+              stage: publication ? 'project-cache-hit' : 'project-verify',
+              message: publication ? 'Restored prior verified preview.' : 'No prior preview restored.',
+              fromCache: Boolean(publication),
+            }));
+            if (cancelled
+              || bootFailed
+              || !publication
+              || projectIdRef.current !== publication.source.igId) return;
+            const pages = publication.source.catalog.outputs.filter((output) => output.kind === 'page');
+            if (pages.length === 0) return;
+            siteGenerationRef.current = Math.max(siteGenerationRef.current, publication.generation);
+            setSiteIgId(publication.source.igId);
+            setSitePages(pages);
+            setSelectedSitePage((current) => {
+              if (pages.some((page) => page.path === current)) return current;
+              return pages.find((page) => page.path === 'en/index.html' || page.path === 'index.html')?.path
+                ?? pages[0].path;
+            });
+            setPreviewStale(true);
+          });
+        }
+        return result;
+      });
+
+      // The process owner started this before App was imported. Workspace open,
+      // stale-preview restoration, manifest fetch, and Worker/WASM startup have
+      // therefore progressed concurrently; this is only their join point.
+      const guardedWorkspaceResult = workspaceResult.catch((error: unknown) => {
+        throw new AppStartupFailure('project-store', error);
+      });
+      const [{ workspace }, res] = await Promise.all([guardedWorkspaceResult, startup.ready]);
+      if (cancelled || bootFailed) return;
       setVersion(res.version);
-      setInitMs(res.events.find((event) => event.stage === 'wasm')?.durationMs ?? null);
+      setInitMs(res.events.find((event) => event.phase === 'engine.startup')?.durationMs ?? null);
       setEngineReady(true);
-      const readyEvent: BuildEvent = { stage: 'ready', message: `Engine ready — mounted ${res.mounted} packages.` };
-      recordRuntimeMetric(readyEvent);
-      setProgress(readyEvent);
 
       // If OPFS already has a project (reload), compile it immediately.
       if (workspace) {
@@ -302,12 +411,23 @@ export function App() {
           if (!cancelled) setOpeningSince(null);
         });
       }
-    })();
+    })().catch((error: unknown) => {
+      if (error instanceof AppStartupFailure) {
+        failBoot({ error, stage: error.stage });
+      } else {
+        // EngineStartup publishes its more precise manifest/WASM classification
+        // before this join rejection. This fallback covers only an unexpected
+        // failure in the remaining boot coordinator.
+        failBoot({ error: error instanceof Error ? error : new Error(String(error)), stage: 'wasm' });
+      }
+    });
     return () => {
       cancelled = true;
+      unsubscribeStartup();
+      unsubscribeFailure();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [startup]);
 
   useEffect(() => {
     if (!projectWorkspace) {
@@ -329,8 +449,24 @@ export function App() {
   // selector opens on a real, newest release with zero typing.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const cats = await getCuratedCatalogs();
+    if (!templateCatalogStartupRef.current) {
+      const catalogsStartedMs = epochMs();
+      templateCatalogStartupRef.current = getCuratedCatalogs().then((cats) => {
+        recordRuntimeMetric(spanEvent('template.catalogs', 'window', catalogsStartedMs, {
+          stage: 'manifest',
+          message: 'Loaded curated template catalogs.',
+          fileCount: Object.keys(cats).length,
+        }));
+        return cats;
+      }, (error: unknown) => {
+        recordRuntimeMetric(pointEvent('template.catalogs.failed', 'window', {
+          stage: 'manifest',
+          message: `Template catalogs unavailable: ${startupFailureMessage(error)}`,
+        }));
+        throw error;
+      });
+    }
+    void templateCatalogStartupRef.current.then((cats) => {
       if (cancelled) return;
       setTemplateCatalogs(cats);
       if (!userPickedTemplateRef.current && projectIdRef.current !== TINY_PROJECT_ID) {
@@ -348,7 +484,10 @@ export function App() {
           }
         }
       }
-    })();
+    }).catch(() => {
+      // Catalogs have their own stale/pinned fallback ladder. An unexpected
+      // failure is already recorded above and does not invalidate the engine.
+    });
     return () => {
       cancelled = true;
     };
@@ -395,7 +534,7 @@ export function App() {
       });
     };
     try {
-      const siteStarted = performance.now();
+      const siteStartedMs = epochMs();
       const build = await engine.prepare(
         project,
         generatorSpec(genId, selectedTemplate, capture.buildEpochSecs),
@@ -406,12 +545,11 @@ export function App() {
       showCompiled(build.compilation);
       const catalog = await build.outputs();
       const pages = catalog.outputs.filter((output) => output.kind === 'page');
-      report({
+      report(spanEvent('site.pipeline-to-catalog', 'window', siteStartedMs, {
         stage: 'site-build',
         message: `Prepared ${pages.length} site pages.`,
-        durationMs: performance.now() - siteStarted,
         fileCount: pages.length,
-      });
+      }));
       if (!lease.isLatest()) return;
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
@@ -420,8 +558,11 @@ export function App() {
         setTemplateError(null);
       }
       const nextGeneration = siteGenerationRef.current + 1;
-      report({ stage: 'preview-publish', message: 'Publishing preview generation…' });
-      const publishStarted = performance.now();
+      const publishStartedMs = epochMs();
+      report(pointEvent('preview.publish-start', 'window', {
+        stage: 'preview-publish',
+        message: 'Publishing preview generation…',
+      }, publishStartedMs));
       const published = await publishPreviewSource(
         {
           igId: capture.projectId,
@@ -432,12 +573,11 @@ export function App() {
         () => lease.isLatest(),
       );
       if (!published || !lease.isLatest()) return;
-      report({
+      report(spanEvent('preview.publish', 'window', publishStartedMs, {
         stage: 'preview-publish',
         message: `Published preview generation ${nextGeneration}.`,
-        durationMs: performance.now() - publishStarted,
         fileCount: pages.length,
-      });
+      }));
       // Swap React state only after the SW acknowledges this exact handle/catalog.
       siteGenerationRef.current = nextGeneration;
       setSiteIgId(capture.projectId);
@@ -760,15 +900,17 @@ export function App() {
   const definitionsPending = definitionsArePending(buildState, resources.length);
   const statusMessage = openingSince != null
     ? null
-    : openError
-      ? `Couldn't open ${openError.projectId}.`
-      : siteError
-        ? buildState === 'failed-preview'
-          ? 'Site rebuild failed; showing the previous preview.'
-          : 'Site build failed.'
-        : compiling || siteBuilding || !engineReady
-          ? progress?.message ?? 'Starting…'
-          : settledBuildStatus(buildState, projectName);
+    : bootError
+      ? 'Editor startup failed.'
+      : openError
+        ? `Couldn't open ${openError.projectId}.`
+        : siteError
+          ? buildState === 'failed-preview'
+            ? 'Site rebuild failed; showing the previous preview.'
+            : 'Site build failed.'
+          : compiling || siteBuilding || !engineReady
+            ? progress?.message ?? 'Starting…'
+            : settledBuildStatus(buildState, projectName);
 
   return (
     <div className="app">
@@ -842,6 +984,18 @@ export function App() {
       </div>
 
       <div className="status-area">
+        {bootError && (
+          <div className="open-error" role="alert">
+            <div className="open-error-body">
+              <strong>Couldn't start the editor.</strong> {bootError}
+            </div>
+            <div className="open-error-actions">
+              <button className="btn" onClick={() => window.location.reload()}>
+                Reload editor
+              </button>
+            </div>
+          </div>
+        )}
         {blockedPackages.length > 0 && (
           <div className="blocked-banner" role="alert">
             <strong>
@@ -881,7 +1035,7 @@ export function App() {
         {openingSince != null && progress && (
           <OpenProgress progress={progress} since={openingSince} />
         )}
-        {projectLoaded && progress && !engineReady && openingSince == null && (
+        {!bootError && projectLoaded && progress && !engineReady && openingSince == null && (
           <div className="lazy-progress" title={progress.message}>{progress.message}</div>
         )}
       </div>
@@ -898,7 +1052,7 @@ export function App() {
                 <h2>Edit a tiny FSH guide</h2>
                 <p>Open a focused example, change a rule, and watch its definition and site update.</p>
                 <button className="btn btn-primary" disabled={!engineReady} onClick={openDemo}>
-                  {engineReady ? 'Edit the tiny guide' : 'Starting engine…'}
+                  {engineReady ? 'Edit the tiny guide' : bootError ? 'Startup failed' : 'Starting engine…'}
                 </button>
               </section>
               <section className="welcome-action-card">
@@ -916,7 +1070,7 @@ export function App() {
                 </select>
               </section>
             </div>
-            {!engineReady && progress && <StartupProgress progress={progress} />}
+            {!bootError && !engineReady && progress && <StartupProgress progress={progress} />}
             {version && (
               <div className="welcome-engine">
                 {version.engine} · {version.commit}
@@ -1001,7 +1155,9 @@ export function App() {
               </label>
               <main className="editor-pane">
                 {activatedModes.has('author') && activePath ? (
-                  <CodeEditor path={activePath} value={activeText} diagnostics={fileDiagnostics} onChange={onEdit} revealLine={revealLine} />
+                  <LazyPane loading="Loading source editor…">
+                    <CodeEditor path={activePath} value={activeText} diagnostics={fileDiagnostics} onChange={onEdit} revealLine={revealLine} />
+                  </LazyPane>
                 ) : <div className="panel-empty">Select a source file to edit.</div>}
               </main>
             </section>
@@ -1069,6 +1225,13 @@ export function App() {
                   previewCapable={previewCapable}
                   currentPage={selectedSitePage}
                   onSelectPage={selectSitePage}
+                  onPageLoad={(path, startedMs, endedMs) => {
+                    recordRuntimeMetric(spanEvent('preview.page-load', 'window', startedMs, {
+                      stage: 'ready',
+                      label: path,
+                      message: `Displayed preview page ${path}.`,
+                    }, endedMs));
+                  }}
                 />
               ) : <div className="panel-empty">Engine not ready.</div>}
             </section>

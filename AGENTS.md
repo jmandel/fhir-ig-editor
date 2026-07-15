@@ -1,5 +1,11 @@
 # Session handoff
 
+## Post-compaction resume rule
+
+Read the newest user message before deriving work from this handoff. Closed
+topics are constraints, not pending tasks. Do not resume, answer, research, or
+delegate a closed topic merely because it appears in a compacted summary.
+
 ## Authoritative worktree
 
 Work only in:
@@ -14,6 +20,656 @@ unless the user explicitly asks. The engine has additional operating guidance
 in `vendor/sushi-rs/AGENTS.md`.
 
 ## Current objective
+
+**LOCAL RUST/WASM TOOLCHAIN (2026-07-15):** do not infer that `rustup` is
+unavailable merely because it is absent from the default `PATH`. The user-local
+manager is `/home/jmandel/.cargo/bin/rustup`. Rust `1.96.0` with
+`wasm32-unknown-unknown` is installed at
+`/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu`, and the
+matching generator is `/home/jmandel/.cargo/bin/wasm-bindgen` 0.2.126. Rebuild
+the current engine with Binaryen 117 at
+`/home/jmandel/.local/opt/binaryen-version_117/bin/wasm-opt` on `PATH`:
+
+```text
+PATH=/home/jmandel/.local/opt/binaryen-version_117/bin:/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin:/home/jmandel/.cargo/bin:/usr/bin:/bin WASM_RUSTUP_HOME=/home/jmandel/.rustup WASM_CARGO_HOME=/home/jmandel/.cargo WASM_TOOLCHAIN_BIN=/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin WASM_BINDGEN=/home/jmandel/.cargo/bin/wasm-bindgen SUSHI_RS_DIR=/home/jmandel/hobby/fhir-publisher-rs/fhir-ig-editor/vendor/sushi-rs scripts/build-wasm.sh
+```
+
+That exact command is green against current dirty engine source. The first
+link took 33.32 s; the optimized WASM is 6,475,349 bytes with SHA-256
+`3526f0398573ddea26eff6c86dedb4d6bcc4a2e1af1f4071bf7e070eba7f5843`.
+App tests are 149/149, the Pages-base TypeScript/Vite production build and
+Worker split checks pass, focused WASM API suites are 15 + 5 + 8 green, and
+Cycle's renderer typecheck plus 176 Publisher tests pass.
+The first browser attempt is intentionally retained as a failed receipt at
+`/tmp/fhir-local-rust-196-full-browser.log`: it used a root-base Vite build
+under a Pages subpath, so `/assets/*` returned 404 before engine startup. The
+corrected production-equivalent artifact is
+`c89e08f94528ec7918336aef20de39562e56798805f5da275fb91740fb4b413e`
+(177 files / 112,608,648 bytes). Its complete fresh-profile receipt is
+`/tmp/fhir-local-rust-196-binaryen117-pages-full-browser.log` (`E2E GATE:
+PASS`): startup assessment, Tiny/Cycle, US Core 1,535/1,535 images and 85/85
+assets with one-shell CarePlan, real mCODE, atomic registry retry, restart and
+persistence, navigation, scroll 640 -> 640, and stable mobile geometry all
+pass. This closes local browser correctness for the current dirty source; the
+exact matrix below separately closes repeated performance/memory measurement.
+Neither receipt authorizes a commit/deployment.
+
+Use the benchmark harness's bytewise path ordering for artifact identity. A
+discarded manual helper used locale collation and produced `3712f003...` over
+the same 177 files/112,608,648 bytes; that value is not the canonical artifact
+ID and must not be used in receipts.
+
+**EXACT CURRENT MATRIX COMPLETE (2026-07-15):** the authoritative receipt is
+`vendor/sushi-rs/target/benchmark-results/current-rust196-binaryen117-matrix`,
+bound to artifact `c89e08f9...` and recipe `f9f7648a...`. `aggregate.json` is
+`ok:true`; all 24 fresh receipts pass across Tiny/IPS/US Core/mCODE, fast and
+verified whole-Chromium 25%-CPU modes, three repeats each. All receipts have
+memory evidence; max pending/cross-in/cross-out requests are zero; all quota
+scopes were applied and released. Fast cold medians (min-max) are Tiny 11.293 s
+(11.291-12.090), IPS 15.505 (15.478-15.624), US Core 34.749
+(34.698-34.805), and mCODE 36.656 (35.299-41.348). Fast edit medians are
+1.296/3.111/4.318/1.566 s; same-Worker reopen medians are
+.446/.593/1.646/.937 s. Throttled cold medians are
+58.620/85.319/172.339/169.027 s; throttled edit medians are
+6.933/16.597/24.015/10.909 s. Fast observed process-tree RSS medians are
+1.531/1.739/2.597/2.029 GB and throttled are 1.551/1.694/2.277/1.993 GB.
+Compared with the frozen baseline, large-guide fast cold improves 11-19% and
+Tiny/IPS/US Core edits improve 27-55%; mCODE's already-small prose edit remains
+neutral. Exact cold transferred bytes are 46.52/54.34/120.88/117.16 MB, of
+which 36.24/43.94/114.05/110.33 MB are package-like. The only failed requests
+are 18 known `mCodeDiagram.svg` 404s and two favicon 404s; never claim zero
+request failures. Explicit representative edit debounce is recorded separately
+as 300 ms for Tiny/IPS/US Core and 120 ms for mCODE.
+
+**PAGE CARRY-FORWARD AUDIT (2026-07-15):** do not enable selective execution
+from the current observer. It intentionally installs six global Unknowns and
+marks every page's catalog membership/render completeness Unknown, so no
+cross-build page is eligible. `INCREMENTAL_EXECUTION_ENABLED` stays `false`.
+The earliest safe later experiment is post-prepare Publisher-page reuse after
+canonical compilation, RenderState, and output-catalog construction: record a
+complete bounded manifest of page source, positive/negative include and data
+lookups, fragment output digests, runtime post-pass inputs, and renderer/options
+recipe; replay it against the new state; reuse only an exact page descriptor
+and prior authenticated content; otherwise render canonically. Keep manifests
+inside the existing current/previous runtimes, cap them at 100k facts/32 MiB,
+and extend the four-guide A -> B -> A oracle with data/include precedence,
+add/delete/rename, config/package/template, overflow, observer-failure, and
+failed-B cases before any enablement. This is design evidence, not an active
+optimization or performance claim.
+
+**LANDING IN PROGRESS (2026-07-15):** pre-dirty branches exactly matched their
+remotes at editor `3420fae7`, engine `cbfadd9e`, and Cycle `090453f1`. The
+engine is now committed and pushed as `3f9ec07b` on both `snapshot-gen` and
+`main`; Cycle's generated contract is committed and pushed as `d49e0b57` on
+`main`. The editor is locally commit-ready with both new pins. Its WASM was
+rebuilt from committed engine `3f9ec07b` using Rust 1.96/Binaryen 117 and
+directly reports that stamp. App 149/149, Pages-base build and lazy bundle
+boundaries, contract/diff checks, and the exact complete browser receipt
+`/tmp/fhir-performance-committed-full-browser.log` (`E2E GATE: PASS`) are
+green. The receipt covers startup, Tiny/Cycle, US Core 1,535/1,535 images and
+85/85 assets plus one shell, real mCODE, atomic registry retry,
+restart/persistence, navigation, scroll 640 -> 640, and mobile geometry.
+Current gates are:
+engine workspace/all-target check and fmt; generated editor/Cycle/schema drift;
+WASM 15 + 5 + 8; app 149/149 plus Pages-base production/lazy-boundary build;
+Cycle renderer typecheck and 176 Publisher tests; exact native four-guide
+differential parity; exact complete browser gate; exact 24/24 performance/
+memory matrix; and diff integrity. When explicitly authorized, land in this
+order: (1) engine landed; (2) Cycle landed; (3) editor repin, committed-stamp
+WASM rebuild, and local gate are complete—commit/push editor next; (4) monitor
+every Pages job through deploy and verify the live origin from a fresh profile.
+The user explicitly authorized these writes; do not claim completion until the
+Pages deploy and fresh-profile live verification pass.
+
+**EXACT CURRENT THROTTLED-NETWORK RECEIPT COMPLETE (2026-07-15):** the
+authoritative raw receipt is
+`vendor/sushi-rs/target/benchmark-results/current-rust196-binaryen117-uscore-fast4g.json`.
+The process exited zero and the receipt is `ok:true`, bound to exact artifact
+`c89e08f9...` (177 files / 112,608,648 bytes) and recipe `f9f7648a...`. Under
+the harness's 150 ms / 200,000 B/s fast-4G rule, US Core cold is 627.571 s for
+120,877,107 observed/profiled bytes, of which 114,048,991 are package-like;
+persistent hard reload is 9.863 s, representative profile edit is 4.408 s
+including its explicit 300 ms debounce, and same-Worker reopen is 1.927 s.
+Every phase has zero pending/cross-in/cross-out requests. The one returned rule
+id covers page 55/55, dedicated-Worker 32/32, and engine-Worker 32/32 eligible
+requests with zero unproven requests; Chromium 148's Worker main-script loads
+remain explicitly unprofiled rather than inferred. Direct package-fetch and
+`stagePackageMount` preparation interval union overlaps for 13.882 s, proving
+the intended general transaction overlap under constrained transport. Process
+memory evidence is available: observed peak whole-Chromium RSS is
+2,286,370,816 bytes across 10 processes. This individual receipt has no failed
+requests, but the repeated matrix above still contains the documented mCODE
+diagram and favicon 404s. The embedded `cbfadd9e` stamp names the pre-dirty
+engine commit, not committed provenance for the current bytes. This certifies
+fast-4G only; slow-4G remains unrun and must not be claimed.
+
+**DO NOT REOPEN THE R4/R5 DESIGN QUESTION:** the user has explicitly closed
+that discussion for this round. The established conclusion is one explicitly
+targeted release per build, with internal R5 normalization kept private. Do not
+research, restate, redesign, or delegate this question after compaction. The
+active work is the general-purpose performance goal below.
+
+**DELETION-FIRST CERTIFICATION CHECKPOINT (ACTIVE, UNCOMMITTED 2026-07-15):**
+the exact current Pages artifact is
+`b2aadfb08ae9c994fe7a370f86fc5f27541f1209b19519d81628442db2a31c5a`
+(177 files / 112,616,944 bytes). PreparedGuide selection now borrows candidates
+and clones only final resources; its private SiteEngine cache uses
+`Rc<PreparedGuide>`. PreparedPackage derives its index directly from borrowed
+files and no longer constructs an unused normalized payload. Public APIs and
+identities are unchanged. Rust workspace/all-target/wasm32, app 149/149,
+TypeScript, production build, and the exact complete Pages-subpath browser gate
+pass. The browser receipt is
+`/tmp/fhir-performance-deletion-full-browser-final.log` (`E2E GATE: PASS`):
+Tiny/Cycle, US Core 1,535/1,535 images and 85/85 assets with one-shell CarePlan,
+real mCODE, restart/persistence, scroll 640 -> 640, mobile geometry, baked alias
+resolution with zero registry calls, and real-Worker retry with invisible staged
+packages plus one ordered atomic commit all pass.
+
+The browser gate's synthetic registry case must run after the baked-seed case:
+the version-observation cache deliberately owns one source scope, so the fake
+registry source replaces the baked scope. This is test ordering, not a product
+race or weakened assertion. The first final matrix correctly failed closed on
+a separate CDP ordering edge: a Monaco dedicated-Worker attachment can be
+delivered before its parent-page request event. The final benchmark keeps one
+complete request ledger and one canonical target-evidence record, joins exact
+`{phaseGeneration, URL}` only at 1:1 cardinality, consumes both once, preserves
+attachment through detach/destroy, and leaves old/ambiguous/non-Worker/reused
+evidence open. A five-run fresh IPS stress is `ok:true` at
+`vendor/sushi-rs/target/benchmark-results/ips-worker-join-stress/aggregate.json`.
+The exact final fast+25%-CPU browser matrix is `ok:true` at
+`vendor/sushi-rs/target/benchmark-results/deletion-final-matrix/aggregate.json`:
+24/24 fresh receipts share artifact `b2aadfb0...` and recipe `10fbff08...`, with
+zero pending or cross-phase requests. Fast cold medians are 11.307/15.634/
+34.996/37.258 s for Tiny/IPS/US Core/mCODE; representative edits are 1.252/
+3.085/4.356/1.565 s. Eighteen closed mCODE request failures are the known
+`mCodeDiagram.svg` 404 across cold/reload/reopen; do not claim zero request
+failures. The discarded partial matrix remains non-evidence.
+
+Network profiling exposed a different Chromium 148 protocol boundary and now
+fails honestly. One page global `Network.emulateNetworkConditionsByRule` owns
+the profile. Worker `fetch()` request events arrive on the Worker session while
+their exact rule-id ExtraInfo arrives on the page session, so the harness joins
+complete ledgers by raw request id only at 1:1 cardinality and binds phase
+generation. Worker main-script loads receive no applied rule id from Chromium;
+they are explicitly listed as unprofiled and never inferred from target
+attachment or elapsed time. Lifecycle/profiling tests pass 36/36. The exact
+Tiny fast-4G receipt is `ok:true` at
+`vendor/sushi-rs/target/benchmark-results/deletion-network-fast4g-proof/aggregate.json`:
+35/35 eligible page and 29/29 engine-Worker subresource requests carry the one
+returned rule id. Cold is 242.394 s for 46.53 MB observed/profiled transfer
+(36.24 MB package-like), cached edit 1.270 s, and every network boundary is
+closed. The same
+frozen recipe's US Core fast-4G receipt is `ok:true` at
+`vendor/sushi-rs/target/benchmark-results/deletion-network-uscore-fast4g/aggregate.json`:
+48/48 eligible page and 29/29 engine-Worker subresource requests carry its one
+returned rule id. Cold is 628.395 s for 120.89 MB observed/profiled transfer
+(114.05 MB package-like); persistent hard reload is 9.075 s, semantic edit
+4.352 s, and exact same-Worker reopen 1.629 s, all with closed network
+boundaries. These two
+receipts deliberately certify one fast-4G profile, not the unrun slow-4G profile.
+
+The fresh current-source native four-guide/three-repeat matrix passes at
+`vendor/sushi-rs/target/native-cli-benchmarks/20260715T115056Z-3788346/receipt.json`.
+It built Fig `c93b38cbf0fc...` from the dirty current engine source in an isolated
+hardlinked cache. Tiny/IPS/US Core/mCODE prepare medians are 9.062/12.780/
+33.126/30.093 s; outputs .375/.636/1.452/1.331 s; one render .384/.637/
+1.500/1.399 s; and finalize .523/2.247/6.349/4.034 s. No commit/push without a
+new explicit request.
+
+**IPS LOGICAL-SPECIALIZATION CORRECTNESS PREREQUISITE (ACTIVE, UNCOMMITTED
+2026-07-14):** the first representative IPS benchmark exposed a real engine
+failure, not a harness issue. The final audit corrected an important initial
+misdiagnosis: SUSHI's `sushi-r5forR4#1.0.0` virtual `Base` is a 5.0.0 compiler
+definition and must never be used as Publisher's R4 logical-model base.
+Publisher instead synthesizes a minimal `Base` at its context FHIR version only
+when that release's universe lacks Base; R5 must retain its real Base and
+inherited `ele-1`. Snapshot resolution now models that separate versioned
+resource, rejects cross-version Base references, and continues to share the
+other immutable R5-for-R4 datatype definitions. The Java oracle installs the same synthetic
+Base without enabling the deliberately separate version-pinning layer.
+`walk/specialization.rs` ports Publisher Q20/Q2/Q9, including its raw-prefix
+insertion edge. The corrected seven-element Java golden has no leaked R5 root
+constraint/mapping and carries base version 4.0.1; published-IPS-shaped R4 and
+real-Base R5 tests plus a local `Base -> Document -> IPSSectionsLM` chain cover
+the seam. All snapshot tests pass (10 unit, bundle, conversion, Layer B, 5 specialization,
+walk), as does SiteEngine 25/25 with one explicit fixture ignore. A rebuilt
+pre-final WASM opened real IPS with 117 resources and 468 pages in
+`/tmp/ips-performance-root-benchmark-current.json`; rebuild and rerun the
+browser after these final corrections before freezing the baseline.
+
+**GENERAL-PURPOSE PERFORMANCE ROUND (ACTIVE, UNCOMMITTED 2026-07-14):** the
+current goal is to improve arbitrary-guide cold startup and edit latency without
+package-specific artifacts, a second build path, or changing the public
+`prepare -> Build -> outputs/render/finalize` API. Three read-only audits found
+that the live 5.199 s engine-ready baseline excludes Worker evaluation, WASM
+download/compile/instantiate, and Session construction; workspace restore and
+manifest loading unnecessarily delay init; Publisher startup statically loads
+Monaco and Cycle-only graphs; package fetch/preparation overlap has a small
+local-Tiny ceiling but may matter under throttling; and the strongest general
+reuse seam is one exact immutable package corpus shared by compiler, snapshot,
+and renderer views. Declaration-level incremental compilation is not yet safe
+because actual symbol/read dependencies are incomplete.
+
+The active uncommitted slice extends the generated `BuildEvent` observation
+plane with optional machine `phase`, `source`, and epoch-aligned `startMs`, then
+records Window/Worker startup, streaming WASM fetch/compile, instantiate/start,
+Session construction/init, workspace/SW/catalog work, package fetch/verify/
+prepare/stage/commit, SiteBuild/output/publication, first preview load, and WASM
+memory. No parallel metrics channel is being added. Focused Rust/WASM contract
+gates, editor 110/110, TypeScript, generated-contract drift, and the Pages build
+are green. The exact full-browser proof is
+`/tmp/fhir-performance-timeline-browser.log` (`E2E GATE: PASS`): engine ready
+510 ms, Worker-to-ready 122.7 ms, app module/initial render 327.8 ms, streaming
+WASM fetch 12.7 ms for 5,763,275 bytes, compile 14.5 ms, Tiny Ready 10.305 s,
+and a 915 ms warm edit split into the explicit 300 ms debounce, 400.7 ms
+prepare RPC, 12.5 ms outputs, 7.1 ms first render, and 33.4 ms publication. All
+US Core/mCODE/restart/navigation/scroll/mobile cases pass. The corrected generic
+benchmark removes padded publication waits, gates on exact current-generation
+Ready after the Service Worker acknowledgement, records request/response/
+finish timing, and fail-closes on incomplete dedicated-Worker/WASM/network/
+memory evidence. `/tmp/project-benchmark-tiny-audit.json` proves 11.002 s cold,
+3.916 s hard reload, and 207.9 ms retained reopen. CDP CPU throttling is
+truthfully page-only; the mobile-class matrix instead applies and verifies a
+transient 25%-CPU systemd scope around the whole disposable Chrome tree. Its
+Tiny proof `/tmp/fhir-mobile-smoke.json` is 54.334 s cold, 26.186 s warm, and
+2.001 s retained reopen with no leaked scope. The authoritative frozen-artifact
+three-repeat matrix is complete and `ok:true` at
+`/tmp/fhir-performance-baseline-recipe-final/aggregate.json`: 24/24
+Tiny/IPS/US Core/mCODE fast+25%-CPU receipts share artifact
+`5d241fd01b3bf85791fdb395cb9a39b23d0ca551360d2969c00bc7a5f0061121`
+(169 files / 112,498,192 bytes) and runner recipe
+`d24a79761b04bfbace953f5a0be563c1fd683d51e29a87fa8631f02144ae7d91`.
+Fast cold medians are 11.628/17.838/42.825/41.437 s; persistent hard reloads
+4.066/6.375/9.046/8.606 s; representative edits 2.846/5.013/5.903/1.641 s;
+and same-Worker reopens 0.514/0.671/1.655/0.924 s. Verified 25%-CPU cold
+medians are 59.595/88.446/177.483/174.924 s, demonstrating that cached mobile
+startup is primarily CPU work rather than transfer. Preserve the separately
+deployed live Tiny baseline: Ready 12.327 s, engine ready 5.199 s.
+
+The exact independent-process native baseline is `pass` at
+`vendor/sushi-rs/target/native-cli-benchmarks/20260715T040711Z-3225234/receipt.json`.
+It used the SHA-authorized frozen Fig
+`de1d9abfc4ef391ba040e36e98ae7e84faf9db660f0cc04cc3e8e2cbe2a06b24`,
+three repeats, and an isolated temporary hardlinked cache. Tiny/IPS/US Core/
+mCODE prepare medians are 9.863/13.735/37.028/34.180 s; outputs
+0.359/0.612/1.422/1.314 s; one render 0.374/0.614/1.471/1.383 s; and finalize
+0.517/2.187/6.417/4.108 s. This independently confirms that package/index/
+compile/preparation work, not UI debounce or one-page rendering, is dominant.
+
+The final current Pages-base artifact is frozen at
+`b4e10d41f82ee7d382c136ca892b4de3697b6abe66af26850f36b8b57421e90e`
+(171 files / 112,611,492 bytes). Four independent fast smokes from the prior
+exact source checkpoint pass at
+`/tmp/fhir-performance-current-{tiny,ips,uscore,mcode}-smoke*.json`.
+Single-sample cold Tiny/IPS/US Core/mCODE times are
+11.881/16.050/35.956/37.129 s and representative edits are
+1.263/3.544/4.368/1.679 s. Tiny's edit proves the compiler package-store path:
+`compileProject` fell from the frozen ~1.556 s to 8 ms with 44 body hits/zero
+misses, while reported prepare WASM memory fell from ~226 to ~192 MB. Early
+startup moves Worker attachment from 307 to 15 ms and the WASM request from 424
+to 143 ms; the complete application graph loads concurrently. Do not turn these
+smokes or the incomplete `/tmp/fhir-performance-current-matrix` pilot into a
+claim. That pilot exposed multiple benchmark-only CDP lifecycle edges. The
+runner now joins the exact top-level `frameId`/`loaderId` and default execution
+context for setup/cold/reload, accepts context-before-commit ordering, pins
+reload to the prior loader, and evaluates only through the resulting context
+lease. The remaining preselection stall was a synchronous `Runtime.evaluate`
+requested with unnecessary Promise-await semantics while the app itself
+remained idle. Initial project selection is now installed before navigation and
+owned by the committed page: it waits for the real React select to be enabled,
+dispatches on the next animation-frame commit boundary, and is acknowledged
+only when the app persists the selected project. It emits once; there is no
+sleep/retry masking. Every benchmark expression is synchronous and now uses
+`awaitPromise:false`. Context, protocol, timeout, transport, selection, and
+network-boundary loss all fail terminally. The deterministic lifecycle/
+handshake suite passes 17/17. Three fresh whole-Chrome 25%-CPU Tiny attempts at
+`/tmp/fhir-selection-handshake-throttled-{3,4,5}.json` all completed cold,
+reload, edit, and same-Worker phases with zero pending requests. They share the
+frozen artifact above and exact runner recipe
+`3db3a9e662e9ba132173487cfcbb37b4d2579c9326e5b2ae3f94d84f2da773a5`;
+cold times are 59.030/59.611/59.612 s.
+
+The authoritative post-change browser matrix is now complete and `ok:true` at
+`/tmp/fhir-performance-current-matrix-final5/aggregate.json`: all 24 receipts
+share that exact artifact/recipe, every network boundary is closed, and no
+pilot receipt was reused. Fast Tiny/IPS/US Core/mCODE cold medians are
+11.860/16.237/35.835/36.829 s versus 11.628/17.838/42.825/41.437 s baseline;
+semantic/prose edit medians are 1.261/3.136/4.385/1.599 s versus
+2.846/5.013/5.903/1.641 s. CPU-capped cold medians remain essentially flat at
+59.405/88.312/176.018/171.299 s, showing that the large-guide fast cold gain is
+host overlap/startup rather than less total CPU. US Core's summed Worker RPC
+work increases 32.8 -> 54.5 s while its RPC envelope falls 41.9 -> 35.3 s,
+directly proving overlap. Compiler package-store reuse is exercised on each
+semantic edit: Tiny/IPS/US Core compileProject medians fall 1,556 -> 9 ms,
+2,422 -> 568 ms, and 1,641 -> 103 ms with `compilerPackageStoreCacheHit=1` and
+zero store rebuild. US Core process-tree RSS is effectively flat (2.610 ->
+2.626 GB median) while observed edit-phase WASM memory falls 849.3 -> 822.5 MB.
+
+The independent current-source native matrix is `pass` at
+`vendor/sushi-rs/target/native-cli-benchmarks/20260715T072147Z-3332136/receipt.json`
+using release Fig `fc1f4d65b0aa`. Tiny/IPS/US Core/mCODE prepare medians are
+9.845/13.416/35.739/33.833 s; outputs .349/.608/1.405/1.282 s; one render
+.372/.603/1.456/1.342 s; and finalize .506/2.194/6.325/4.020 s. Relative to the
+frozen independent-process baseline, canonical native execution is stable;
+this supports attributing browser cold gains to the host transaction overlap
+and early startup rather than a second execution path. The frozen baseline and
+its recipe remain intact.
+
+The exact current artifact also passes the complete Pages-subpath browser gate
+at `/tmp/fhir-performance-full-browser-final3.log` (`E2E GATE: PASS`). It
+re-proves Tiny/Cycle, US Core, real mCODE, preview-Service-Worker restart and
+persistence, navigation/history, hot reload with scroll 640 -> 640, and stable
+390px/320px mobile geometry. The benchmark's initial-selection race is closed
+structurally: a probe installed before navigation binds to the committed
+document, waits for the enabled React guide selector, dispatches exactly once
+on the next animation-frame boundary, and completes only after the app persists
+the selected project. CDP evaluation is synchronous (`awaitPromise:false`), and
+the 17/17 lifecycle suite plus three independent throttled receipts prove the
+handshake without retries or sleeps. `verify-e2e.mjs` now fail-closes CDP and
+WebSocket calls on timeout/close/error instead of spinning after a browser
+crash. `run-browser-gates.sh` accepts `BROWSER_WORK_ROOT` for disposable copied
+artifacts/profiles while leaving Chromium's own `TMPDIR` semantics untouched.
+
+The first optional-capability split is retained locally and reproducibly
+certified. Every executable Cycle/ReactDOM/Liquid/FHIRPath/XML import lives in
+one private `cycleRuntime` dynamic Worker module; Publisher still uses the
+canonical Rust Build and unchanged `prepare/outputs/render/finalize` protocol.
+The production gate rejects eager Cycle markers/references and verifies the
+Worker entry stays below 256 KiB. Vite's default CommonJS `strictRequires:
+"auto"` made identical builds race while detecting the large cyclic Cycle CJS
+graph, alternating between two chunk sets with a 593-byte size difference.
+`build.commonjsOptions.strictRequires: true` preserves lazy Node-style require
+semantics and removes that race. Five consecutive identical-source builds now
+produce the byte-identical artifact
+`a05e9fd4d05ca8ae1666a71a2dcc479596d357e33544e8917c2f6008753829e3`
+(172 files / 112,623,560 bytes), with Worker
+`engine.worker-CDoyfBGt.js` and Cycle chunk `cycleRuntime-CL6rUBxa.js`.
+
+The six-receipt Tiny matrix at
+`/tmp/fhir-cycle-split-tiny-matrix/aggregate.json` is `ok:true`: module
+evaluation median falls 125.5 -> 28.5 ms fast and 1,506.7 -> 301 ms at 25%
+whole-Chrome CPU; throttled cold falls 59.405 -> 58.344 s and warm 30.541 ->
+29.917 s, with RSS within the prior range. The exact reproducible-artifact
+receipts are `/tmp/fhir-cycle-split-deterministic-{fast,throttled}.json`, both
+`ok:true` with zero Cycle-chunk requests during Publisher phases and exactly one
+at first Cycle use. Fast phases are 11.756 s cold, 4.160 s reload, 1.247 s edit,
+2.651 s first Cycle, and 0.435 s reopen; 25%-CPU phases are 58.931/30.601/7.040/
+14.217/4.997 s. IPS/US Core/mCODE fast smokes remain green at
+`/tmp/fhir-cycle-split-large-fast/aggregate.json`. App 147/147 (778 assertions),
+TypeScript, the production bundle boundary, lifecycle 17/17, five-build byte
+reproducibility, and diff integrity pass. The exact deterministic artifact
+passed the complete Pages-subpath gate at
+`/tmp/fhir-cycle-split-deterministic-full-browser.log` (`E2E GATE: PASS`),
+including Tiny/Cycle, US Core 1,535/1,535 images and 85/85 assets, one-shell
+CarePlan, real mCODE, restart/persistence, navigation, scroll 640 -> 640, and
+390px/320px mobile cases. Do not commit or push without a new explicit request.
+
+The second optional-capability split is retained locally and certified. The
+source editor and compiled-JSON viewer are the only two lazy leaves; profile
+Differential/Snapshot/Expansion stay in the ordinary Explore graph. One shared
+pane-local Suspense/error boundary prevents layout collapse or app-wide import
+failure. The exact current artifact is
+`62a0c1841ddac6f84ae5d976a6d978b85f1b4f92b185caca1a0c496108b51713`
+(175 files / 112,620,612 bytes): eager `reactBootstrap` falls from 3,567,196
+bytes to 240,580 (75,438 gzip), while `monacoSetup` is a separate 3,319,685-
+byte capability and CodeEditor/ResourceJson are 2,779/452-byte leaves. The
+production gate traverses the eager static-import closure, rejects an eager
+Monaco leaf, and requires the editor/JSON Worker URLs to be rooted only by the
+Monaco capability.
+
+The exact full-browser receipt is `/tmp/fhir-monaco-split-full-browser.log`
+(`E2E GATE: PASS`). Its network assertions prove: welcome requests no Monaco
+surface/core/Worker; Author loads CodeEditor + Monaco + only the base Worker;
+Differential still loads no JSON capability; selecting JSON then loads
+ResourceJson + the JSON Worker. It also re-proves Tiny/Cycle, US Core
+1,535/1,535 images and 85/85 assets plus one-shell CarePlan, real mCODE,
+restart/persistence, navigation, scroll 640 -> 640, and mobile geometry. Fast
+US Core `/tmp/fhir-monaco-split-uscore-fast.json` is `ok:true`: cold JS transfer
+falls 3.647 MB -> 0.323 MB, app-module evaluation 275.4 -> 22.7 ms, and observed
+JS heap 133.8 -> 110.0 MB; Ready is neutral at 35.63 -> 35.45 s. The exact
+whole-Chrome 25%-CPU receipt
+`/tmp/fhir-monaco-split-uscore-throttled-final.json` is `ok:true`: app-module
+evaluation falls from the 2.50 s prior median to 0.10 s, cold Ready is 170.7 s
+versus the prior 176.0 s median, and process-tree RSS remains within the prior
+range. App 149/149 (791 assertions), TypeScript, bundle gates, and diff
+integrity pass.
+
+That final throttled run also closed a benchmark-only setup race. The harness
+formerly required a default Runtime context for its throwaway `about:blank`
+document even though setup never evaluates it; under throttling Chrome could
+commit the page while that unused join waited. Setup now binds the exact
+top-level frame/loader returned by `Page.navigate`; every measured navigation
+still requires the stricter frame + loader + default-context lease. Lifecycle
+tests pass 18/18, and the corrected run crossed setup and the page-owned catalog
+selection once without retry or sleep masking. Do not commit or push without a
+new explicit request.
+
+The first startup optimization is source-frozen but deliberately not yet built
+into `app/dist`. `engineStartup.ts` owns one page-process EngineClient at module
+evaluation, buffers startup events, and disposes it on owner HMR;
+`EngineClient.init` is single-flight and overlaps manifest fetch/parse with the
+Worker init RPC. The tiny `main.tsx` bootstrap now creates that owner before it
+dynamically imports the React/ReactDOM/App graph; its DOM shell remains visible
+through that import. App concurrently opens the workspace/restores stale preview
+before joining `startup.ready`, and a page-process `WorkspaceStartup` makes the
+repository plus initial project read single-flight across StrictMode replay.
+Fatal Worker `error`/`messageerror` rejects every pending request, boot failures
+have a stable visible reload action, and replacement-Worker recycle now reports
+its explicit 250 ms memory-release wait plus Worker/WASM/Session events on the
+same timeline. StrictMode no longer constructs or initializes a second engine.
+These post-review source corrections have focused tests written but deliberately
+not run while the frozen benchmark matrix owns the machine. After that matrix,
+run the focused/type gates, build this slice with app-local `bun run build` only,
+and remeasure against the same harness; retain it only on measured improvement.
+
+The bounded adversarial startup follow-up is also source-only and unverified
+while that matrix runs. `EngineClient` now exposes a replayable terminal-Worker
+failure observation; the page owner combines it with classified manifest/WASM
+initialization rejection, and App turns either that failure or an independently
+classified workspace/OPFS failure into one stable reload surface while retiring
+the Worker. A post-ready crash can no longer leave `engineReady` true or let a
+React remount join the old resolved init promise. Startup events, fatal
+listeners, every EngineClient progress callback, and WorkspaceStartup metrics
+are guarded so an observation sink cannot change initialization, package,
+recycle, or repository ownership. Replacement-Worker init/version failure is
+terminal and observable. StrictMode reuses the preview-worker and curated-
+catalog promises and emits their spans once; curated catalog I/O itself is
+page-process single-flight. A failed dynamic React/App import disposes the
+already-started engine. Focused tests now cover event-observer isolation,
+post-ready fatal replay, manifest failure classification, workspace-observer
+isolation, and the corrected Promise-all source join. These edits touch
+`app/src/{App.tsx,main.tsx}`, `app/src/worker/{client.ts,engineStartup.ts}`,
+`app/src/vfs/workspaceStartup.ts`, `app/src/adapters/templateCatalog.ts`, and
+their three focused test files. After the frozen matrix completed, the combined
+startup/workspace/catalog plus directly adjacent timeline/prepare/local-package/
+workspace run passed 38/38 tests (232 assertions). Typecheck, production build,
+rebuilt-WASM, browser, and performance claims remain pending this source slice.
+
+A read-only eager-graph audit found two additional independent experiments to
+run only after that startup slice is measured. `engine.worker.ts` currently
+statically pulls the Cycle-only ReactDOM/Liquid/FHIRPath/XML renderer graph into
+every Publisher startup (2,339,637-byte frozen worker entry, 449,428 bytes
+gzip). Move that graph behind one private worker-side dynamic `cycleRuntime`
+module while keeping Rust finalization and the four-operation API unchanged;
+prove that Publisher runs request no Cycle chunk and that Cycle loads it once
+with unchanged output. Separately, both `CodeEditor` and
+`ResourceInspector -> ResourceJson` statically root Monaco in the
+3,584,019-byte frozen app entry (931,672 bytes gzip). Both roots must be split
+together with pane-local stable Suspense/error surfaces, then prove no Monaco
+request occurs before Author/JSON use and preview scroll/lifecycle is unchanged.
+Measure these experiments separately; do not use either to obscure the result
+of the already-written early-startup slice.
+
+The first exact immutable-reuse slice is active source work in `vendor/sushi-rs`
+and deliberately absent from the frozen browser artifact. SiteEngine retains
+the compiler `PackageStore` through only its current and previous successful
+semantic compilations. Its key binds recipe/API, full config identity, ordered
+executable and support labels, and every authenticated prepared-package
+carrier; a candidate installs only after successful compilation. Ordinary and
+prebuilt-store compiler APIs share one implementation, and prepare events expose
+key/build/hit/use/retention metrics. Independent review rejected the initial
+direct reuse of a retained `PackageStore`: its interior parsed-JSON cache could
+grow during a failed compile. The corrected source now shares immutable lookup
+indexes, compressed carrier bytes, and decoded member indexes while isolating
+both parsed bodies and decompression/read state per compilation. Promotion
+drops the transient read cache. Mutable disk sources reject the reuse fork but
+still compile canonically from the supplied view and attach no retained store;
+each retained store is limited to 1,024 entries/16 MiB source bytes. A second
+independent review found that its first deterministic byte-budget trim was greedy rather than strict LRU; it is now oldest-first with
+one consistent lower-index tie rule and an adversarial fragmentation fixture.
+The real transaction test now performs a successful Patient compile, a
+same-key Observation read followed by a deliberately late render-path failure,
+and a successful mixed hit/miss promotion while asserting the prior retained
+store is byte-for-byte observationally unchanged. A full test-only cache
+fingerprint covers values/recency/counters; a warm mixed-hit/miss result/render
+set is compared with a clean compile. Metrics now distinguish active state,
+current+previous logical totals, deduplicated parsed bodies, and unique retained
+catalogs. The compiler derives cache root from its store and rejects mismatched
+package-affecting config. Corrected native gates are green: package_store 50
+unit + 2 integration, compiler 25 lib + 3 definition-location integration, and
+SiteEngine 31 passed/1 fixture-dependent ignored. The real DiskSource
+regression compiles two distinct fresh revisions with zero retained
+store/catalog/body generations. Do not claim a browser or memory improvement
+until the WASM is rebuilt and measured independently. The complete engine
+boundary receipt is `/tmp/engine-boundary-gate-final.log`: snapshot_gen 21/21
+including all five R5-for-R4/logical-specialization tests, WASM lib 15/15,
+expand 5/5, Session 8/8, generated wire-contract drift, the documented Rust
+1.96 wasm32 release build, workspace formatting, and diff integrity are green.
+The raw wasm32 artifact exists only under engine `target`; no editor WASM or
+`app/dist` was built or copied.
+
+The general package-overlap slice is now source-active and unbuilt. The old
+whole-array Worker `mountPackages` operation is replaced by one private
+`open -> stage(index) -> commit/abort` ticket. The main-thread mount mutex spans
+the complete ticket lifetime; ordinary resolver rounds open before their four
+bounded fetchers, and persistent-lock and single-package/template paths use the
+same transaction. Rust stores staged FPP artifacts by resolver index, validates
+both cache key and expected label before occupying a retryable slot,
+reconstructs exact resolver order at commit, and retains the existing
+generation guard/all-or-nothing mutation. Prepared-cache and typed registry-
+integrity recovery retry only the failed slot. Worker per-slot events return
+immediately, so later measurements can prove real fetch/preparation overlap.
+Do not claim a gain until focused transaction, TypeScript, app, rebuilt-WASM,
+and repeated matrix evidence pass.
+
+The same source-only package lifecycle work now makes session-local package
+authority truthful for an already-mounted exact coordinate. A dropped TGZ is
+staged with an order-independent effective-file comparison and an exact
+rollback token. An identical repeated drop is a no-op. If new local bytes would
+replace a mounted baked/local package with the same `id#version`, EngineClient
+recycles before the next `prepare`, then commits the local authority only after
+the complete prepare succeeds. A failed compile/site preparation restores the
+prior local store and requires a clean recovery Worker, because Rust may have
+committed candidate bytes before the later failure. Ingestion waits for the
+current immutable prepare barrier, so it cannot join an older ProjectRevision
+mid-flight; workspace/source ownership and resolver package order are unchanged.
+Deterministic source tests cover baked -> local replacement, failed replacement
+rollback/recovery, and unchanged-authority no-recycle.
+
+Package fetches also have one general transport inactivity boundary: total
+transfer time remains unlimited while chunks arrive, but 60 seconds without
+response headers or another body chunk aborts baked tarball, registry tarball,
+and mutable-version metadata transport. Metadata preserves origin revalidation
+with `cache: no-cache` and parses only completely consumed guarded bytes. The
+existing acquisition transaction then aborts and releases its mount ticket.
+Manual-clock tests cover stalled headers/body, a slowly progressing stream
+whose total duration exceeds the interval, and ticket abort without commit.
+After the frozen matrix completed, the focused package suite passed 42/42 tests
+(236 assertions) across integrity/inactivity, local authority, metrics, registry
+TGZ fallback, resolution locks/metadata, and template transactions. App
+TypeScript (`bunx tsc -b`) is also green. No production build has run yet.
+
+The same source cleanup removes the obsolete unconditional R5-core snapshot
+mount. Snapshot inspection now runs only against the current project's exact
+resolved closure; the manifest keeps R5 core as an `on-demand` candidate for an
+actual R5 target, not a global R4 snapshot prerequisite. This avoids a hidden
+16.4 MB acquisition and package-generation invalidation and makes the current
+release rule explicit: one guide target owns compilation/rendering semantics,
+while the snapshot engine's R5-internal representation and SUSHI's R5-for-R4
+definitions remain implementation support. The broader typed R4/R4B/R5 context
+is a later correctness migration, not a second performance build path. The dead
+single-artifact `mount`, `mountPrepared`, and `prepareAndMount` APIs are being
+deleted so cold, warm, persistent-lock, and template acquisition all use the
+same indexed transaction.
+
+The safe-incremental observation checkpoint is implemented but execution is
+still deliberately disabled. Non-default `dependency-observation/v1` records
+typed source/declaration/lookup/package/compiled/prepared/artifact/fragment/
+page/runtime/output evidence through the canonical full build. Exact facts,
+conservative scopes, and explicit Unknown gaps accumulate monotonically; every
+global invalidation and every missing fact still selects a full build. Observer
+capture/render failures are contained as global Unknown evidence and cannot
+change canonical prepare/render success. Package lookup traces share the one
+production selector, have separate 100,000-record and exact 32 MiB retained-
+collection-capacity limits, drop all records on overflow, and are always cleared
+on retained-store promotion. The feature remains absent from default dependency
+trees and `INCREMENTAL_EXECUTION_ENABLED` is `false`.
+
+The final current-source differential receipt is
+`vendor/sushi-rs/target/incremental-differential/full-current-race-free-final-20260715/aggregate.json`
+(`status: pass`, 4/4). It runs only an exec'd frozen runner and one binary built
+from a read-only before==copy==after engine snapshot in a private Cargo target.
+Fixtures, helper, catalog manifests/TGZ files, and baked bundles are frozen and
+reverified. Resolver hardlinks are only a transient read view: Rust requires two
+identical closure/carrier captures, executes solely from those immutable bytes,
+and preserves the exact prepared carriers in a read-only SHA-256 object store.
+The aggregate covers 30 objects / 203,819,085 bytes and proves Tiny 1,799, IPS
+2,233, US Core 3,848, and mCODE 2,872 outputs in fresh A, retained A -> B -> A,
+and fresh B with forward/reverse rendering. Compilation plus ordered diagnostics,
+ClosedSiteBuild closure and addressed bytes, initial/final catalogs, every
+ContentRef/body, and canonical SiteOutput match; return-A semantic compilation
+and SiteBuild cache hits are 1 for all four. The frozen source input hash is
+`0cd5768d69368c875bff9a895bdbf66dd4fe4313c3f193192a9a634e0f51717d` and
+the frozen binary hash is
+`a2d4d1d19f88fd3ca12a51953663ce01f040ccd8954aa3be6f3e20c349b08701`.
+Default and observation-enabled package/render/producer/SiteEngine suites,
+workspace all-target check, fmt, Python syntax, and diff integrity pass. The
+user-local Rust 1.96 wasm32 toolchain documented above has now rebuilt the exact
+current engine successfully; the complete browser gate remains the acceptance
+boundary. This checkpoint adds evidence and a correctness oracle,
+not an incremental execution path or measured performance gain. Page carry-
+forward remains the earliest possible later execution milestone; declaration-
+level reuse stays disabled until the recorded Unknown gaps are eliminated and
+proved.
+
+Native CLI measurement now has one uncommitted executable,
+`scripts/benchmark-native-cli.py`. It builds release Fig for current-source
+measurements or accepts one explicitly SHA-authorized frozen Fig binary for the
+baseline, creates a
+temporary hardlinked cache overlay below the engine target (never `~/.fhir`),
+and invokes `prepare`, `outputs`, `render`, and `finalize` as independent
+processes while validating every JSON envelope, build/output identity,
+ContentRef, published page, and complete receipt. Tiny's one-repeat proof is
+`vendor/sushi-rs/target/native-cli-benchmarks/20260715T020609Z-3135615/receipt.json`:
+9,837.285 ms prepare, 376.386 ms outputs, 391.896 ms render, and 534.731 ms
+finalize; 1,799 files / 36,752,344 bytes agree throughout. Run the full four-guide
+three-repeat native matrix only after the browser baseline to avoid contention.
+
+All earlier baseline directories are historical only. A post-network stall was
+traced to a detached transient Monaco Worker leaving `Runtime.getHeapUsage`
+pending, not to application or network work. Every CDP command now has a finite
+CPU-scaled deadline; detach rejects only that session's pending commands;
+active page/engine sampling failures are terminal; and target attachment/
+destruction closes only one unambiguous matching network entry. Six deterministic
+lifecycle tests pass. Every receipt is also bound to the exact four-file runner
+recipe SHA `d24a79761b04bfbace953f5a0be563c1fd683d51e29a87fa8631f02144ae7d91`;
+invalid/truncated/drifted receipts rerun. The authoritative clean no-resume
+matrix is unified-exec session `27544`, writing 24 Tiny/IPS/US Core/mCODE
+fast+25%-CPU receipts to `/tmp/fhir-performance-baseline-recipe-final`. Do not
+edit the four benchmark recipe files or run builds until it finishes. Require
+`aggregate.json` `ok:true`, exact recipe/artifact identity, and all 24 receipts.
+
+The representative-edit descriptor now records its actual UI debounce as data:
+Tiny/IPS/US Core semantic edits use 300 ms, while mCODE's prose edit uses the
+site-only 120 ms path. The measured first Worker operation and post-debounce
+pipeline were always trace-derived; the former unconditional `300` receipt
+label would only have mislabeled future mCODE samples and was corrected before
+any mCODE baseline ran.
+
+The final corrected direct Tiny runner smoke is
+`/tmp/fhir-cdp-lifecycle-final-smoke.json`: exact frozen artifact/recipe, 11.646
+s cold, 4.115 s hard reload, 2.845 s edit, 0.530 s same-worker reopen, and zero
+requests at every measured network boundary.
 
 **TINY COLD-START REGRESSION FIX (DEPLOYED 2026-07-14):** a fresh live
 mobile profile reproduced the reported apparently-hung Tiny Explore pane. It
@@ -456,9 +1112,9 @@ caches SiteOutput for both the ordinary Cycle site and its outer QA/viewer
 publication. The public `output-cache publish`, TypeScript receipt constructors
 and sealing, site-producer filesystem seam, and unused SiteBuild successor/
 resolution protocol are deleted. A real two-pass native run produced the same
-91-file receipt and skipped Liquid rendering on its verified cache hit. Full
-current-WASM Chromium certification is still running. This checkpoint is not
-committed or pushed.
+91-file receipt and skipped Liquid rendering on its verified cache hit. At that
+historical checkpoint current-WASM certification was still running; later
+sections record its completion. It was not committed or pushed there.
 
 Native Cycle external finalization now carries the exact renderer-opened
 `inputBuildId`; Fig rejects a different independently restored build before

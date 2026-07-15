@@ -136,18 +136,41 @@ cd ../..
 BASE_PATH=/fhir-ig-editor/ bash scripts/run-browser-gates.sh app/dist
 ```
 
-Measure US Core cold start, persistent-OPFS hard reload (including prior-page
-and current-ready milestones), and same-worker reopen. Add
-`BENCH_PROFILE_EDIT=1` to also measure a loaded Patient profile JSON edit through
-the changed published page, with explicit debounce and Worker-boundary timings:
+Measure any catalog project's exact Service-Worker-acknowledged cold build,
+persistent-OPFS hard reload (including prior-page and current-ready milestones),
+and same-worker reopen. The receipt includes the aligned Window/Worker/Rust
+timeline, transferred bytes, cache state, and observed memory peaks. Add
+`BENCH_PROFILE_EDIT=1` for the optional US Core Patient JSON edit scenario, with
+the explicit debounce separated from Worker processing:
 
 ```sh
 BASE_PATH=/fhir-ig-editor/ \
-  bash scripts/run-uscore-benchmark.sh app/dist > uscore-benchmark.json
+  BENCH_PROJECT=uscore bash scripts/run-project-benchmark.sh app/dist > uscore-benchmark.json
 
 BASE_PATH=/fhir-ig-editor/ BENCH_PROFILE_EDIT=1 \
-  bash scripts/run-uscore-benchmark.sh app/dist > uscore-profile-edit.json
+  BENCH_PROJECT=uscore bash scripts/run-project-benchmark.sh app/dist > uscore-profile-edit.json
 ```
+
+Run the repeated general-purpose matrix (Tiny, IPS, US Core, and mCODE; desktop
+and a whole-Chromium 25%-CPU mobile-class mode) and retain every raw receipt:
+
+```sh
+BASE_PATH=/fhir-ig-editor/ \
+  BENCH_OUTPUT_DIR=/tmp/fhir-ig-performance \
+  node scripts/benchmark-matrix.mjs app/dist > /tmp/fhir-ig-performance.json
+```
+
+The process quota is verified through a transient user systemd scope so it also
+constrains the engine Worker; CDP's CPU slowdown is page-target-only. Use the
+matrix environment variables shown by `node scripts/benchmark-matrix.mjs --help`
+to select projects, modes, repeats, network conditions, and ports.
+
+Network profiles are proven per request with the exact rule ID returned by
+Chromium. They cover page requests and subresource/package fetches issued by
+dedicated Workers. Chromium 148 does not expose an applied rule ID for a
+dedicated Worker's main-script load, so the receipt lists those entry scripts
+separately as `unprofiledWorkerEntries`; it never infers coverage from elapsed
+time or successful Worker attachment.
 
 The lower-level CDP harness can target an already running browser:
 

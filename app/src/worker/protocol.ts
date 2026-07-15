@@ -75,6 +75,25 @@ export interface MountResult {
   events: BuildEvent[];
 }
 
+/** Private streaming transaction used while package carriers are still being
+ * acquired. Slots are resolver positions, not arrival positions. */
+export interface PackageMountTicket {
+  ticket: number;
+  labels: string[];
+}
+
+export interface PackageMountStageResult {
+  ticket: number;
+  index: number;
+  label: string;
+  events: BuildEvent[];
+}
+
+export interface PackageMountAbortResult {
+  ticket: number;
+  aborted: boolean;
+}
+
 /** Worker-only projection of the generated Rust prepare result. It omits the
  * closed SiteBuild after the Worker has opened its renderer, but introduces no
  * independently declared payload fields. */
@@ -162,7 +181,14 @@ export type { TemplateResolution } from '../site/contract.generated';
 
 export interface EngineOps {
   init: { args: []; result: InitResult };
-  mountPackages: { args: [packages: PackageMountInput[]]; result: MountResult };
+  /** Private ordered package-acquisition transaction. */
+  openPackageMount: { args: [labels: string[]]; result: PackageMountTicket };
+  stagePackageMount: {
+    args: [ticket: number, index: number, input: PackageMountInput];
+    result: PackageMountStageResult;
+  };
+  commitPackageMount: { args: [ticket: number]; result: MountResult };
+  abortPackageMount: { args: [ticket: number]; result: PackageMountAbortResult };
   resolveProject: { args: [config: string, versionIndex?: VersionIndex]; result: ResolutionStep };
   expandValueSet: { args: [valueSetJson: string, resourcesJson: string]; result: ExpandResult };
   snapshot: { args: [url: string]; result: SnapshotResult };

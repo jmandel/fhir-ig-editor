@@ -170,12 +170,26 @@ export async function getTemplateCatalog(id: string): Promise<TemplateCatalog> {
   return fb;
 }
 
-/** Load every curated template's catalog concurrently (the selector's default
- *  data). Each resolves independently through the ladder, so one slow/broken
- *  registry entry never blocks the others. */
-export async function getCuratedCatalogs(): Promise<Record<string, TemplateCatalog>> {
+async function loadCuratedCatalogs(): Promise<Record<string, TemplateCatalog>> {
   const entries = await Promise.all(
     CURATED_TEMPLATES.map(async (t) => [t.id, await getTemplateCatalog(t.id)] as const),
   );
   return Object.fromEntries(entries);
+}
+
+let curatedCatalogsPromise: Promise<Record<string, TemplateCatalog>> | null = null;
+
+/** Load every curated template's catalog concurrently (the selector's default
+ * data). The page-process promise prevents StrictMode effect replay from
+ * duplicating OPFS reads, registry requests, and cache writes. An unexpected
+ * failure is retryable; ordinary registry failure is already represented by
+ * the stale/pinned fallback ladder above. */
+export function getCuratedCatalogs(): Promise<Record<string, TemplateCatalog>> {
+  if (curatedCatalogsPromise) return curatedCatalogsPromise;
+  const pending = loadCuratedCatalogs();
+  curatedCatalogsPromise = pending;
+  void pending.catch(() => {
+    if (curatedCatalogsPromise === pending) curatedCatalogsPromise = null;
+  });
+  return pending;
 }

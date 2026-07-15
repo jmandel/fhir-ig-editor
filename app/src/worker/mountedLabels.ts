@@ -14,7 +14,7 @@ export class MountedLabels {
     for (const bundle of bundles) {
       if (this.labels.has(bundle.label)) continue;
       if (transaction.has(bundle.label)) {
-        throw new Error(`mountPackages: duplicate new package label in one transaction: ${bundle.label}`);
+        throw new Error(`package mount: duplicate new package label in one transaction: ${bundle.label}`);
       }
       transaction.add(bundle.label);
       fresh.push(bundle);
@@ -22,7 +22,7 @@ export class MountedLabels {
     return fresh;
   }
 
-  /** Commit labels only after Session.mount() succeeds. */
+  /** Commit labels only after the indexed Rust mount transaction succeeds. */
   add(bundles: readonly { label: string }[]): void {
     for (const bundle of bundles) this.labels.add(bundle.label);
   }
