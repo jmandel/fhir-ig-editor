@@ -167,6 +167,27 @@ implementation recipe, options, and addressed content. Cache keys are private
 indexes for those identities. A cache hit reconstructs and verifies the same
 domain value; it never authorizes a parallel cached representation.
 
+Within one `SiteEngine`, derivation reuse is bounded to the current and previous
+successful semantic generations. It remains behind `prepare`; it is not another
+host operation or handoff value. Reusable StructureDefinition snapshots carry
+opaque manifests of every positive, negative, precedence, provenance, body, and
+recursive package/local read and are accepted only after revalidation against
+the new exact package context. Publisher rendering may share only an immutable,
+carrier-keyed package metadata catalog; current PreparedGuide resources, own
+resource maps, terminology state, mixed lookup caches, render state, output
+catalog, and page bodies are rebuilt for the new generation.
+
+Candidates are staged off-side to their complete authority boundary. Snapshot
+derivations promote only after the new `PreparedGuide` succeeds; Publisher
+package catalogs promote only after the complete target runtime installs. A
+failure before either boundary promotes nothing at that boundary. Empty,
+incomplete, unknown, or over-budget evidence takes the canonical full path and
+installs a bounded tombstone so older facts still age out. Snapshot and render-
+catalog evidence is limited by explicit resource/fact/byte ceilings.
+Declaration-level compiler reuse and cross-build page replay remain disabled
+until they can supply complete read manifests; elapsed time, filenames, or a
+prior successful output are never reuse authority.
+
 Warm preview may expose the prior immutable publication pointer/catalog and its
 individually verified `ContentRef`s before the compiler is ready for the current
 inputs. The UI must identify that presentation as previous/stale until current

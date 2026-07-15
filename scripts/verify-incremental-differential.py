@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import signal
@@ -41,6 +42,7 @@ CASES = {
         "after": "Name used while benchmarking the editor",
         "output": "en/StructureDefinition-editor-user.html",
         "compilation": True,
+        "snapshotPartial": True,
     },
     "ips": {
         "path": "input/fsh/profiles/PatientUvIps.fsh",
@@ -48,6 +50,7 @@ CASES = {
         "after": 'Title: "Patient (IPS) Benchmark Edit"',
         "output": "en/StructureDefinition-Patient-uv-ips.html",
         "compilation": True,
+        "snapshotPartial": True,
     },
     "uscore": {
         "path": "input/resources/structuredefinition-us-core-patient.json",
@@ -57,6 +60,7 @@ CASES = {
         # Predefined resources participate in PreparedGuide/site preparation,
         # but are not duplicated in the compiler inspection result.
         "compilation": False,
+        "snapshotPartial": True,
     },
     "mcode": {
         "path": "input/pagecontent/StructureDefinition-mcode-cancer-patient-intro.md",
@@ -64,6 +68,7 @@ CASES = {
         "after": "### Conformance Benchmark Edit",
         "output": "en/StructureDefinition-mcode-cancer-patient.html",
         "compilation": False,
+        "snapshotPartial": False,
     },
 }
 
@@ -338,10 +343,25 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except Exception as error:
         raise DifferentialFailure(f"invalid case receipt {path}: {error}") from error
+    if not isinstance(receipt, dict):
+        raise DifferentialFailure(f"{project} receipt is not an object")
     if receipt.get("schemaVersion") != RECEIPT_SCHEMA:
         raise DifferentialFailure(f"{project} returned an unsupported receipt schema")
     if receipt.get("status") != "pass" or receipt.get("caseId") != project:
         raise DifferentialFailure(f"{project} differential failed: {receipt}")
+    expected_receipt_fields = {
+        "schemaVersion",
+        "status",
+        "caseId",
+        "fixture",
+        "comparisons",
+        "packageCorpus",
+        "executions",
+    }
+    if project == "tiny":
+        expected_receipt_fields.add("failedSuccessor")
+    if set(receipt) != expected_receipt_fields:
+        raise DifferentialFailure(f"{project} receipt has an unexpected top-level shape")
     package_corpus = receipt.get("packageCorpus")
     if not isinstance(package_corpus, dict):
         raise DifferentialFailure(f"{project} receipt has no package corpus provenance")
@@ -380,6 +400,13 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
     }
     if not isinstance(executions, dict) or set(executions) != required:
         raise DifferentialFailure(f"{project} receipt lacks the exact execution set")
+    expected_render_orders = {
+        "freshAForward": "forward",
+        "retainedSeedA": "not-rendered",
+        "retainedBForward": "forward",
+        "retainedReturnAReverse": "reverse",
+        "freshBReverse": "reverse",
+    }
     for name, execution in executions.items():
         if not str(execution.get("buildId", "")).startswith("sb1-sha256:"):
             raise DifferentialFailure(f"{project}/{name} has no canonical build id")
@@ -389,6 +416,236 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
             raise DifferentialFailure(f"{project}/{name} has no canonical output id")
         if not isinstance(execution.get("outputPaths"), int) or execution["outputPaths"] <= 0:
             raise DifferentialFailure(f"{project}/{name} has an empty output catalog")
+        if execution.get("renderOrder") != expected_render_orders[name]:
+            raise DifferentialFailure(f"{project}/{name} has the wrong render traversal")
+
+    def count_value(metrics: Any, scope: str, key: str) -> float:
+        value = metrics.get(key) if isinstance(metrics, dict) else None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or not float(value).is_integer()
+        ):
+            raise DifferentialFailure(
+                f"{project}/{scope} has invalid count metric {key}={value!r}"
+            )
+        return float(value)
+
+    def metric(execution_name: str, key: str) -> float:
+        metrics = executions[execution_name].get("metrics")
+        return count_value(metrics, execution_name, key)
+
+    retained_hits = metric("retainedBForward", "snapshotResourceCacheHits")
+    retained_misses = metric("retainedBForward", "snapshotResourceCacheMisses")
+    fresh_hits = metric("freshBReverse", "snapshotResourceCacheHits")
+    fresh_misses = metric("freshBReverse", "snapshotResourceCacheMisses")
+    if metric("freshBReverse", "snapshotCompletedLocalCacheHit") != 0:
+        raise DifferentialFailure(f"{project} fresh B incorrectly reported snapshot reuse")
+    if CASES[project]["snapshotPartial"]:
+        if not (
+            metric("retainedBForward", "snapshotCompletedLocalCacheHit") == 0
+            and retained_hits > 0
+            and retained_misses > 0
+            and fresh_hits == 0
+            and fresh_misses > 0
+            and retained_hits + retained_misses == fresh_misses
+            and metric("retainedBForward", "snapshotDerivationAdmitted") == 1
+            and metric("freshBReverse", "snapshotDerivationAdmitted") == 1
+        ):
+            raise DifferentialFailure(
+                f"{project} did not prove partial snapshot reuse: retained "
+                f"{retained_hits}/{retained_misses}, fresh {fresh_hits}/{fresh_misses}"
+            )
+    elif not (
+        metric("retainedBForward", "snapshotCompletedLocalCacheHit") == 1
+        and retained_hits == 0
+        and retained_misses == 0
+        and fresh_hits == 0
+        and fresh_misses > 0
+        and metric("freshBReverse", "snapshotDerivationAdmitted") == 1
+    ):
+        raise DifferentialFailure(f"{project} did not prove exact whole-snapshot reuse")
+
+    fresh_catalog_entries = metric("freshBReverse", "renderPackageCatalogEntries")
+    fresh_catalog_packages = metric("freshBReverse", "renderPackageCatalogPackages")
+    fresh_catalog_bytes = metric("freshBReverse", "renderPackageCatalogApproxBytes")
+    fresh_own_resources = metric("freshBReverse", "renderOwnResourcesPreparsed")
+    if not (
+        metric("freshBReverse", "renderSemanticsCacheHit") == 0
+        and metric("freshBReverse", "renderPackageCatalogCacheHit") == 0
+        and metric("freshBReverse", "renderPackageCatalogBuilt") == 1
+        and metric("freshBReverse", "renderOwnContextBuilt") == 1
+        and metric("freshBReverse", "renderPackageCatalogAdmitted") == 1
+        and fresh_catalog_packages > 0
+        and fresh_catalog_entries > 0
+        and fresh_catalog_bytes > 0
+        and fresh_own_resources > 0
+    ):
+        raise DifferentialFailure(
+            f"{project} fresh B did not prove canonical render package-catalog construction"
+        )
+    if CASES[project]["snapshotPartial"]:
+        retained_catalog_generations = metric(
+            "retainedBForward", "renderPackageCatalogRetainedGenerations"
+        )
+        if not (
+            metric("retainedBForward", "renderSemanticsCacheHit") == 0
+            and metric("retainedBForward", "renderPackageCatalogCacheHit") == 1
+            and metric("retainedBForward", "renderPackageCatalogBuilt") == 0
+            and metric("retainedBForward", "renderOwnContextBuilt") == 1
+            and metric("retainedBForward", "renderOwnResourcesPreparsed")
+            == fresh_own_resources
+            and metric("retainedBForward", "renderPackageCatalogAdmitted") == 1
+            and metric("retainedBForward", "renderPackageCatalogPackages")
+            == fresh_catalog_packages
+            and metric("retainedBForward", "renderPackageCatalogEntries")
+            == fresh_catalog_entries
+            and metric("retainedBForward", "renderPackageCatalogApproxBytes")
+            == fresh_catalog_bytes
+            and 1 <= retained_catalog_generations <= 2
+        ):
+            raise DifferentialFailure(
+                f"{project} retained B did not prove bounded package-catalog-only reuse"
+            )
+    elif not (
+        metric("retainedBForward", "renderSemanticsCacheHit") == 1
+        and metric("retainedBForward", "renderPackageCatalogCacheHit") == 0
+        and metric("retainedBForward", "renderPackageCatalogBuilt") == 0
+        and metric("retainedBForward", "renderOwnContextBuilt") == 0
+        and metric("retainedBForward", "renderOwnResourcesPreparsed") == 0
+        and metric("retainedBForward", "renderPackageCatalogAdmitted") == 0
+    ):
+        raise DifferentialFailure(
+            f"{project} site-only retained B did not use exact RenderSemantics"
+        )
+    if (
+        metric("retainedReturnAReverse", "semanticCompilationCacheHit") != 1
+        or metric("retainedReturnAReverse", "siteBuildCacheHit") != 1
+        or metric("retainedReturnAReverse", "snapshotResourceCacheHits") != 0
+        or metric("retainedReturnAReverse", "snapshotResourceCacheMisses") != 0
+        or metric("retainedReturnAReverse", "renderPackageCatalogCacheHit") != 0
+        or metric("retainedReturnAReverse", "renderPackageCatalogBuilt") != 0
+        or metric("retainedReturnAReverse", "renderOwnContextBuilt") != 0
+        or metric("retainedReturnAReverse", "renderOwnResourcesPreparsed") != 0
+        or metric("retainedReturnAReverse", "renderPackageCatalogAdmitted") != 0
+    ):
+        raise DifferentialFailure(
+            f"{project} return-A exact reuse was misclassified as incremental derivation proof"
+        )
+    failed_successor = receipt.get("failedSuccessor")
+    if project == "tiny":
+        required_failure = {
+            "operation",
+            "phase",
+            "code",
+            "retryable",
+            "successfulCompilation",
+            "injectedBodySha256",
+            "recovery",
+        }
+        if not isinstance(failed_successor, dict) or set(failed_successor) != required_failure:
+            raise DifferentialFailure(f"{project} lacks the exact failed-successor proof")
+        if (
+            failed_successor["operation"] != "prepare"
+            or failed_successor["phase"] != "preparation"
+            or failed_successor["code"] != "renderer-failed"
+            or failed_successor["retryable"] is not False
+            or failed_successor["successfulCompilation"] is not True
+        ):
+            raise DifferentialFailure(f"{project} has malformed failed-successor semantics")
+        injected_digest = failed_successor["injectedBodySha256"]
+        if (
+            not isinstance(injected_digest, str)
+            or len(injected_digest) != 64
+            or any(character not in "0123456789abcdef" for character in injected_digest)
+        ):
+            raise DifferentialFailure(f"{project} has an invalid failed-successor body digest")
+        recovery = failed_successor["recovery"]
+        fresh_b = executions["freshBReverse"]
+        if (
+            not isinstance(recovery, dict)
+            or set(recovery) != set(fresh_b)
+            or recovery.get("buildId") != fresh_b.get("buildId")
+            or recovery.get("outputId") != fresh_b.get("outputId")
+            or recovery.get("outputPaths") != fresh_b.get("outputPaths")
+            or recovery.get("outputBytes") != fresh_b.get("outputBytes")
+            or recovery.get("renderOrder") != "forward"
+        ):
+            raise DifferentialFailure(f"{project} failed-successor recovery is not canonical B")
+        for key in (
+            "compiledResources",
+            "compilationDiagnostics",
+            "closureReferences",
+            "closureObjects",
+        ):
+            if recovery.get(key) != fresh_b.get(key):
+                raise DifferentialFailure(
+                    f"{project} failed-successor recovery differs at summary field {key}"
+                )
+        recovery_metrics = recovery.get("metrics")
+        recovery_hits = count_value(
+            recovery_metrics, "failedSuccessor", "snapshotResourceCacheHits"
+        )
+        recovery_misses = count_value(
+            recovery_metrics, "failedSuccessor", "snapshotResourceCacheMisses"
+        )
+        if (
+            count_value(
+                recovery_metrics, "failedSuccessor", "snapshotCompletedLocalCacheHit"
+            )
+            != 0
+            or recovery_hits <= 0
+            or recovery_misses <= 0
+            or recovery_hits + recovery_misses != fresh_misses
+            or fresh_hits != 0
+            or count_value(
+                recovery_metrics, "failedSuccessor", "snapshotDerivationAdmitted"
+            )
+            != 1
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderSemanticsCacheHit"
+            )
+            != 0
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogCacheHit"
+            )
+            != 1
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogBuilt"
+            )
+            != 0
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderOwnContextBuilt"
+            )
+            != 1
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogEntries"
+            )
+            != fresh_catalog_entries
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogPackages"
+            )
+            != fresh_catalog_packages
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogApproxBytes"
+            )
+            != fresh_catalog_bytes
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderPackageCatalogAdmitted"
+            )
+            != 1
+            or count_value(
+                recovery_metrics, "failedSuccessor", "renderOwnResourcesPreparsed"
+            )
+            != fresh_own_resources
+        ):
+            raise DifferentialFailure(
+                f"{project} recovery did not retain safe incremental derivations"
+            )
+    elif "failedSuccessor" in receipt:
+        raise DifferentialFailure(f"{project} unexpectedly emitted a failed-successor proof")
     return receipt
 
 
@@ -767,6 +1024,7 @@ def main() -> int:
                 "report": str(report),
                 "expectedChangedOutput": descriptor["output"],
                 "expectCompilationChange": descriptor["compilation"],
+                "expectSnapshotPartialReuse": descriptor["snapshotPartial"],
                 "templateCoordinate": args.template,
                 "buildEpochSecs": args.build_epoch,
                 "fixture": {

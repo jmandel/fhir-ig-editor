@@ -4,10 +4,11 @@
 // owner of browser setup, measurement, contracts, and raw receipt semantics.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { artifactIdentity, benchmarkRecipeIdentity } from './benchmark-identity.mjs';
 
 const HELP = `Usage:
   node scripts/benchmark-matrix.mjs [app/dist]
@@ -80,65 +81,6 @@ function quotaSetting(name, fallback) {
 
 function safeName(value) {
   return value.replace(/[^a-zA-Z0-9._-]+/gu, '-');
-}
-
-async function artifactIdentity(root) {
-  const files = [];
-  async function walk(directory, prefix = '') {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) await walk(path, name);
-      else if (entry.isFile()) files.push({ name, path });
-    }
-  }
-  await walk(root);
-  files.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-  const digest = createHash('sha256');
-  digest.update(Buffer.from('fhir-ig-editor-benchmark-artifact-v1\0'));
-  let byteLength = 0;
-  const u64 = (value) => {
-    const bytes = Buffer.alloc(8);
-    bytes.writeBigUInt64BE(BigInt(value));
-    return bytes;
-  };
-  for (const file of files) {
-    const name = Buffer.from(file.name);
-    const info = await stat(file.path);
-    digest.update(u64(name.byteLength));
-    digest.update(name);
-    digest.update(u64(info.size));
-    digest.update(await readFile(file.path));
-    byteLength += info.size;
-  }
-  return { sha256: digest.digest('hex'), fileCount: files.length, byteLength };
-}
-
-async function benchmarkRecipeIdentity() {
-  const names = [
-    'scripts/benchmark-cdp-lifecycle.mjs',
-    'scripts/benchmark-matrix.mjs',
-    'scripts/benchmark-project.mjs',
-    'scripts/run-project-benchmark.sh',
-  ];
-  const digest = createHash('sha256');
-  digest.update(Buffer.from('fhir-ig-editor-benchmark-runner-v1\0'));
-  const u64 = (value) => {
-    const bytes = Buffer.alloc(8);
-    bytes.writeBigUInt64BE(BigInt(value));
-    return bytes;
-  };
-  for (const name of names) {
-    const encodedName = Buffer.from(name);
-    const bytes = await readFile(join(repoRoot, name));
-    digest.update(u64(encodedName.byteLength));
-    digest.update(encodedName);
-    digest.update(u64(bytes.byteLength));
-    digest.update(bytes);
-  }
-  return digest.digest('hex');
 }
 
 function summary(values) {
@@ -387,7 +329,7 @@ async function main() {
   await mkdir(outputDir, { recursive: true });
   const resume = process.env.BENCH_RESUME === '1';
   const artifact = await artifactIdentity(dist);
-  const runnerRecipeSha256 = await benchmarkRecipeIdentity();
+  const runnerRecipeSha256 = await benchmarkRecipeIdentity(repoRoot);
 
   const baseReport = {
     schemaVersion: 2,

@@ -71,63 +71,22 @@ cleanup() {
 trap 'cleanup $?' EXIT
 trap 'exit 130' INT TERM
 
-readarray -t IDENTITY < <(node --input-type=module - "$DIST" "$ROOT" <<'NODE'
-import { createHash } from 'node:crypto';
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-
-const [, , dist, root] = process.argv;
-const u64 = (value) => {
-  const bytes = Buffer.alloc(8);
-  bytes.writeBigUInt64BE(BigInt(value));
-  return bytes;
-};
-const files = [];
-async function walk(directory, prefix = '') {
-  const entries = await readdir(directory, { withFileTypes: true });
-  entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-    const name = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) await walk(path, name);
-    else if (entry.isFile()) files.push({ name, path });
-  }
-}
-await walk(dist);
-const artifact = createHash('sha256');
-artifact.update(Buffer.from('fhir-ig-editor-benchmark-artifact-v1\0'));
-let byteLength = 0;
-for (const file of files) {
-  const name = Buffer.from(file.name);
-  const info = await stat(file.path);
-  artifact.update(u64(name.byteLength));
-  artifact.update(name);
-  artifact.update(u64(info.size));
-  artifact.update(await readFile(file.path));
-  byteLength += info.size;
-}
-const recipeNames = [
-  'scripts/benchmark-cdp-lifecycle.mjs',
-  'scripts/benchmark-matrix.mjs',
-  'scripts/benchmark-project.mjs',
-  'scripts/run-project-benchmark.sh',
-];
-const recipe = createHash('sha256');
-recipe.update(Buffer.from('fhir-ig-editor-benchmark-runner-v1\0'));
-for (const name of recipeNames) {
-  const encoded = Buffer.from(name);
-  const bytes = await readFile(join(root, name));
-  recipe.update(u64(encoded.byteLength));
-  recipe.update(encoded);
-  recipe.update(u64(bytes.byteLength));
-  recipe.update(bytes);
-}
-console.log(artifact.digest('hex'));
-console.log(files.length);
-console.log(byteLength);
-console.log(recipe.digest('hex'));
-NODE
-)
+if ! IDENTITY_OUTPUT="$(node "$ROOT/scripts/benchmark-identity.mjs" "$SITE_ROOT" "$ROOT")"; then
+  echo "run-project-benchmark: benchmark identity failed" >&2
+  exit 2
+fi
+readarray -t IDENTITY <<< "$IDENTITY_OUTPUT"
+if (( ${#IDENTITY[@]} != 4 )); then
+  echo "run-project-benchmark: benchmark identity returned ${#IDENTITY[@]} lines, expected 4" >&2
+  exit 2
+fi
+if [[ ! "${IDENTITY[0]}" =~ ^[0-9a-f]{64}$ \
+      || ! "${IDENTITY[1]}" =~ ^[0-9]+$ \
+      || ! "${IDENTITY[2]}" =~ ^[0-9]+$ \
+      || ! "${IDENTITY[3]}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "run-project-benchmark: benchmark identity returned an invalid four-line record" >&2
+  exit 2
+fi
 ARTIFACT_SHA="${IDENTITY[0]}"
 ARTIFACT_FILES="${IDENTITY[1]}"
 ARTIFACT_BYTES="${IDENTITY[2]}"

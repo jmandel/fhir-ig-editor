@@ -11,15 +11,131 @@ delegate a closed topic merely because it appears in a compacted summary.
 Work only in:
 
 ```text
-/home/jmandel/hobby/fhir-publisher-rs/fhir-ig-editor
+/home/jmandel/hobby/fhir-ig-editor
 ```
 
-`/home/jmandel/hobby/fhir-ig-editor` is the clean published checkout, not this
-session's worktree. Preserve the intentional dirty trees. Do not commit or push
-unless the user explicitly asks. The engine has additional operating guidance
+The user explicitly made this the session worktree on 2026-07-15. Do not resume
+repository work in `/home/jmandel/hobby/fhir-publisher-rs/fhir-ig-editor`;
+historical receipts may remain there and unrelated app edits now exist there.
+Preserve intentional dirty trees. Permission to push from this tree is not a
+request to push unfinished work. The engine has additional operating guidance
 in `vendor/sushi-rs/AGENTS.md`.
 
 ## Current objective
+
+**PROPER INCREMENTALISM, SNAPSHOT SLICE (ENGINE LANDED; EDITOR LANDING ACTIVE
+2026-07-15):**
+all repository work is rooted in this checkout. Canonical compilation and the
+public `prepare -> outputs/render/finalize` API are unchanged. SiteEngine now
+records an opaque bounded dependency manifest for each StructureDefinition
+snapshot (positive/negative fetch, selected body/order, local/package origin,
+package id, canonical version, and recursive reads), revalidates against a
+fresh current PackageContext, and reuses only exact resource derivations while
+constructing a new complete PreparedGuide. Promotion is off-side until full
+PreparedGuide success. Current and previous successful semantic generations
+are the hard lifetime bound; empty or over-budget successes install empty
+tombstones so old facts still age out. Generated values/manifests are shared by
+`Rc`; byte metrics are explicitly logical/approximate, not process memory.
+
+Focused release evidence is green: snapshot_gen 15 unit + all integration
+suites, SiteEngine 36 pass/1 fixture ignore, and Fig 14 pass/1 exhaustive
+ignore. Tests cover inactive observation, per-manifest overflow, package-backed
+origin/body invalidation, negative/preference facts, transitive invalidation,
+real public `prepare_project` A -> B reuse, failed-successor nonpromotion,
+aggregate tombstone eviction, and `Rc` sharing. The authoritative frozen
+four-guide receipt is
+`vendor/sushi-rs/target/incremental-differential/snapshot-reuse-four-guide-final2-20260715/aggregate.json`:
+`pass`, 4/4. Tiny/IPS/US Core/mCODE compare 1,799/2,233/3,848/2,872 complete
+outputs in forward and reverse orders across compilation, diagnostics,
+ClosedSiteBuild closure and bytes, catalogs, every ContentRef/body, and final
+SiteOutput. Tiny/IPS/US Core retained B have classified partial resource reuse;
+mCODE's site-only edit deliberately uses the older whole-snapshot cache. Tiny's
+injected uniquely missing base fails with the typed preparation error and then
+recovers on the same engine to a fully rendered/finalized B byte-identical to
+fresh B. Native retained-vs-fresh-B PreparedGuide time is 37 vs 41 ms Tiny,
+466 vs 660 ms IPS, and 236 vs 573 ms US Core; retained Rust prepare is 144 vs
+318 ms, 783 vs 1,154 ms, and 1,007 vs 1,631 ms respectively. Remaining
+semantic-edit cost is now dominated by canonical render-context construction
+(about 230 ms IPS and 577 ms US Core). The render-context follow-up and combined
+WASM/browser evidence below close those items for this round.
+
+**PROPER INCREMENTALISM, RENDER PACKAGE-CATALOG SLICE (ENGINE LANDED
+2026-07-15):** `render_sd::IgContext` separates an immutable `Rc`
+package metadata catalog from a fresh own-resource/tx/tree/lazy-cache overlay.
+On a semantic edit SiteEngine shares only package entries; it rebuilds current
+own mappings, mixed lookup/body caches, FragmentEngine, RenderState, catalog,
+pages, and final output. The key binds engine recipe/API, primary IG identity,
+the exact first FHIR version and ordered dependsOn pairs read by selection,
+exact compile-lock carriers, resolver-ordered labels, and package root;
+render_sd independently rechecks ordered dependencies and selected core.
+History is current+previous and promotes only after complete runtime install.
+Metrics distinguish catalog hit/build, fresh own context, entry/generation
+counts, `renderSemanticsMs`, and `renderStateMs`. Focused selection, stale-
+cache, key, identity-miss, and bounded A -> B -> A tests pass. The authoritative
+receipt is
+`vendor/sushi-rs/target/incremental-differential/render-package-catalog-four-guide-v2-20260715/aggregate.json`:
+`pass`, 4/4, with 1,799/2,233/3,848/2,872 complete outputs. It requires this
+reuse for Tiny/IPS/US Core, exact RenderSemantics for site-only mCODE, canonical
+fresh construction, failed-successor recovery, and return-A non-masquerading.
+Retained/fresh render-semantics time is 79/98 ms Tiny, 154/245 ms IPS, and
+343/605 ms US Core; RenderState is only .15/2.5/30 ms. Retained Rust prepare is
+136/719/807 ms.
+
+**PREPARSED OWN-RESOURCE + BOUNDED CATALOG FOLLOW-UP (ENGINE LANDED; EDITOR
+LANDING ACTIVE 2026-07-15):** current PreparedGuide resources now enter IgContext as parsed
+values; the old serialize-to-session-tree then parse-back pass is deleted.
+Own-resource maps, tx state, and lazy mixed caches remain fresh. A read-only
+review found pseudo-JSON's rare referenced-own-SD path still bypassed the new
+value map; one shared `load_resource_path` seam now covers preparsed and
+filesystem/package paths, with an explicit profiled-type byte-equivalence
+regression. Package-catalog admission is capped at 1,024 packages, 100,000
+resource/spec entries, and 32 MiB deterministic logical weight. Over-budget
+successful generations install same-key tombstones and current+previous is the
+hard lifetime bound. Real Publisher preparation tests now prove late staged
+failure nonpromotion, over-budget tombstone/rebuild, restored admission, and
+loader equivalence. Focused tests are green. The corrected authoritative frozen
+receipt is
+`vendor/sushi-rs/target/incremental-differential/render-bounded-own-four-guide-final2-20260715/aggregate.json`:
+`pass`, 4/4, 1,799/2,233/3,848/2,872 complete outputs and all existing failure/
+return invariants. Retained/fresh Rust prepare is 128/313 ms Tiny, 680/1,134 ms
+IPS, 722/1,604 ms US Core, and 122/1,242 ms mCODE (site-only exact semantics).
+Retained/fresh render-semantics is 71/88, 111/198, and 266/532 ms for Tiny/IPS/
+US Core. Catalog logical weights are .25/2.72/7.22/4.19 MB, below the 32 MiB
+bound. The first pre-fix bounded run was intentionally interrupted and remains
+non-evidence. Current-source native suites, workspace all-target check, fmt,
+Rust 1.96 WASM 15+5+8, app 149/149, Pages-base production/lazy-boundary build,
+and the complete browser receipt `/tmp/fhir-incremental-render-full-browser-final.log`
+are green. The first browser attempt lacked generated Cycle renderer-package
+data and failed honestly; the canonical static-data assembly corrected the
+artifact before the full rerun. The passing receipt includes Tiny/Cycle, US Core
+1,535/1,535 images and 85/85 assets with one shell, real mCODE, restart,
+navigation/scroll, mobile geometry, and atomic registry retry.
+
+The final reviewed one-repeat fast browser measurement is `ok:true` at
+`vendor/sushi-rs/target/benchmark-results/incremental-render-fast-once-reviewed-final-20260715/aggregate.json`,
+bound to artifact `4942078d...` (204 files / 178,518,562 bytes) and recipe
+`522d751b...`. Cold Tiny/IPS/US Core/mCODE is 11.134/15.436/34.429/34.824 s;
+edits are 1.225/2.704/3.554/1.550 s; reopens are .513/.594/1.584/.918 s. Every
+edit boundary has zero pending/cross-phase requests. Versus the prior repeated
+fast medians, edits improve about 5%/15%/19%, with mCODE neutral. US Core compile
+is only 105 ms of its edit and IPS compile 572 ms, so declaration-level reuse is
+rejected for this round: its dependency evidence is incomplete and the maximum
+payoff does not justify the risk. A first measurement run exposed that the
+matrix and child runner duplicated artifact hashing with divergent traversal
+order; the failed aggregate is non-evidence. Both now use one globally bytewise
+`benchmark-identity.mjs`, reject non-regular entries, propagate helper failure,
+and compare the matrix source with each child's actual served frozen copy. The
+41 identity/lifecycle tests pass and independent final review has no remaining
+finding. Engine `c3c9f881` is committed and pushed identically to
+`snapshot-gen` and `main`. The editor's optimized committed-stamp WASM is
+6,517,441 bytes (SHA-256 `101019f2...`) and directly reports engine
+`c3c9f881`. The exact fresh-profile Pages-subpath receipt is
+`/tmp/fhir-incremental-committed-stamp-full-browser-rerun.log` (`E2E GATE:
+PASS`): Tiny/Cycle, US Core 1,535/1,535 images and 85/85 assets with one-shell
+CarePlan, real mCODE, atomic retry, persistence, navigation, scroll, and mobile
+geometry pass. An earlier attempt was invalidated by root-disk exhaustion and
+is not evidence. The editor commit/push, Pages run, and live-origin verification
+remain; do not report deployment success before all three complete.
 
 **LOCAL RUST/WASM TOOLCHAIN (2026-07-15):** do not infer that `rustup` is
 unavailable merely because it is absent from the default `PATH`. The user-local
@@ -31,7 +147,7 @@ the current engine with Binaryen 117 at
 `/home/jmandel/.local/opt/binaryen-version_117/bin/wasm-opt` on `PATH`:
 
 ```text
-PATH=/home/jmandel/.local/opt/binaryen-version_117/bin:/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin:/home/jmandel/.cargo/bin:/usr/bin:/bin WASM_RUSTUP_HOME=/home/jmandel/.rustup WASM_CARGO_HOME=/home/jmandel/.cargo WASM_TOOLCHAIN_BIN=/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin WASM_BINDGEN=/home/jmandel/.cargo/bin/wasm-bindgen SUSHI_RS_DIR=/home/jmandel/hobby/fhir-publisher-rs/fhir-ig-editor/vendor/sushi-rs scripts/build-wasm.sh
+PATH=/home/jmandel/.local/opt/binaryen-version_117/bin:/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin:/home/jmandel/.cargo/bin:/usr/bin:/bin WASM_RUSTUP_HOME=/home/jmandel/.rustup WASM_CARGO_HOME=/home/jmandel/.cargo WASM_TOOLCHAIN_BIN=/home/jmandel/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin WASM_BINDGEN=/home/jmandel/.cargo/bin/wasm-bindgen SUSHI_RS_DIR=/home/jmandel/hobby/fhir-ig-editor/vendor/sushi-rs scripts/build-wasm.sh
 ```
 
 That exact command is green against current dirty engine source. The first

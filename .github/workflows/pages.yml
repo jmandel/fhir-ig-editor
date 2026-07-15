@@ -219,6 +219,9 @@ jobs:
         working-directory: app
         run: bun test tests
 
+      - name: Benchmark harness identity and lifecycle tests
+        run: node --test scripts/benchmark-identity.test.mjs scripts/benchmark-cdp-lifecycle.test.mjs
+
       - name: Build SPA
         working-directory: app
         env:

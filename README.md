@@ -67,6 +67,14 @@ that exact deterministic carrier; they do not assert a second inflated package
 payload. Cache records and worker/preview handles are private execution details,
 not additional build representations.
 
+Incremental preparation is likewise private and fail-closed. The engine retains
+at most current+previous successful generations, revalidates per-resource
+snapshot read manifests, and may share an exact-carrier-bound immutable Publisher
+package catalog. It always rebuilds current own-resource state, render state,
+catalog, and page outputs. Failed, unknown, or over-budget candidates fall back
+to the canonical build and cannot promote partial state. The public four
+operations and `PreparedGuide -> SiteBuild -> SiteOutput` handoff do not change.
+
 ## Repository shape
 
 ```text
@@ -164,6 +172,13 @@ The process quota is verified through a transient user systemd scope so it also
 constrains the engine Worker; CDP's CPU slowdown is page-target-only. Use the
 matrix environment variables shown by `node scripts/benchmark-matrix.mjs --help`
 to select projects, modes, repeats, network conditions, and ports.
+
+`scripts/benchmark-identity.mjs` is the single identity implementation used by
+both the matrix and each isolated project runner. It hashes the complete frozen
+artifact in one global bytewise path order and binds receipts to the benchmark
+recipe. Non-regular entries fail closed, and each child hashes the frozen copy
+Chromium actually serves so the matrix can prove it matches the source build.
+Any artifact or recipe disagreement fails before aggregation.
 
 Network profiles are proven per request with the exact rule ID returned by
 Chromium. They cover page requests and subresource/package fetches issued by
