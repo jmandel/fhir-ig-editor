@@ -15,7 +15,8 @@
 
 The structural-output and architecture landing is live. Engine `652581b8` is
 pushed identically to `snapshot-gen` and `main`; Cycle remains unchanged at
-`d49e0b57`; editor `d0cf0228` is pushed to `main`. Pages run `29603160517`
+`d49e0b57`; deployed editor code is `d0cf0228`, and editor `main` includes the
+subsequent documentation-only verification record. Pages run `29603160517`
 passed every native/Rust/WASM/Cycle/app/Chromium build, artifact upload, and
 deploy step. The live origin serves app `assets/index-IDEn-OIK.js`, Worker
 `assets/engine.worker-DsQKJwf8.js`, and an optimized 8,011,948-byte WASM that
