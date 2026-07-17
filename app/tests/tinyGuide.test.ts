@@ -27,6 +27,11 @@ describe('purpose-built tiny authoring guide', () => {
     expect(read('input/fsh/01-ExperimentNote.fsh')).toContain('Extension: ExperimentNote');
     expect(read('input/fsh/03-Capabilities.fsh')).toContain('InstanceOf: CapabilityStatement');
     expect(read('input/fsh/03-Capabilities.fsh')).toContain('* rest.resource.profile = Canonical(EditorUser)');
+    const stages = read('input/fsh/04-EditorStages.fsh');
+    expect(stages).toContain('CodeSystem: EditorStage');
+    expect(stages).toContain('* #author "Author"');
+    expect(stages).toContain('* #explore "Explore"');
+    expect(stages).toContain('* #preview "Site preview"');
   });
 
   test('teaches the exact Source to Definition to Preview story in its own page', () => {
@@ -35,5 +40,20 @@ describe('purpose-built tiny authoring guide', () => {
     expect(page).toContain('[IG Editor User StructureDefinition](StructureDefinition-editor-user.html)');
     expect(page).toContain('[CapabilityStatement](CapabilityStatement-demo-capabilities.html)');
     expect(page).toMatch(/standard\s+HL7 FHIR IG (?:Publisher )?template/);
+  });
+
+  test('demonstrates direct SQL and SQL data consumed by Liquid', () => {
+    const config = read('sushi-config.yaml');
+    const table = read('input/pagecontent/sql-table.md');
+    const liquid = read('input/pagecontent/sql-liquid.md');
+
+    expect(config).toContain('SQL table: sql-table.html');
+    expect(config).toContain('SQL + Liquid: sql-liquid.html');
+    expect(table).toContain('{% sql SELECT');
+    expect(table).toContain('JOIN Concepts');
+    expect(table).toContain('ORDER BY c.Code');
+    expect(liquid).toContain('{% sqlToData editor_stages SELECT');
+    expect(liquid).toContain('{% for stage in editor_stages %}');
+    expect(liquid).toContain('{{ editor_stages | size }} editor views');
   });
 });

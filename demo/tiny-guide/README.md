@@ -12,6 +12,12 @@ input/fsh/00-EditorUser.fsh
 The project deliberately uses `hl7.fhir.template#1.0.0`, not the Cycle external
 builder. Cycle remains available as the larger external-builder example.
 
+`04-EditorStages.fsh` and the two `sql-*.md` pages are the SQL demonstration.
+They define a three-concept CodeSystem, query the compiled Publisher resource
+snapshot, and show two SQL presentation paths: a direct generated table and
+`sqlToData` rows shaped by ordinary Liquid. Editing a concept changes both
+pages without duplicating the code list in Markdown.
+
 Keep `00-EditorUser.fsh` first and limited to one emitted resource: the editor
 can then select that exact declaration automatically and connect Source,
 Definition, and Published page without guessing. The suggested cardinality

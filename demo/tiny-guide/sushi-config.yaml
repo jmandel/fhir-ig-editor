@@ -19,4 +19,7 @@ parameters:
   show-inherited-invariants: false
 menu:
   Home: index.html
+  Live queries:
+    SQL table: sql-table.html
+    SQL + Liquid: sql-liquid.html
   Artifacts: artifacts.html

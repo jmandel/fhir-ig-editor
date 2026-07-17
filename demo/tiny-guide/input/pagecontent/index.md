@@ -23,7 +23,10 @@ description too: prose-only edits should flow to the same definition and page.
 - a custom extension referenced by the profile;
 - a conformant example instance;
 - a small [CapabilityStatement](CapabilityStatement-demo-capabilities.html)
-  declaring how a server can read and find conformant patients; and
+  declaring how a server can read and find conformant patients;
+- a guide-owned [CodeSystem](CodeSystem-editor-stage.html), queried live on a
+  [generated SQL table](sql-table.html) and a
+  [SQL + Liquid narrative](sql-liquid.html); and
 - authored Markdown assembled with generated artifact pages by the standard
   HL7 FHIR IG Publisher template.
 
