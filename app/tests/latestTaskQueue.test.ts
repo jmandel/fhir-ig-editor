@@ -3,9 +3,6 @@ import { readFileSync } from 'node:fs';
 
 import {
   LatestTaskQueue,
-  SEMANTIC_EDIT_DEBOUNCE_MS,
-  SITE_EDIT_DEBOUNCE_MS,
-  editDebounceMs,
 } from '../src/build/latestTaskQueue';
 
 const APP = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
@@ -21,16 +18,6 @@ function deferred<T = void>() {
 }
 
 describe('LatestTaskQueue', () => {
-  test('gives prose edits a shorter pause without weakening semantic coalescing', () => {
-    expect(editDebounceMs('input/fsh/Profile.fsh')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
-    expect(editDebounceMs('sushi-config.yaml')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
-    expect(editDebounceMs('input/resources/Patient-p.json')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
-    expect(editDebounceMs('input/examples/Patient-p.json')).toBe(SEMANTIC_EDIT_DEBOUNCE_MS);
-    expect(editDebounceMs('input/pagecontent/index.md')).toBe(SITE_EDIT_DEBOUNCE_MS);
-    expect(editDebounceMs('input/images/diagram.svg')).toBe(SITE_EDIT_DEBOUNCE_MS);
-    expect(SITE_EDIT_DEBOUNCE_MS).toBeLessThan(SEMANTIC_EDIT_DEBOUNCE_MS);
-  });
-
   test('serializes mutable engine operations and only the newest lease may publish', async () => {
     const queue = new LatestTaskQueue();
     const firstGate = deferred();
@@ -81,15 +68,58 @@ describe('LatestTaskQueue', () => {
     expect(couldPublish).toBe(false);
   });
 
-  test('an edit revokes publication authority before waiting on its debounce', () => {
+  test('an edit enters the replaceable latest-only queue without a fixed timer', () => {
     const schedule = APP.slice(
       APP.indexOf('const scheduleCompile = useCallback'),
       APP.indexOf('// ---- open a baked project'),
     );
-    const invalidate = schedule.indexOf('buildQueueRef.current.invalidate()');
-    const timer = schedule.indexOf('window.setTimeout');
-    expect(invalidate).toBeGreaterThan(-1);
-    expect(timer).toBeGreaterThan(invalidate);
+    expect(schedule).toContain('buildQueueRef.current.enqueueLatest');
+    expect(schedule).not.toContain('setTimeout');
+  });
+
+  test('coalesces a same-turn burst before any expensive task starts', async () => {
+    const queue = new LatestTaskQueue();
+    const events: string[] = [];
+    const first = queue.enqueueLatest(async () => events.push('first'));
+    const second = queue.enqueueLatest(async () => events.push('second'));
+    const third = queue.enqueueLatest(async () => events.push('third'));
+
+    expect(await first).toMatchObject({ latest: false, superseded: true });
+    expect(await second).toMatchObject({ latest: false, superseded: true });
+    expect(await third).toMatchObject({ latest: true, superseded: false });
+    expect(events).toEqual(['third']);
+  });
+
+  test('a typing burst permits one running task and only its newest successor', async () => {
+    const queue = new LatestTaskQueue();
+    const firstGate = deferred();
+    const events: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const run = (name: string, gate?: Promise<void>) => queue.enqueueLatest(async (lease) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      events.push(`${name}:start`);
+      if (gate) await gate;
+      if (lease.isLatest()) events.push(`${name}:publish`);
+      active -= 1;
+      events.push(`${name}:end`);
+      return name;
+    });
+
+    const first = run('first', firstGate.promise);
+    await Promise.resolve();
+    expect(events).toEqual(['first:start']);
+    const second = run('second');
+    const third = run('third');
+    const fourth = run('fourth');
+    expect(await second).toMatchObject({ superseded: true });
+    expect(await third).toMatchObject({ superseded: true });
+    firstGate.resolve();
+    expect(await first).toMatchObject({ latest: false, superseded: false });
+    expect(await fourth).toMatchObject({ latest: true, superseded: false, value: 'fourth' });
+    expect(maxActive).toBe(1);
+    expect(events).toEqual(['first:start', 'first:end', 'fourth:start', 'fourth:publish', 'fourth:end']);
   });
 
   test('a rejection does not poison later queued work', async () => {

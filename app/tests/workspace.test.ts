@@ -138,6 +138,38 @@ describe('project workspace and immutable revision', () => {
     expect(Object.isFrozen(captured.fsh)).toBe(true);
   });
 
+  test('capture reuses unchanged per-file derivations and replaces only the edited path', async () => {
+    const workspaces = await WorkspaceRepository.create();
+    const workspace = await install(workspaces, 'projected-capture', [
+      { path: 'input/fsh/profile.fsh', text: 'Profile: Before' },
+      { path: 'input/resources/Patient-p.json', text: '{"resourceType":"Patient","id":"p"}' },
+      { path: 'input/pagecontent/index.md', text: '# Before' },
+    ]);
+
+    const before = workspace.capture(1);
+    const repeated = workspace.capture(1);
+    expect(repeated.revision.predefined['input/resources/Patient-p.json'])
+      .toBe(before.revision.predefined['input/resources/Patient-p.json']);
+    expect(repeated.predefinedDisplay[0]).toBe(before.predefinedDisplay[0]);
+
+    await workspace.write('input/fsh/profile.fsh', 'Profile: After');
+    const unrelatedEdit = workspace.capture(1);
+    expect(unrelatedEdit.revision.predefined['input/resources/Patient-p.json'])
+      .toBe(before.revision.predefined['input/resources/Patient-p.json']);
+    expect(unrelatedEdit.predefinedDisplay[0]).toBe(before.predefinedDisplay[0]);
+
+    await workspace.write(
+      'input/resources/Patient-p.json',
+      '{"resourceType":"Patient","id":"changed"}',
+    );
+    const resourceEdit = workspace.capture(1);
+    expect(resourceEdit.revision.predefined['input/resources/Patient-p.json'])
+      .not.toBe(before.revision.predefined['input/resources/Patient-p.json']);
+    expect(resourceEdit.predefinedDisplay[0]).not.toBe(before.predefinedDisplay[0]);
+    expect(resourceEdit.predefinedDisplay[0]?.id).toBe('changed');
+    expect(before.predefinedDisplay[0]?.id).toBe('p');
+  });
+
   test('an invalid replacement is rejected without replacing the committed workspace', async () => {
     const workspaces = await WorkspaceRepository.create();
     const committed = await install(workspaces, 'transactional', [

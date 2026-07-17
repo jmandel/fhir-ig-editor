@@ -35,6 +35,16 @@ export interface WorkspaceCapture {
   predefinedDisplay: ResourceView[];
 }
 
+interface WorkspaceTextProjection {
+  /** Exact source value that owns every derived field below. */
+  sourceText: string;
+  fsh: boolean;
+  predefined?: Record<string, unknown>;
+  predefinedDisplay?: ResourceView;
+  siteFile: boolean;
+  siteBase64?: string;
+}
+
 const OPFS_ROOT = 'fhir-ig-editor-workspaces';
 const POINTER_FILE = 'current.json';
 const STATE_FILE = 'workspace.json';
@@ -143,6 +153,42 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function projectWorkspaceText(path: string, text: string): WorkspaceTextProjection {
+  const predefinedPath = (
+    (path.startsWith('input/resources/') || path.startsWith('input/examples/'))
+    && path.endsWith('.json')
+  );
+  const siteFile = path.startsWith('input/pagecontent/')
+    || path.startsWith('input/pages/')
+    || path.startsWith('input/includes/')
+    || path.startsWith('input/intro-notes/')
+    || path.startsWith('input/resource-docs/')
+    || path.startsWith('input/images-source/')
+    || path.startsWith('input/data/')
+    || predefinedPath;
+  const predefined = predefinedPath
+    ? deepFreeze(JSON.parse(text) as Record<string, unknown>)
+    : undefined;
+  const predefinedDisplay = predefined
+    ? deepFreeze<ResourceView>({
+      filename: path.slice(path.lastIndexOf('/') + 1),
+      text,
+      resourceType: typeof predefined.resourceType === 'string' ? predefined.resourceType : undefined,
+      id: typeof predefined.id === 'string' ? predefined.id : undefined,
+      url: typeof predefined.url === 'string' ? predefined.url : undefined,
+      definition: { kind: 'predefined-resource', path, line: 1, column: 0 },
+    })
+    : undefined;
+  return Object.freeze({
+    sourceText: text,
+    fsh: path.endsWith('.fsh'),
+    predefined,
+    predefinedDisplay,
+    siteFile,
+    siteBase64: siteFile ? utf8ToBase64(text) : undefined,
+  });
 }
 
 function validateState(value: unknown, projectId: string): WorkspaceState | null {
@@ -549,6 +595,13 @@ export class Workspace {
   private state: WorkspaceState;
   private text: Map<string, string>;
   private binary: Map<string, string>;
+  /**
+   * The current source node's deterministic per-file projection. This is not a
+   * generation cache: there is at most one entry per live text path, and an
+   * edit replaces that path's derivation. Captures only assemble immutable
+   * records from these exact path/text-owned values.
+   */
+  private projectedText = new Map<string, WorkspaceTextProjection>();
 
   constructor(
     private persistence: WorkspacePersistence,
@@ -593,6 +646,7 @@ export class Workspace {
 
   async write(path: string, text: string): Promise<void> {
     const existed = this.text.has(path);
+    if (this.text.get(path) !== text) this.projectedText.delete(path);
     this.text.set(path, text);
     this.state.dirty = true;
     this.state.textPaths = [...this.text.keys()].sort();
@@ -616,6 +670,7 @@ export class Workspace {
 
   async delete(path: string): Promise<void> {
     if (!this.text.delete(path)) return;
+    this.projectedText.delete(path);
     this.state.dirty = true;
     this.state.textPaths = [...this.text.keys()].sort();
     const state = this.stateSnapshot();
@@ -632,6 +687,8 @@ export class Workspace {
     if (text == null || from === to) return;
     this.text.delete(from);
     this.text.set(to, text);
+    this.projectedText.delete(from);
+    this.projectedText.delete(to);
     this.state.dirty = true;
     this.state.textPaths = [...this.text.keys()].sort();
     const state = this.stateSnapshot();
@@ -650,33 +707,15 @@ export class Workspace {
     const siteFiles: Record<string, string> = {};
     const predefinedDisplay: ResourceView[] = [];
     for (const [path, text] of this.text) {
-      if (path.endsWith('.fsh')) files[path] = text;
-      const predefinedPath = (
-        (path.startsWith('input/resources/') || path.startsWith('input/examples/'))
-        && path.endsWith('.json')
-      );
-      if (predefinedPath) {
-        const body = deepFreeze(JSON.parse(text) as Record<string, unknown>);
-        predefined[path] = body;
-        predefinedDisplay.push({
-          filename: path.slice(path.lastIndexOf('/') + 1),
-          text,
-          resourceType: typeof body.resourceType === 'string' ? body.resourceType : undefined,
-          id: typeof body.id === 'string' ? body.id : undefined,
-          url: typeof body.url === 'string' ? body.url : undefined,
-          definition: { kind: 'predefined-resource', path, line: 1, column: 0 },
-        });
+      let projected = this.projectedText.get(path);
+      if (!projected || projected.sourceText !== text) {
+        projected = projectWorkspaceText(path, text);
+        this.projectedText.set(path, projected);
       }
-      if (
-        path.startsWith('input/pagecontent/')
-        || path.startsWith('input/pages/')
-        || path.startsWith('input/includes/')
-        || path.startsWith('input/intro-notes/')
-        || path.startsWith('input/resource-docs/')
-        || path.startsWith('input/images-source/')
-        || path.startsWith('input/data/')
-        || predefinedPath
-      ) siteFiles[path] = utf8ToBase64(text);
+      if (projected.fsh) files[path] = text;
+      if (projected.predefined) predefined[path] = projected.predefined;
+      if (projected.predefinedDisplay) predefinedDisplay.push(projected.predefinedDisplay);
+      if (projected.siteFile) siteFiles[path] = projected.siteBase64 ?? '';
     }
     for (const [path, base64] of this.binary) siteFiles[path] = base64;
     predefinedDisplay.sort((left, right) => left.filename.localeCompare(right.filename));

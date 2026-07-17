@@ -21,7 +21,7 @@ import {
   publishPreviewSource,
   restorePersistedPreviewSource,
 } from './preview/previewWindow';
-import { LatestTaskQueue, editDebounceMs, type TaskLease } from './build/latestTaskQueue';
+import { LatestTaskQueue, type TaskLease } from './build/latestTaskQueue';
 import { getCuratedCatalogs, type TemplateCatalog } from './adapters/templateCatalog';
 
 const GENERATOR_KEY = 'igEditor.siteGenerator';
@@ -139,6 +139,32 @@ function recordRuntimeMetric(event: BuildEvent): void {
   debug?.metrics?.push({ at: performance.now(), event });
 }
 
+function useWidePreviewCompanion(onBeforeNarrow: () => void): boolean {
+  const onBeforeNarrowRef = useRef(onBeforeNarrow);
+  onBeforeNarrowRef.current = onBeforeNarrow;
+  const [wide, setWide] = useState(
+    () => typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(min-width: 1200px)').matches,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const query = window.matchMedia('(min-width: 1200px)');
+    const update = () => {
+      // Run before React hides the companion so focus inside its iframe can be
+      // returned to the selected workspace tab rather than falling to <body>.
+      if (!query.matches) onBeforeNarrowRef.current();
+      setWide(query.matches);
+    };
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  return wide;
+}
+
 export function App({ startup }: { startup: EngineStartup }) {
   const engineRef = useRef<EngineClient | null>(startup.engine);
   const bootstrapMetricsRecordedRef = useRef(false);
@@ -192,6 +218,16 @@ export function App({ startup }: { startup: EngineStartup }) {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(
     () => initialWorkspaceFor(projectIdRef.current),
   );
+  const previewPanelRef = useRef<HTMLElement | null>(null);
+  const restoreFocusBeforeNarrowing = useCallback(() => {
+    // Selected Preview remains visible and full-width below the breakpoint;
+    // only a companion beside Author/Explore is about to disappear.
+    if (workspaceMode === 'preview') return;
+    const panel = previewPanelRef.current;
+    if (!panel || !document.activeElement || !panel.contains(document.activeElement)) return;
+    requestAnimationFrame(() => document.getElementById(`workspace-tab-${workspaceMode}`)?.focus());
+  }, [workspaceMode]);
+  const widePreviewCompanion = useWidePreviewCompanion(restoreFocusBeforeNarrowing);
   // Expensive surfaces mount on first use, then remain mounted so Monaco state
   // and preview scroll/history survive mode switches without doing hidden work
   // during an ordinary published-guide open.
@@ -543,6 +579,7 @@ export function App({ startup }: { startup: EngineStartup }) {
       // Compilation remains useful UI state even if catalog validation,
       // rendering, or preview publication subsequently fails.
       showCompiled(build.compilation);
+      if (!lease.isLatest()) return;
       const catalog = await build.outputs();
       const pages = catalog.outputs.filter((output) => output.kind === 'page');
       report(spanEvent('site.pipeline-to-catalog', 'window', siteStartedMs, {
@@ -608,13 +645,13 @@ export function App({ startup }: { startup: EngineStartup }) {
     engine: EngineClient,
     genId: string,
   ) => {
-    const capture = workspace.capture(1700000000);
-    const selectedTemplate = capture.projectId === TINY_PROJECT_ID
-      ? tinyTemplateRef.current
-      : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
-    await buildQueueRef.current.enqueue((lease) =>
-      performBuildSite(capture, engine, genId, selectedTemplate, lease),
-    );
+    await buildQueueRef.current.enqueue((lease) => {
+      const capture = workspace.capture(1700000000);
+      const selectedTemplate = capture.projectId === TINY_PROJECT_ID
+        ? tinyTemplateRef.current
+        : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
+      return performBuildSite(capture, engine, genId, selectedTemplate, lease);
+    });
   }, [performBuildSite]);
 
   // Template switch: persist + rebuild the preview for the new generator.
@@ -657,55 +694,62 @@ export function App({ startup }: { startup: EngineStartup }) {
   }, [enqueueSiteBuild]);
 
   // ---- prepare full project + selected generator in one worker request ------
-  const runCompile = useCallback(async (workspace: Workspace, engine: EngineClient): Promise<BuildOutcome> => {
+  const executeCompile = useCallback(async (
+    workspace: Workspace,
+    engine: EngineClient,
+    lease: TaskLease,
+  ): Promise<BuildOutcome> => {
     if (!engine.initialized) return { ok: false, error: 'engine is not initialized' };
-    // Snapshot before entering the queue: loading another IG or typing while an
-    // older wasm operation finishes cannot change this request's inputs midway.
+    // Capture only once this request owns the serialized engine. Workspace
+    // projections are immutable and structurally shared, so edits can replace
+    // a pending request without repeatedly encoding the whole project.
     const capture = workspace.capture(1700000000);
     const genId = localStorage.getItem(GENERATOR_KEY) || defaultGeneratorFor(capture.projectId);
     const selectedTemplate = capture.projectId === TINY_PROJECT_ID
       ? tinyTemplateRef.current
       : localStorage.getItem(TEMPLATE_KEY) || DEFAULT_TEMPLATE;
     let failure: unknown = null;
-    const outcome = await buildQueueRef.current.enqueue(async (lease) => {
-      if (lease.isLatest()) setCompiling(true);
-      try {
-        await performBuildSite(capture, engine, genId, selectedTemplate, lease);
-        if (lease.isLatest()) setBlockedPackages([]);
-      } catch (e) {
-        failure = e;
-        if (lease.isLatest() && e instanceof BuildFailure && e.detail.phase === 'compilation') {
-          setPredefinedResources([]);
-          setCompile({
-            resources: [],
-            diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
-          });
-          setCompileMs(0);
-        }
-      } finally {
-        if (lease.isLatest()) setCompiling(false);
+    if (lease.isLatest()) setCompiling(true);
+    try {
+      await performBuildSite(capture, engine, genId, selectedTemplate, lease);
+      if (lease.isLatest()) setBlockedPackages([]);
+    } catch (e) {
+      failure = e;
+      if (lease.isLatest() && e instanceof BuildFailure && e.detail.phase === 'compilation') {
+        setPredefinedResources([]);
+        setCompile({
+          resources: [],
+          diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
+        });
+        setCompileMs(0);
       }
-    });
-    if (!outcome.latest) return { ok: false, error: 'build superseded by a newer request' };
+    } finally {
+      if (lease.isLatest()) setCompiling(false);
+    }
     return failure == null ? { ok: true } : { ok: false, error: String(failure) };
   }, [performBuildSite]);
 
-  // ---- debounced compile on edit ------------------------------------------
-  const debounceRef = useRef<number | null>(null);
-  const scheduleCompile = useCallback((editedPath: string) => {
+  const runCompile = useCallback(async (workspace: Workspace, engine: EngineClient): Promise<BuildOutcome> => {
+    const outcome = await buildQueueRef.current.enqueue((lease) => executeCompile(workspace, engine, lease));
+    if (!outcome.latest) return { ok: false, error: 'build superseded by a newer request' };
+    return outcome.value;
+  }, [executeCompile]);
+
+  // ---- leading, latest-only compile on edit -------------------------------
+  const scheduleCompile = useCallback(() => {
     if (!projectWorkspace || !engineRef.current) return;
-    // Source changed now, even though the expensive successor is deliberately
-    // debounced. Revoke an in-flight capture's publication lease immediately so
-    // it cannot briefly present itself as current during that debounce window.
-    buildQueueRef.current.invalidate();
-    if (debounceRef.current) clearTimeout(debounceRef.current);
     const editedWorkspace = projectWorkspace;
-    debounceRef.current = window.setTimeout(() => {
-      debounceRef.current = null;
-      if (projectWorkspaceRef.current !== editedWorkspace) return;
-      void runCompile(editedWorkspace, engineRef.current!);
-    }, editDebounceMs(editedPath));
-  }, [projectWorkspace, runCompile]);
+    const engine = engineRef.current;
+    // enqueueLatest revokes the running lease immediately. Before work starts,
+    // same-turn edits coalesce; during wasm, they replace the sole pending
+    // successor. No fixed typing delay and no unbounded build backlog remain.
+    void buildQueueRef.current.enqueueLatest(async (lease) => {
+      if (projectWorkspaceRef.current !== editedWorkspace || engineRef.current !== engine) {
+        return { ok: false, error: 'workspace changed before build started' } satisfies BuildOutcome;
+      }
+      return executeCompile(editedWorkspace, engine, lease);
+    }).catch(() => {});
+  }, [projectWorkspace, executeCompile]);
 
   // ---- open a baked project -------------------------------------------------
   const openProject = useCallback(async (projectId: string) => {
@@ -716,10 +760,6 @@ export function App({ startup }: { startup: EngineStartup }) {
     // inactive project workspace, so the current working copy stays coherent
     // if fetch/verification/import fails.
     buildQueueRef.current.invalidate();
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
     setCompiling(false);
     setSiteBuilding(false);
     // Surface the SAME staged progress the boot path shows for the whole open:
@@ -741,12 +781,6 @@ export function App({ startup }: { startup: EngineStartup }) {
       const meta = await loadProject(workspaces, projectId, emit);
       if (openRequestRef.current !== requestId) return;
       // The previous project remains editable while source acquisition runs.
-      // Cancel an edit timer created during that interval before swapping owners;
-      // its callback also checks owner identity as a final stale-work guard.
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-        debounceRef.current = null;
-      }
       const nextWorkspace = meta.workspace;
       // Publish the active workspace pointer only after its complete generation
       // exists. A failed source import never makes localStorage disagree with
@@ -814,7 +848,7 @@ export function App({ startup }: { startup: EngineStartup }) {
       setActiveText(text);
       void projectWorkspace.write(activePath, text);
       setPreviewStale(true);
-      scheduleCompile(activePath);
+      scheduleCompile();
     },
     [projectWorkspace, activePath, scheduleCompile],
   );
@@ -859,6 +893,20 @@ export function App({ startup }: { startup: EngineStartup }) {
 
   const activeResource = resources.find((resource) => resourceIdentity(resource) === selectedResource) ?? null;
   const currentProjectPages = siteIgId === projectIdRef.current ? sitePages : null;
+  const previewCompanion = widePreviewCompanion
+    && workspaceMode !== 'preview'
+    && activatedModes.has('preview')
+    && Boolean(currentProjectPages);
+  const previewVisible = workspaceMode === 'preview' || previewCompanion;
+  const previousPreviewVisibleRef = useRef(previewVisible);
+  useEffect(() => {
+    const wasVisible = previousPreviewVisibleRef.current;
+    previousPreviewVisibleRef.current = previewVisible;
+    if (!wasVisible || previewVisible) return;
+    const panel = previewPanelRef.current;
+    if (!panel || !document.activeElement || !panel.contains(document.activeElement)) return;
+    requestAnimationFrame(() => document.getElementById(`workspace-tab-${workspaceMode}`)?.focus());
+  }, [previewVisible, workspaceMode]);
   const selectedResourcePage = primaryPageForResource(currentProjectPages, activeResource);
   const shownSitePage = currentProjectPages
     ?.find((candidate) => candidate.path === selectedSitePage) ?? null;
@@ -1135,12 +1183,23 @@ export function App({ startup }: { startup: EngineStartup }) {
                 onKeyDown={(event) => onWorkspaceTabKeyDown(event, mode)}
               >
                 {label}
+                {workspaceMode === mode && (
+                  <span
+                    className={`workspace-state-indicator state-${buildState}`}
+                    title={statusMessage ?? undefined}
+                    aria-hidden="true"
+                  />
+                )}
                 {mode === 'explore' && definitionsPending && <span className="tab-busy">Preparing</span>}
                 {mode === 'preview' && siteBuilding && <span className="tab-busy">Building</span>}
               </button>
             ))}
           </nav>
-          <div className="workspace-views" data-mode={workspaceMode}>
+          <div
+            className="workspace-views"
+            data-mode={workspaceMode}
+            data-preview-companion={previewCompanion ? 'true' : undefined}
+          >
             <section id="workspace-panel-author" role="tabpanel" aria-labelledby="workspace-tab-author" className="workspace-view author-workspace" hidden={workspaceMode !== 'author'}>
               <aside className="sidebar source-sidebar">
                 <div className="sidebar-header">Source files</div>
@@ -1215,7 +1274,15 @@ export function App({ startup }: { startup: EngineStartup }) {
               </section>
             </section>
 
-            <section id="workspace-panel-preview" role="tabpanel" aria-labelledby="workspace-tab-preview" className="workspace-view preview-workspace" hidden={workspaceMode !== 'preview'}>
+            <section
+              ref={previewPanelRef}
+              id="workspace-panel-preview"
+              role={previewCompanion ? 'region' : 'tabpanel'}
+              aria-labelledby="workspace-tab-preview"
+              aria-busy={siteBuilding}
+              className="workspace-view preview-workspace"
+              hidden={!previewVisible}
+            >
               {activatedModes.has('preview') && engineRef.current ? (
                 <PreviewPane
                   igId={siteIgId}

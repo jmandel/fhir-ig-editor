@@ -280,8 +280,12 @@ body {
   max-width: 100%;
 }
 .project-overview {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px 14px;
   overflow: hidden;
-  padding: 12px 16px 10px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(120deg, var(--bg-2), var(--bg));
 }
@@ -293,27 +297,39 @@ body {
   gap: 8px 12px;
   flex-wrap: wrap;
 }
-.overview-lead { justify-content: space-between; }
-.overview-lead h1 { margin: 2px 0; font-size: 18px; }
+.overview-lead { justify-content: flex-start; flex-wrap: nowrap; min-width: 0; }
+.overview-lead > div { min-width: 0; }
+.overview-eyebrow { display: none; }
+.overview-lead h1 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .overview-identity { color: var(--fg-dim); font-size: 11px; }
 .overview-identity code { color: var(--fg); font-family: var(--mono); }
 .overview-stats {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(72px, 1fr));
-  gap: 8px;
-  margin: 10px 0;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 .overview-stat {
-  min-width: 0;
-  padding: 6px 8px;
+  flex: 0 0 auto;
+  min-width: 60px;
+  padding: 3px 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.015);
 }
-.overview-stat strong { display: block; font-size: 16px; }
+.overview-stat strong { display: block; font-size: 12px; line-height: 1.1; }
 .overview-stat span { display: block; color: var(--fg-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.overview-actions .btn { padding: 5px 10px; }
-.overview-problems { margin-left: auto; color: var(--ok); font-size: 11px; }
+.overview-actions { flex-wrap: nowrap; }
+.overview-actions .btn { display: none; }
+.overview-problems { margin-left: 0; color: var(--ok); font-size: 11px; white-space: nowrap; }
 .overview-problems.is-pending { color: var(--accent); }
 .overview-problems.has-warnings { color: var(--warn); }
 .overview-problems.has-errors { color: var(--error); }
@@ -345,9 +361,9 @@ button.overview-problems {
 .state-failed-preview { color: var(--error); }
 .artifact-trail {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 5px;
-  padding: 6px 10px;
+  padding: 4px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   overflow-x: auto;
@@ -370,9 +386,12 @@ button.overview-problems {
   white-space: nowrap;
 }
 .artifact-trail-step {
-  min-width: 128px;
+  display: flex;
+  align-items: baseline;
+  min-width: 112px;
   max-width: 250px;
-  padding: 4px 8px;
+  padding: 3px 7px;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--bg-2);
@@ -388,8 +407,10 @@ button.overview-problems {
 }
 .artifact-trail-step strong,
 .artifact-trail-step span { display: block; }
-.artifact-trail-step strong { font-size: 10px; }
+.artifact-trail-step strong { flex: 0 0 auto; font-size: 10px; }
 .artifact-trail-step span {
+  min-width: 0;
+  margin-left: 6px;
   overflow: hidden;
   color: var(--fg-dim);
   font-size: 10px;
@@ -398,6 +419,14 @@ button.overview-problems {
 }
 .artifact-trail-arrow { align-self: center; color: var(--fg-dim); }
 .workspace-tabs { padding-left: 8px; }
+.workspace-state-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
+}
 .workspace-views,
 .workspace-view { min-height: 0; overflow: hidden; }
 .workspace-view[hidden] { display: none !important; }
@@ -408,6 +437,25 @@ button.overview-problems {
   grid-template-columns: 240px minmax(0, 1fr);
 }
 .preview-workspace { height: 100%; }
+@media (min-width: 1200px) {
+  .workspace-views[data-preview-companion='true'] {
+    display: grid;
+    grid-template-columns: minmax(720px, 3fr) minmax(420px, 2fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .workspace-views[data-preview-companion='true'] > .author-workspace,
+  .workspace-views[data-preview-companion='true'] > .explore-workspace {
+    grid-row: 1;
+    grid-column: 1;
+    min-width: 0;
+  }
+  .workspace-views[data-preview-companion='true'] > .preview-workspace {
+    grid-row: 1;
+    grid-column: 2;
+    min-width: 0;
+    border-left: 1px solid var(--border);
+  }
+}
 .sidebar {
   background: var(--bg-2);
   border-right: 1px solid var(--border);
@@ -1428,19 +1476,21 @@ button.diag-source:focus-visible {
   }
   .topbar {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 6px 8px;
     padding: max(7px, env(safe-area-inset-top)) 8px 7px;
   }
-  .brand { grid-row: 1; font-size: 12px; }
+  .brand { grid-row: 1; grid-column: 1; font-size: 12px; }
   .topbar-project {
-    grid-row: 3;
+    grid-row: 1;
+    grid-column: 2;
     width: 100%;
     max-width: none;
     font-size: 11px;
   }
   .topbar-actions {
     grid-row: 2;
+    grid-column: 1 / -1;
     width: 100%;
     min-width: 0;
     margin-left: 0;
@@ -1455,40 +1505,13 @@ button.diag-source:focus-visible {
   .welcome-action-card { padding: 16px; }
   .welcome-action-card p { min-height: 0; }
 
-  /* The overview remains an overview on a phone, but it must not become a
-     dashboard stacked above the actual work. Keep identity, every count,
-     diagnostics, and state; make the counts a single horizontally scrollable
-     row and remove the three action buttons duplicated by the tabs below. */
-  .project-overview { padding: 6px 8px 5px; }
-  .overview-lead { flex-wrap: nowrap; }
-  .overview-lead > div { min-width: 0; }
-  .overview-eyebrow { display: none; }
-  .overview-lead h1 {
-    margin: 0;
-    overflow: hidden;
-    font-size: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .overview-identity { gap: 4px 8px; }
-  .overview-stats {
-    grid-template-columns: none;
-    grid-auto-columns: minmax(76px, 1fr);
-    grid-auto-flow: column;
-    gap: 4px;
-    margin: 5px 0 3px;
-    overflow-x: auto;
-    scrollbar-width: thin;
-  }
-  .overview-stat { padding: 4px 6px; }
-  .overview-stat strong { font-size: 14px; }
-  .overview-actions .btn { display: none; }
-  .overview-problems { flex-basis: 100%; margin-left: 0; line-height: 16px; }
-  button.overview-problems,
+  /* At a split-window/mobile width, the guide title is already in the top bar
+     and these two dashboard rows duplicate the tabs and pickers below. Give
+     the selected authoring/inspection surface the height by default. */
+  .project-overview,
+  .artifact-trail { display: none; }
+  .workspace-shell { grid-template-rows: auto minmax(0, 1fr); }
   .diag-actions button { min-height: 44px; }
-  .artifact-trail { padding: 5px 6px; }
-  .artifact-trail-subject { min-width: 110px; max-width: 150px; }
-  .artifact-trail-step { min-width: 112px; }
   .workspace-tabs {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1507,21 +1530,6 @@ button.diag-source:focus-visible {
      targets physically reachable instead of letting status text push Preview
      beyond the fixed mobile shell. */
   .workspace-tabs .tab-busy { display: none; }
-
-  /* Mobile is one surface at a time. Once Preview is selected, its own page
-     picker is the relevant context; retaining the overview and artifact trail
-     above the embedded site recreated the unusable ~50px strip reported on a
-     real phone. Author/Explore retain the trail where it is actionable. */
-  .workspace-shell:has(.workspace-views[data-mode='preview']) .project-overview,
-  .workspace-shell:has(.workspace-views[data-mode='preview']) .artifact-trail {
-    display: none;
-  }
-  /* Removing those first two grid items changes auto-placement: without a
-     matching two-row template, the preview lands in an `auto` row and sizes to
-     its content while the unused 1fr track sits below it. */
-  .workspace-shell:has(.workspace-views[data-mode='preview']) {
-    grid-template-rows: auto minmax(0, 1fr);
-  }
 
   .author-workspace,
   .explore-workspace {

@@ -541,14 +541,19 @@ export async function publishPreviewSource(
   // process-independent and has no role in cache/content identity.
   const order = Math.max(Date.now(), generation, lastPublicationOrder + 1);
   const committedOrder = await commitToPreviewWorker(published, order, mayCommit);
-  if (committedOrder == null || !mayCommit()) return false;
+  if (committedOrder == null) return false;
+  // Once the Service Worker acknowledges the durable pointer, mirror that
+  // exact authority locally even if a newer edit revoked the UI lease during
+  // the write. Returning false still prevents the superseded generation from
+  // changing React state; the next build will advance both authorities again.
+  const stillCurrent = mayCommit();
   lastPublicationOrder = committedOrder;
   source = published;
   sourceGeneration = committedOrder;
-  if (previous && previous.igId === published.igId) {
+  if (stillCurrent && previous && previous.igId === published.igId) {
     void refreshOpenPreviews(previous, published, committedOrder);
   }
-  return true;
+  return stillCurrent;
 }
 
 async function refreshOpenPreviews(
