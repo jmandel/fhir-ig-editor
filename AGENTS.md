@@ -11,13 +11,29 @@
 - The public site API remains exactly `prepare -> Build -> outputs/render/finalize`.
 - The two Liquid implementations are intentional: Rust Liquid for Publisher and LiquidJS for Cycle. Do not add a third.
 
-## Current live correctness issue
+## Current live correctness checkpoint
 
-The deployed engine `c3c9f88` omits Publisher-owned `en/toc.html` and
-`en/artifacts.html`, so the Service Worker correctly reports “No verified
-output” for those paths. The dirty tree contains a locally verified structural
-repair, but the live site is not fixed until the currently authorized landing,
-successful Pages run, and disposable-profile live verification.
+The structural-output and architecture landing is live. Engine `652581b8` is
+pushed identically to `snapshot-gen` and `main`; Cycle remains unchanged at
+`d49e0b57`; editor `d0cf0228` is pushed to `main`. Pages run `29603160517`
+passed every native/Rust/WASM/Cycle/app/Chromium build, artifact upload, and
+deploy step. The live origin serves app `assets/index-IDEn-OIK.js`, Worker
+`assets/engine.worker-DsQKJwf8.js`, and an optimized 8,011,948-byte WASM that
+reports engine `652581b`.
+
+The disposable-profile live receipt
+`/tmp/fhir-landing-live-full-652581b8.log` ends in `E2E GATE: PASS`. It proves
+Tiny SQL A -> B -> A, one-shell US Core CarePlan, 1,535/1,535 images and 85/85
+assets, US Core TOC and Artifacts from `build-cache` with `fallback:false`,
+real mCODE without a dependency error, Genomics, Cycle, restart persistence,
+hot-reload scroll preservation, and mobile geometry. The live run explicitly
+disables only the local-artifact mixed prepared/cold transport-coverage
+assertion; Pages CI retains that assertion by default. Independent fresh-origin
+receipts are also `ok:true`: US Core at
+`/tmp/fhir-landing-live-uscore-652581b8.json` (cold 51.011 s, reload 6.875 s,
+exact edit 1.736 s, reopen 0.872 s) and mCODE at
+`/tmp/fhir-landing-live-mcode-652581b8.json` (cold 35.653 s, reload 6.316 s,
+exact edit 1.251 s, reopen 0.528 s).
 
 The exact post-cleanup Pages artifact
 `a632ce642e03e36bd3f533f7e9f1ed3226b08bc978b619849b21970b83c87aac`
@@ -31,8 +47,8 @@ The committed-stamp WASM is 8,038,038 bytes, SHA-256 `386df225...`, and reports
 engine `652581b8`. The focused Rust gate passes SiteEngine 51/52 with one
 fixture ignore, site_producer 14/14 plus 7/7 integrations, the full widened
 release suite and wasm32 check; app 155/155, Cycle 240/240, and lifecycle/
-identity 42/42 also pass. This remains local evidence until dependency-order
-push, successful Pages deployment, and disposable-profile live verification.
+identity 42/42 also pass. This is the exact local artifact evidence that
+preceded the successful landing and independent live verification above.
 
 The exact current four-guide frozen differential passes at
 `vendor/sushi-rs/target/incremental-differential/landing-deletion-four-guide-20260717/aggregate.json`:
@@ -42,8 +58,8 @@ ContentRef/body, ClosedSiteBuild, diagnostics, and final SiteOutput.
 
 ## Maintainability cleanup checkpoint (2026-07-17)
 
-The deletion-first reconstruction is now the landing candidate, subject to the
-exact rebuilt WASM/browser/deployment gates. The committed engine delta from
+The deletion-first reconstruction is landed and independently live-verified.
+The committed engine delta from
 `c3c9f881` is 8,612 additions / 6,685 deletions (net +1,927); production crate
 source is net +3,116 including SQLite, below the 3.5k–4.5k review budget. Disabled
 dependency observation/page replay and the whole snapshot-completed cache are
@@ -52,7 +68,7 @@ preparation, and runtime. `CompilationCandidate` and `TargetCandidate` remain
 off-side until close/verification; the canonical ProjectRevision path has one
 infallible `commit_success`.
 
-Land the result as coherent dependency commits, never one opaque interwoven
+It was landed as coherent dependency commits rather than one opaque interwoven
 commit. No local green gate is deployment evidence.
 
 ### Landing contents
@@ -150,7 +166,7 @@ Every optimization slice needs an independent measurement; every correctness
 slice needs focused tests plus the relevant four-guide/browser/restore gates.
 Measurement code must be generic, test-only, or removed before landing.
 
-Authorized landing order:
+Completed landing order:
 
 1. Commit the engine as coherent deletion/structural-SQL/snapshot/core/docs
    slices and push `snapshot-gen`, then fast-forward identical `main`.

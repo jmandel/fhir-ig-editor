@@ -137,6 +137,15 @@ navigation, reload/history, IG-scoped hot reload, scroll preservation, mobile
 reachability, and editor-close cache/fallback behavior. Structural navigation
 must report `fallback:false`; a shell or stale preview is not a pass.
 
+For an independent remote-origin run, `E2E_TIMEOUT_SCALE` may extend waits
+without also emulating a slower CPU. `E2E_REQUIRE_MIXED_PREPARED_TRANSPORT=0`
+may be used only when the remote CDN cannot exercise the local artifact's
+intentional mixed prepared/cold transport fixture. The Pages/local artifact
+gate must retain the default value `1`; all rendering, navigation, persistence,
+race, and mobile assertions remain mandatory in either mode. The harness waits
+for the separately scoped preview Service Worker to activate before testing its
+protocol, because remote delivery can expose a race hidden by loopback serving.
+
 The runtime-closure assertion requires zero broken images, zero missing or
 HTML-fallback same-origin assets, required table globals, the exact gated jQuery
 compatibility behavior, and no unexpected uncaught browser exceptions.

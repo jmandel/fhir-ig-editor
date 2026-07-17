@@ -20,7 +20,16 @@ const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
 const PREVIEW_SW_PROTOCOL = 6;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
-const timeoutScale = Math.max(1, requestedCpuThrottle);
+const requestedTimeoutScale = Number(process.env.E2E_TIMEOUT_SCALE || 1);
+if (!Number.isFinite(requestedTimeoutScale) || requestedTimeoutScale < 1) {
+  throw new Error('E2E_TIMEOUT_SCALE must be a finite number >= 1');
+}
+const mixedTransportSetting = process.env.E2E_REQUIRE_MIXED_PREPARED_TRANSPORT ?? '1';
+if (mixedTransportSetting !== '0' && mixedTransportSetting !== '1') {
+  throw new Error('E2E_REQUIRE_MIXED_PREPARED_TRANSPORT must be 0 or 1');
+}
+const requireMixedPreparedTransport = mixedTransportSetting === '1';
+const timeoutScale = Math.max(1, requestedCpuThrottle, requestedTimeoutScale);
 // Preserve the release budget on normal CI. An explicitly throttled functional
 // run scales the wall-clock allowance with the emulated CPU slowdown.
 // End-to-end source edit -> rebuilt/published iframe. The exact private-reuse
@@ -860,7 +869,7 @@ if (process.env.E2E_MOBILE === '1') {
   }, id);
 }
 
-const results = {};
+const results = { requireMixedPreparedTransport };
 function fail(msg) {
   console.error('FAIL:', msg);
   console.error('--- page logs ---\n' + logs.join('\n'));
@@ -953,6 +962,14 @@ try {
   // A returning browser may have an older worker active for the same scope.
   // The app must wait for the versioned control protocol instead of sending a
   // commit that the old worker silently ignores (mobile timeout regression).
+  // Engine readiness and installation of this separately scoped worker are
+  // independent. A remote origin can expose that race even when loopback CI
+  // cannot, so wait for activation before testing the protocol handshake.
+  await waitFor(ws, `(async () => {
+    const scope = new URL('preview/', location.href).href;
+    const registration = await navigator.serviceWorker.getRegistration(scope);
+    return registration?.active?.state === 'activated';
+  })()`, 30000, 'preview Service Worker activation');
   results.previewWorker = await evalJs(ws, `(async () => {
     const scope = new URL('preview/', location.href).href;
     const registration = await navigator.serviceWorker.getRegistration(scope);
@@ -3561,7 +3578,8 @@ try {
       console.error('assert: byte download showed no visible MB counter:', JSON.stringify(results.openProgressByteLabels)); ok = false;
     }
     const mixed = results.mixedPreparedTransport || {};
-    if (!(mixed.preparedHits?.length > 0 && mixed.mixedMounts > 0)) {
+    if (requireMixedPreparedTransport
+        && !(mixed.preparedHits?.length > 0 && mixed.mixedMounts > 0)) {
       console.error('assert: US Core did not exercise a mixed warm/cold atomic package mount:', JSON.stringify(mixed)); ok = false;
     }
     if (mixed.refetched?.length) {
