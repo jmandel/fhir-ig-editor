@@ -24,6 +24,8 @@
 //                         whole disposable Chrome process-tree CPU quota;
 //                         use run-project-benchmark.sh to apply it
 //   BENCH_MOBILE=1        emulate a 412x915, deviceScaleFactor=3 viewport
+//   BENCH_WIDE_PREVIEW=1  emulate 1440x900 and keep the activated Preview
+//                         visibly docked while Author/Explore remains selected
 //   BENCH_EDIT=0          skip the project's representative edit (default 1)
 //   BENCH_TIMEOUT_MS=300000 per readiness wait before throttle scaling
 
@@ -35,6 +37,8 @@ import {
   CdpTransportError,
   TopLevelNavigationLifecycle,
   createCatalogSelectionProbe,
+  isExactPreviewSuccessor,
+  isRetainedPreviewBinding,
   isCommittedTopLevelFrame,
   reconcileWorkerTargetEvidence,
   reconcileCompletedWorkerBody,
@@ -118,6 +122,10 @@ if (!Number.isSafeInteger(cdpCallTimeoutMs)) {
   throw new Error('scaled BENCH_CDP_CALL_TIMEOUT_MS exceeds safe integer range');
 }
 const mobile = booleanSetting('BENCH_MOBILE', '0');
+const widePreview = booleanSetting('BENCH_WIDE_PREVIEW', '0');
+if (mobile && widePreview) {
+  throw new Error('BENCH_MOBILE and BENCH_WIDE_PREVIEW are mutually exclusive');
+}
 const legacyEdit = process.env.BENCH_PROFILE_EDIT;
 if (legacyEdit != null && process.env.BENCH_EDIT != null && legacyEdit !== process.env.BENCH_EDIT) {
   throw new Error('BENCH_EDIT and legacy BENCH_PROFILE_EDIT disagree');
@@ -155,7 +163,7 @@ if (!Object.hasOwn(NETWORK_PROFILES, networkProfile)) {
 const EDIT_SCENARIOS = {
   tiny: {
     sourceKind: 'fsh',
-    debounceMs: 300,
+    scheduling: 'leading-latest-only',
     sourcePath: 'input/fsh/00-EditorUser.fsh',
     previewPath: 'en/StructureDefinition-editor-user.html',
     before: 'Name used while exploring the editor',
@@ -163,7 +171,7 @@ const EDIT_SCENARIOS = {
   },
   ips: {
     sourceKind: 'fsh',
-    debounceMs: 300,
+    scheduling: 'leading-latest-only',
     sourcePath: 'input/fsh/profiles/PatientUvIps.fsh',
     previewPath: 'en/StructureDefinition-Patient-uv-ips.html',
     before: 'Title: "Patient (IPS)"',
@@ -172,7 +180,7 @@ const EDIT_SCENARIOS = {
   },
   uscore: {
     sourceKind: 'json',
-    debounceMs: 300,
+    scheduling: 'leading-latest-only',
     sourcePath: 'input/resources/structuredefinition-us-core-patient.json',
     previewPath: 'en/StructureDefinition-us-core-patient.html',
     before: '"title": "US Core Patient Profile"',
@@ -181,7 +189,7 @@ const EDIT_SCENARIOS = {
   },
   mcode: {
     sourceKind: 'prose',
-    debounceMs: 120,
+    scheduling: 'leading-latest-only',
     sourcePath: 'input/pagecontent/StructureDefinition-mcode-cancer-patient-intro.md',
     previewPath: 'en/StructureDefinition-mcode-cancer-patient.html',
     before: '### Conformance',
@@ -943,10 +951,21 @@ const INSTRUMENTATION = String.raw`(() => {
       });
     }
     if (message && typeof message.id === 'number' && message.op) {
+      const args = Array.isArray(message.args) ? message.args : [];
+      const addressedBuildId = [
+        'outputs',
+        'render',
+        'finalize',
+      ].includes(message.op)
+        && typeof args[0] === 'string' ? args[0] : null;
+      const addressedPath = message.op === 'render' && typeof args[1] === 'string'
+        ? args[1] : null;
       window.__igProjectBenchmark.operations.push({
         workerId: this.__igProjectBenchmarkWorkerId,
         id: message.id,
         op: message.op,
+        buildId: addressedBuildId,
+        path: addressedPath,
         start: performance.now(),
         end: null,
       });
@@ -1386,6 +1405,8 @@ async function traceSnapshot(target, phaseStart, criticalEnd = null) {
   const operations = raw.operations.map((operation) => ({
     workerId: operation.workerId,
     op: operation.op,
+    buildId: operation.buildId ?? null,
+    path: operation.path ?? null,
     startMs: round(operation.start - phaseStart),
     durationMs: operation.duration == null ? null : round(operation.duration),
     eventEnvelopeDurationMs:
@@ -1519,13 +1540,314 @@ async function waitForProjectOpen(target, id, phaseStart) {
   throw new Error(`timeout waiting for ${id} exact generation Ready after preview Service Worker acknowledgement`);
 }
 
+async function capturePreviewBinding(target) {
+  return target.evaluate(`(() => {
+    const frame = document.querySelector('iframe.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const payload = frame?.contentWindow?.me;
+    const rect = frame?.getBoundingClientRect();
+    const style = frame ? getComputedStyle(frame) : null;
+    const panel = frame?.closest('.workspace-view');
+    const visible = !!frame
+      && frame.isConnected
+      && !panel?.hidden
+      && style?.display !== 'none'
+      && style?.visibility !== 'hidden'
+      && Number(style?.opacity ?? 1) !== 0
+      && (rect?.width || 0) > 0
+      && (rect?.height || 0) > 0
+      && (rect?.right || 0) > 0
+      && (rect?.bottom || 0) > 0
+      && (rect?.left || 0) < innerWidth
+      && (rect?.top || 0) < innerHeight;
+    return {
+      generator: typeof payload?.generator === 'string' ? payload.generator : null,
+      path: typeof payload?.path === 'string' ? payload.path : null,
+      generation: Number.isSafeInteger(payload?.generation) ? payload.generation : null,
+      contentSha256: typeof payload?.contentSha256 === 'string' ? payload.contentSha256 : null,
+      mounted: !!frame?.isConnected && !!doc,
+      visible,
+      fallback: !!doc?.querySelector('[data-igpreview-fallback]'),
+      readyState: doc?.readyState || null,
+      textLength: (doc?.body?.textContent || '').trim().length,
+      selected: document.querySelector('.preview-page-select select')?.value || null,
+    };
+  })()`);
+}
+
+async function armPreviewSuccessorPaintProbe(target, id, expectedPath, expectedText, previous) {
+  return target.evaluate(`(() => {
+    const token = crypto.randomUUID();
+    const expected = {
+      generator: ${JSON.stringify(id)},
+      path: ${JSON.stringify(expectedPath)},
+      text: ${JSON.stringify(expectedText)},
+      previousGeneration: ${JSON.stringify(previous.generation)},
+      previousSha256: ${JSON.stringify(previous.contentSha256)},
+    };
+    const probe = {
+      token,
+      armedAt: performance.now(),
+      samples: 0,
+      firstSuccessorBindingAt: null,
+      firstInteractiveAt: null,
+      firstCompleteAt: null,
+      expectedTextAt: null,
+      firstFrameCallbackAt: null,
+      secondFrameCallbackAt: null,
+      paintOpportunityComplete: false,
+      iframeLoadAt: null,
+      iframeLoadEvents: 0,
+      domGapSamples: 0,
+      completed: false,
+    };
+    window.__igSuccessorPaintProbe = probe;
+    const frame = document.querySelector('iframe.preview-frame');
+    const onLoad = () => {
+      if (window.__igSuccessorPaintProbe !== probe) return;
+      probe.iframeLoadAt ??= performance.now();
+      probe.iframeLoadEvents++;
+    };
+    frame?.addEventListener('load', onLoad);
+    const sample = () => {
+      if (window.__igSuccessorPaintProbe !== probe || probe.completed) {
+        frame?.removeEventListener('load', onLoad);
+        return;
+      }
+      probe.samples++;
+      const currentFrame = document.querySelector('iframe.preview-frame');
+      const doc = currentFrame && (currentFrame.contentDocument || currentFrame.contentWindow?.document);
+      const payload = currentFrame?.contentWindow?.me;
+      const rect = currentFrame?.getBoundingClientRect();
+      const style = currentFrame ? getComputedStyle(currentFrame) : null;
+      const panel = currentFrame?.closest('.workspace-view');
+      const visible = !!currentFrame
+        && currentFrame.isConnected
+        && !panel?.hidden
+        && style?.display !== 'none'
+        && style?.visibility !== 'hidden'
+        && Number(style?.opacity ?? 1) !== 0
+        && (rect?.width || 0) > 0
+        && (rect?.height || 0) > 0;
+      const text = doc?.body?.textContent || '';
+      const successor = payload?.generator === expected.generator
+        && payload?.path === expected.path
+        && Number.isSafeInteger(payload?.generation)
+        && payload.generation > expected.previousGeneration
+        && typeof payload?.contentSha256 === 'string'
+        && /^[0-9a-f]{64}$/u.test(payload.contentSha256)
+        && payload.contentSha256 !== expected.previousSha256;
+      if (successor) {
+        const now = performance.now();
+        probe.firstSuccessorBindingAt ??= now;
+        if (doc?.readyState === 'interactive' || doc?.readyState === 'complete') {
+          probe.firstInteractiveAt ??= now;
+        }
+        if (doc?.readyState === 'complete') probe.firstCompleteAt ??= now;
+        if (visible && text.includes(expected.text) && probe.expectedTextAt == null) {
+          probe.expectedTextAt = now;
+          const raf = currentFrame?.contentWindow?.requestAnimationFrame?.bind(currentFrame.contentWindow)
+            || requestAnimationFrame.bind(window);
+          raf(() => {
+            if (window.__igSuccessorPaintProbe !== probe) return;
+            probe.firstFrameCallbackAt = performance.now();
+            raf(() => {
+              if (window.__igSuccessorPaintProbe !== probe) return;
+              probe.secondFrameCallbackAt = performance.now();
+              probe.paintOpportunityComplete = true;
+            });
+          });
+        }
+        if (probe.paintOpportunityComplete
+            && probe.firstCompleteAt != null
+            && probe.iframeLoadAt != null) {
+          probe.completed = true;
+          frame?.removeEventListener('load', onLoad);
+          return;
+        }
+      }
+      if (visible && (!doc || text.trim().length === 0)) probe.domGapSamples++;
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+    return token;
+  })()`);
+}
+
+async function requirePreviewSuccessorPaintProbe(target, token, phaseStart) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const probe = await target.evaluate(`(() => {
+      const probe = window.__igSuccessorPaintProbe;
+      if (!probe || probe.token !== ${JSON.stringify(token)}) return null;
+      return {
+        samples: probe.samples,
+        firstSuccessorBindingAtMs: probe.firstSuccessorBindingAt == null
+          ? null : probe.firstSuccessorBindingAt - ${JSON.stringify(phaseStart)},
+        firstInteractiveAtMs: probe.firstInteractiveAt == null
+          ? null : probe.firstInteractiveAt - ${JSON.stringify(phaseStart)},
+        firstCompleteAtMs: probe.firstCompleteAt == null
+          ? null : probe.firstCompleteAt - ${JSON.stringify(phaseStart)},
+        expectedTextAtMs: probe.expectedTextAt == null
+          ? null : probe.expectedTextAt - ${JSON.stringify(phaseStart)},
+        firstFrameCallbackAtMs: probe.firstFrameCallbackAt == null
+          ? null : probe.firstFrameCallbackAt - ${JSON.stringify(phaseStart)},
+        secondFrameCallbackAtMs: probe.secondFrameCallbackAt == null
+          ? null : probe.secondFrameCallbackAt - ${JSON.stringify(phaseStart)},
+        iframeLoadAtMs: probe.iframeLoadAt == null
+          ? null : probe.iframeLoadAt - ${JSON.stringify(phaseStart)},
+        iframeLoadEvents: probe.iframeLoadEvents,
+        domGapSamples: probe.domGapSamples,
+        completed: probe.completed,
+      };
+    })()`).catch((error) => transientCdpFallback(error, null));
+    if (probe?.completed && Number.isFinite(probe.secondFrameCallbackAtMs)) {
+      return Object.fromEntries(Object.entries(probe).map(([key, value]) => [
+        key,
+        typeof value === 'number' && key.endsWith('Ms') ? round(value) : value,
+      ]));
+    }
+    await sleep(5);
+  }
+  throw new Error('timeout waiting for exact successor paint opportunity');
+}
+
+async function armWidePreviewContinuityProbe(target, previous) {
+  return target.evaluate(`(() => {
+    const frame = document.querySelector('iframe.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    if (!frame || !doc?.body) throw new Error('wide preview continuity has no baseline iframe');
+    const maxScroll = Math.max(0, doc.documentElement.scrollHeight - frame.clientHeight);
+    frame.contentWindow.scrollTo(0, Math.min(320, maxScroll));
+    const token = crypto.randomUUID();
+    const probe = {
+      token,
+      frame,
+      baselineHistoryLength: frame.contentWindow.history.length,
+      baselineHref: frame.contentWindow.location.href,
+      baselineHistoryStateJson: JSON.stringify(frame.contentWindow.history.state),
+      baselineScrollY: frame.contentWindow.scrollY,
+      samples: 0,
+      maximumPreviewIframeCount: 0,
+      sameIframeNode: true,
+      primaryWorkspaceStayedSelected: true,
+      previousVerifiedVisibleDuringBuild: true,
+      successorObserved: false,
+      stopped: false,
+    };
+    window.__igWidePreviewContinuityProbe = probe;
+    const visible = (candidate) => {
+      const rect = candidate?.getBoundingClientRect();
+      const style = candidate ? getComputedStyle(candidate) : null;
+      const panel = candidate?.closest('.workspace-view');
+      return !!candidate
+        && candidate.isConnected
+        && !panel?.hidden
+        && style?.display !== 'none'
+        && style?.visibility !== 'hidden'
+        && Number(style?.opacity ?? 1) !== 0
+        && (rect?.width || 0) > 0
+        && (rect?.height || 0) > 0
+        && (rect?.right || 0) > 0
+        && (rect?.bottom || 0) > 0
+        && (rect?.left || 0) < innerWidth
+        && (rect?.top || 0) < innerHeight;
+    };
+    const sample = () => {
+      if (window.__igWidePreviewContinuityProbe !== probe || probe.stopped) return;
+      probe.samples++;
+      const frames = [...document.querySelectorAll('iframe.preview-frame')];
+      probe.maximumPreviewIframeCount = Math.max(probe.maximumPreviewIframeCount, frames.length);
+      const current = frames[0];
+      if (frames.length !== 1 || current !== frame || !frame.isConnected) {
+        probe.sameIframeNode = false;
+      }
+      if (document.querySelector('#workspace-tab-author')?.getAttribute('aria-selected') !== 'true') {
+        probe.primaryWorkspaceStayedSelected = false;
+      }
+      const currentDoc = frame.contentDocument || frame.contentWindow?.document;
+      const payload = frame.contentWindow?.me;
+      const previousStillExact = payload?.generator === ${JSON.stringify(previous.generator)}
+        && payload?.path === ${JSON.stringify(previous.path)}
+        && payload?.generation === ${JSON.stringify(previous.generation)}
+        && payload?.contentSha256 === ${JSON.stringify(previous.contentSha256)};
+      if (!previousStillExact) probe.successorObserved = true;
+      if (!visible(frame) || !(currentDoc?.body?.textContent || '').trim()) {
+        probe.previousVerifiedVisibleDuringBuild = false;
+      }
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+    return token;
+  })()`);
+}
+
+async function finishWidePreviewContinuityProbe(target, token) {
+  return target.evaluate(`(() => {
+    const probe = window.__igWidePreviewContinuityProbe;
+    if (!probe || probe.token !== ${JSON.stringify(token)}) {
+      throw new Error('wide preview continuity probe token mismatch');
+    }
+    probe.stopped = true;
+    const frame = document.querySelector('iframe.preview-frame');
+    const payload = frame?.contentWindow?.me;
+    const previewRect = frame?.closest('.preview-workspace')?.getBoundingClientRect();
+    const primaryRect = document.querySelector('.author-workspace:not([hidden])')
+      ?.getBoundingClientRect();
+    const result = {
+      samples: probe.samples,
+      sameIframeNode: probe.sameIframeNode && frame === probe.frame,
+      maximumPreviewIframeCount: probe.maximumPreviewIframeCount,
+      previousVerifiedVisibleDuringBuild: probe.previousVerifiedVisibleDuringBuild,
+      successorObserved: probe.successorObserved,
+      primaryWorkspaceStayedSelected: probe.primaryWorkspaceStayedSelected,
+      currentUrlStateAndHistoryLengthPreserved: !!frame
+        && frame.contentWindow.location.href === probe.baselineHref
+        && JSON.stringify(frame.contentWindow.history.state) === probe.baselineHistoryStateJson
+        && frame.contentWindow.history.length === probe.baselineHistoryLength,
+      baselineHref: probe.baselineHref,
+      successorHref: frame?.contentWindow?.location.href || null,
+      baselineHistoryLength: probe.baselineHistoryLength,
+      successorHistoryLength: frame?.contentWindow?.history.length ?? null,
+      baselineHistoryStateJson: probe.baselineHistoryStateJson ?? null,
+      successorHistoryStateJson: frame
+        ? (JSON.stringify(frame.contentWindow.history.state) ?? null)
+        : null,
+      scrollPreserved: !!frame
+        && Math.abs(frame.contentWindow.scrollY - probe.baselineScrollY) <= 2,
+      baselineScrollY: probe.baselineScrollY,
+      successor: {
+        generator: payload?.generator || null,
+        path: payload?.path || null,
+        generation: Number.isSafeInteger(payload?.generation) ? payload.generation : null,
+        contentSha256: payload?.contentSha256 || null,
+      },
+      layout: {
+        viewportWidth: innerWidth,
+        primaryWidth: primaryRect?.width || 0,
+        previewWidth: previewRect?.width || 0,
+        sideBySide: !!primaryRect && !!previewRect
+          && primaryRect.right <= previewRect.left + 1
+          && primaryRect.top < previewRect.bottom
+          && previewRect.top < primaryRect.bottom,
+      },
+    };
+    delete window.__igWidePreviewContinuityProbe;
+    return result;
+  })()`);
+}
+
 async function requirePreviewPage(target, id, phaseStart, options = {}) {
   const expectedPath = options.path || null;
   const expectedText = options.expectedText || null;
   const requireRender = options.requireRender === true;
   const requirePageLoad = options.requirePageLoad !== false;
+  const previousBinding = options.previousBinding || null;
+  const activatePreview = options.activatePreview !== false;
   await target.evaluate(`(() => {
-    document.querySelector('#workspace-tab-preview')?.click();
+    if (${JSON.stringify(activatePreview)}) {
+      document.querySelector('#workspace-tab-preview')?.click();
+    }
     const expected = ${JSON.stringify(expectedPath)};
     if (!expected) return;
     const select = document.querySelector('.preview-page-select select');
@@ -1543,13 +1865,46 @@ async function requirePreviewPage(target, id, phaseStart, options = {}) {
       const text = doc?.body?.textContent || '';
       const expectedPath = ${JSON.stringify(expectedPath)};
       const expectedText = ${JSON.stringify(expectedText)};
+      const payload = frame?.contentWindow?.me;
+      const rect = frame?.getBoundingClientRect();
+      const style = frame ? getComputedStyle(frame) : null;
+      const panel = frame?.closest('.workspace-view');
+      const binding = {
+        generator: typeof payload?.generator === 'string' ? payload.generator : null,
+        path: typeof payload?.path === 'string' ? payload.path : null,
+        generation: Number.isSafeInteger(payload?.generation) ? payload.generation : null,
+        contentSha256: typeof payload?.contentSha256 === 'string' ? payload.contentSha256 : null,
+        mounted: !!frame?.isConnected && !!doc,
+        visible: !!frame
+          && frame.isConnected
+          && !panel?.hidden
+          && style?.display !== 'none'
+          && style?.visibility !== 'hidden'
+          && Number(style?.opacity ?? 1) !== 0
+          && (rect?.width || 0) > 0
+          && (rect?.height || 0) > 0,
+        fallback: !!doc?.querySelector('[data-igpreview-fallback]'),
+        readyState: doc?.readyState || null,
+      };
       const pageLoaded = (window.__igDebug?.metrics || []).some((entry) =>
         entry.at >= ${JSON.stringify(phaseStart)} && entry.event?.phase === 'preview.page-load'
           && (!expectedPath || entry.event?.label === expectedPath));
-      const rendered = window.__igProjectBenchmark?.operations?.some((entry) =>
-        entry.start >= ${JSON.stringify(phaseStart)} && entry.op === 'render'
-          && entry.end != null && entry.ok === true);
+      const operations = window.__igProjectBenchmark?.operations || [];
+      const rendered = operations.some((entry) =>
+        entry.start >= ${JSON.stringify(phaseStart)}
+          && entry.end != null
+          && entry.ok === true
+          && entry.op === 'render');
+      const exactRender = [...operations].reverse().find((entry) =>
+          entry.start >= ${JSON.stringify(phaseStart)}
+            && entry.op === 'render'
+            && entry.path === expectedPath
+            && entry.end != null
+            && entry.ok === true);
+      const publicationBuildId = exactRender?.buildId || null;
+      const exactRendered = !!exactRender;
       return {
+        binding,
         path,
         readyState: doc?.readyState || null,
         textLength: text.trim().length,
@@ -1558,16 +1913,25 @@ async function requirePreviewPage(target, id, phaseStart, options = {}) {
           && (!expectedPath || path.endsWith('/' + expectedPath)),
         pageLoaded,
         rendered,
+        exactRendered,
+        publicationBuildId,
         siteError: document.querySelector('.site-error')?.textContent?.trim() || '',
       };
     })()`).catch((error) => transientCdpFallback(error, null));
     if (state?.siteError) throw new Error(`${id} preview failed: ${state.siteError}`);
+    const exactSuccessor = !previousBinding || isExactPreviewSuccessor(
+      previousBinding,
+      state?.binding,
+      { generator: id, path: expectedPath },
+    );
     if (state?.pathMatches
         && state.readyState === 'complete'
         && state.textLength > 0
         && state.hasExpectedText
+        && exactSuccessor
+        && (!previousBinding || state.binding.visible === true)
         && (!requirePageLoad || state.pageLoaded)
-        && (!requireRender || state.rendered)) {
+        && (!requireRender || (previousBinding ? state.exactRendered : state.rendered))) {
       const at = await target.evaluate('performance.now()');
       await target.evaluate(`(() => {
         const trace = window.__igProjectBenchmark;
@@ -1645,6 +2009,13 @@ async function main() {
         height: 915,
         deviceScaleFactor: 3,
         mobile: true,
+      });
+    } else if (widePreview) {
+      await target.call('Emulation.setDeviceMetricsOverride', {
+        width: 1440,
+        height: 900,
+        deviceScaleFactor: 1,
+        mobile: false,
       });
     }
 
@@ -1752,10 +2123,10 @@ async function main() {
       throw new Error(`warm hard reload did not shallow-mount only authenticated prepared packages: ${JSON.stringify(warmPreparedMount)}`);
     }
     const warmBuild = [...warm.runtimeMetrics].reverse().find(({ event }) =>
-      event.stage === 'site-build' && event.metrics?.closureVerifyMs != null);
-    const warmClosureVerifyMs = warmBuild?.event?.metrics?.closureVerifyMs;
-    if (!Number.isFinite(warmClosureVerifyMs)) {
-      throw new Error(`warm hard reload did not report closure verification: ${warmClosureVerifyMs}`);
+      event.stage === 'site-build' && event.metrics?.rustPrepareTotalMs != null);
+    const warmRustPrepareMs = warmBuild?.event?.metrics?.rustPrepareTotalMs;
+    if (!Number.isFinite(warmRustPrepareMs)) {
+      throw new Error(`warm hard reload did not report the stable Rust prepare span: ${warmRustPrepareMs}`);
     }
     const stale = warm.milestones;
     if (!(stale.previousPreviewUiAt >= 0)
@@ -1769,6 +2140,25 @@ async function main() {
       progress(`${editScenario.sourceKind} edit ${editScenario.sourcePath} -> ${editScenario.previewPath}`);
       target.setPhase('representativeEditSetup');
       await requirePreviewPage(target, projectId, 0, { path: editScenario.previewPath });
+      const previousPreviewBinding = await capturePreviewBinding(target);
+      if (previousPreviewBinding.generator !== projectId
+          || previousPreviewBinding.path !== editScenario.previewPath
+          || previousPreviewBinding.mounted !== true
+          || previousPreviewBinding.visible !== true
+          || previousPreviewBinding.fallback !== false
+          || previousPreviewBinding.readyState !== 'complete'
+          || !Number.isSafeInteger(previousPreviewBinding.generation)
+          || !/^[0-9a-f]{64}$/u.test(previousPreviewBinding.contentSha256 || '')) {
+        throw new Error(
+          `representative edit has no exact verified visible baseline: ${JSON.stringify(previousPreviewBinding)}`,
+        );
+      }
+      if (widePreview) {
+        await target.evaluate(`(() => {
+          window.__igWidePreviewBaselineFrame = document.querySelector('iframe.preview-frame');
+          return !!window.__igWidePreviewBaselineFrame;
+        })()`);
+      }
       const selectedSource = await target.evaluate(`(() => {
         document.querySelector('#workspace-tab-author')?.click();
         const select = document.querySelector('#workspace-panel-author .mobile-picker select');
@@ -1787,9 +2177,59 @@ async function main() {
           .includes(${JSON.stringify(editScenario.before)}) === true`,
         `Monaco model for ${editScenario.sourcePath}`,
       );
+      const retainedBeforeEdit = await capturePreviewBinding(target);
+      if (!isRetainedPreviewBinding(previousPreviewBinding, retainedBeforeEdit)
+          || retainedBeforeEdit.visible !== widePreview) {
+        throw new Error(
+          `Author mode did not retain the exact ${widePreview ? 'visible' : 'hidden'} preview: ${JSON.stringify(retainedBeforeEdit)}`,
+        );
+      }
+      let widePreviewBaseline = null;
+      if (widePreview) {
+        widePreviewBaseline = await target.evaluate(`(() => {
+          const frame = document.querySelector('iframe.preview-frame');
+          const preview = frame?.closest('.preview-workspace')?.getBoundingClientRect();
+          const primary = document.querySelector('.author-workspace:not([hidden])')
+            ?.getBoundingClientRect();
+          return {
+            sameIframeNode: frame === window.__igWidePreviewBaselineFrame,
+            iframeCount: document.querySelectorAll('iframe.preview-frame').length,
+            authorSelected: document.querySelector('#workspace-tab-author')
+              ?.getAttribute('aria-selected') === 'true',
+            previewRole: frame?.closest('.preview-workspace')?.getAttribute('role') || '',
+            viewportWidth: innerWidth,
+            primaryWidth: primary?.width || 0,
+            previewWidth: preview?.width || 0,
+            sideBySide: !!primary && !!preview
+              && primary.right <= preview.left + 1
+              && primary.top < preview.bottom
+              && preview.top < primary.bottom,
+          };
+        })()`);
+        if (!widePreviewBaseline.sameIframeNode
+            || widePreviewBaseline.iframeCount !== 1
+            || !widePreviewBaseline.authorSelected
+            || widePreviewBaseline.previewRole !== 'region'
+            || widePreviewBaseline.viewportWidth !== 1440
+            || widePreviewBaseline.primaryWidth < 720
+            || widePreviewBaseline.previewWidth < 420
+            || !widePreviewBaseline.sideBySide) {
+          throw new Error(`wide preview baseline is invalid: ${JSON.stringify(widePreviewBaseline)}`);
+        }
+      }
       await target.drainNetwork('representativeEditSetup');
       target.setPhase('representativeEdit');
       const editStart = await resetTrace(target);
+      const continuityProbeToken = widePreview
+        ? await armWidePreviewContinuityProbe(target, previousPreviewBinding)
+        : null;
+      const paintProbeToken = await armPreviewSuccessorPaintProbe(
+        target,
+        projectId,
+        editScenario.previewPath,
+        editScenario.expectedPreviewText || editScenario.after,
+        previousPreviewBinding,
+      );
       const edited = await target.evaluate(`(() => {
         const editor = window.monaco?.editor.getEditors()[0];
         const model = editor?.getModel();
@@ -1807,18 +2247,90 @@ async function main() {
         path: editScenario.previewPath,
         expectedText: editScenario.expectedPreviewText || editScenario.after,
         requireRender: true,
+        previousBinding: previousPreviewBinding,
         // Generation replacement intentionally refreshes the existing document
         // through the preview channel without assigning iframe.src, preserving
         // scroll/history. A navigation load here would be a regression; require
         // the newly rendered text instead.
         requirePageLoad: false,
+        activatePreview: !widePreview,
       });
+      const successorPaint = await requirePreviewSuccessorPaintProbe(
+        target,
+        paintProbeToken,
+        editStart,
+      );
+      const widePreviewContinuity = continuityProbeToken
+        ? await finishWidePreviewContinuityProbe(target, continuityProbeToken)
+        : null;
+      if (widePreviewContinuity && (!widePreviewContinuity.sameIframeNode
+          || widePreviewContinuity.maximumPreviewIframeCount !== 1
+          || !widePreviewContinuity.previousVerifiedVisibleDuringBuild
+          || !widePreviewContinuity.successorObserved
+          || !widePreviewContinuity.primaryWorkspaceStayedSelected
+          || !widePreviewContinuity.currentUrlStateAndHistoryLengthPreserved
+          || !widePreviewContinuity.scrollPreserved
+          || widePreviewContinuity.layout.viewportWidth !== 1440
+          || widePreviewContinuity.layout.primaryWidth < 720
+          || widePreviewContinuity.layout.previewWidth < 420
+          || !widePreviewContinuity.layout.sideBySide
+          || widePreviewContinuity.successor.generation !== editedPage.binding.generation
+          || widePreviewContinuity.successor.contentSha256
+            !== editedPage.binding.contentSha256)) {
+        throw new Error(`wide preview continuity failed: ${JSON.stringify(widePreviewContinuity)}`);
+      }
       const editNetworkDrain = await target.drainNetwork('representativeEdit');
       representativeEdit = await traceSnapshot(target, editStart, editedPage.at);
       representativeEdit.firstPreviewPage = editedPage;
       delete representativeEdit.firstPreviewPage.at;
       representativeEdit.networkDrain = editNetworkDrain;
       representativeEdit.scenario = editScenario;
+      representativeEdit.previewBindings = {
+        previousVisible: previousPreviewBinding,
+        retainedWhileAuthoring: retainedBeforeEdit,
+        successorVisible: editedPage.binding,
+        continuityClaim: widePreview
+          ? 'one exact prior iframe remained visible beside Author until atomic successor handoff'
+          : 'exact prior page retained but hidden in Author; exact successor visible after activating Preview',
+        continuouslyVisible: widePreview,
+        widePreviewBaseline,
+        widePreviewContinuity,
+      };
+      const successorBuildId = editedPage.publicationBuildId;
+      const canonicalRender = representativeEdit.operations.find((operation) =>
+        operation.op === 'render'
+          && operation.buildId === successorBuildId
+          && operation.path === editScenario.previewPath
+          && operation.ok === true);
+      const canonicalRenderEvent = representativeEdit.runtimeMetrics.find((entry) =>
+        entry.event?.phase === 'site.render'
+          && entry.event?.buildId === successorBuildId
+          && entry.event?.label === editScenario.previewPath);
+      if (!successorBuildId || !canonicalRender || !canonicalRenderEvent) {
+        throw new Error(`representative edit lacks an exact render operation: ${JSON.stringify({
+          successorBuildId,
+          canonicalRender,
+          canonicalRenderEvent,
+        })}`);
+      }
+      representativeEdit.selectedPagePipeline = {
+        mode: 'canonical-render',
+        buildId: successorBuildId,
+        path: editScenario.previewPath,
+        render: {
+          startMs: canonicalRenderEvent.eventStartMs,
+          endMs: canonicalRenderEvent.eventEndMs,
+          durationMs: canonicalRenderEvent.event.durationMs,
+        },
+        readyAtMs: representativeEdit.milestones.currentReadyAt ?? null,
+        firstSuccessorBindingAtMs: successorPaint.firstSuccessorBindingAtMs,
+        expectedTextAtMs: successorPaint.expectedTextAtMs,
+        firstPaintOpportunityAtMs: successorPaint.secondFrameCallbackAtMs,
+        documentCompleteAtMs: successorPaint.firstCompleteAtMs,
+        iframeLoadAtMs: successorPaint.iframeLoadAtMs,
+        successorVisibleAtMs: editedPage.atMs,
+      };
+      representativeEdit.successorPaint = successorPaint;
       const firstOperationStartMs = Math.min(
         ...representativeEdit.operations
           .map((operation) => operation.startMs)
@@ -1827,15 +2339,10 @@ async function main() {
       if (!Number.isFinite(firstOperationStartMs)) {
         throw new Error('representative edit completed without a measured Worker operation');
       }
-      representativeEdit.explicitDebounceMs = editScenario.debounceMs;
+      representativeEdit.explicitDebounceMs = 0;
+      representativeEdit.scheduling = editScenario.scheduling;
       representativeEdit.firstWorkerOperationMs = round(firstOperationStartMs);
-      if (firstOperationStartMs + 2 < editScenario.debounceMs) {
-        throw new Error(
-          `first Worker operation started at ${round(firstOperationStartMs)}ms before the `
-          + `configured ${editScenario.debounceMs}ms edit debounce`,
-        );
-      }
-      representativeEdit.postDebouncePipelineMs = round(
+      representativeEdit.postSchedulingPipelineMs = round(
         representativeEdit.criticalElapsedMs - firstOperationStartMs,
       );
       representativeEdit.network = networkSummary(networkEvents, 'representativeEdit');
@@ -1924,13 +2431,6 @@ async function main() {
       initialCompiledResources: cold.engineLifecycle.lastCompiledResourceCount,
       reopenedCompiledResources: same.engineLifecycle.lastCompiledResourceCount,
       siteBuildCacheHit: sameMetrics.siteBuildCacheHit ?? null,
-      skippedPublisherPhases: {
-        templateMaterializeMs: sameMetrics.templateMaterializeMs ?? null,
-        publisherRuntimeMs: sameMetrics.publisherRuntimeMs ?? null,
-        publisherModelMs: sameMetrics.publisherModelMs ?? null,
-        renderModelMs: sameMetrics.renderModelMs ?? null,
-        outputCatalogMs: sameMetrics.outputCatalogMs ?? null,
-      },
     };
     if (sameWorkerContract.recycleAfterCycle !== sameWorkerContract.recycleBaseline
         || sameWorkerContract.recycleAfter !== sameWorkerContract.recycleBaseline
@@ -1938,9 +2438,7 @@ async function main() {
         || sameWorkerContract.preparedConfigsAfterReopen !== 2
         || !(sameWorkerContract.cycleCompiledResources > 0)
         || sameWorkerContract.reopenedCompiledResources !== sameWorkerContract.initialCompiledResources
-        || sameWorkerContract.siteBuildCacheHit !== 1
-        || Object.values(sameWorkerContract.skippedPublisherPhases)
-          .some((value) => value !== 0)) {
+        || sameWorkerContract.siteBuildCacheHit !== 1) {
       throw new Error(`${projectId} -> Cycle -> ${projectId} did not retain the exact SiteEngine generation: ${JSON.stringify(sameWorkerContract)}`);
     }
 
@@ -1986,6 +2484,7 @@ async function main() {
           scope: 'whole-disposable-Chrome-process-tree',
         },
         mobile,
+        widePreview,
         networkProfile,
         networkProfileScope: exactNetworkConditions == null
           ? null
@@ -2043,6 +2542,18 @@ async function main() {
             pageLoaded: representativeEdit.firstPreviewPage.pageLoaded,
             hotUpdateObserved: representativeEdit.firstPreviewPage.hasExpectedText,
             renderObserved: representativeEdit.firstPreviewPage.rendered,
+            exactRenderObserved: representativeEdit.firstPreviewPage.exactRendered,
+            renderBuildId: representativeEdit.firstPreviewPage.publicationBuildId,
+            previousPreviewRetained: isRetainedPreviewBinding(
+              representativeEdit.previewBindings.previousVisible,
+              representativeEdit.previewBindings.retainedWhileAuthoring,
+            ),
+            previousPreviewContinuouslyVisible: representativeEdit.previewBindings.continuouslyVisible,
+            exactSuccessorVisible: isExactPreviewSuccessor(
+              representativeEdit.previewBindings.previousVisible,
+              representativeEdit.previewBindings.successorVisible,
+              { generator: projectId, path: editScenario.previewPath },
+            ) && representativeEdit.previewBindings.successorVisible.visible === true,
           },
         } : {}),
         warmPreparedMount: {
@@ -2051,7 +2562,7 @@ async function main() {
           mixedCalls: warmPreparedMount.preparedMixedCalls,
           chunksInflatedAtCommit: warmPreparedMount.preparedChunksInflated,
           rawInflatedBytesAtCommit: warmPreparedMount.preparedRawInflatedBytes,
-          closureVerifyMs: warmClosureVerifyMs,
+          rustPrepareMs: warmRustPrepareMs,
         },
         sameWorkerReopen: sameWorkerContract,
       },

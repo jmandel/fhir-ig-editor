@@ -32,23 +32,10 @@ describe('canonical build observations and failures', () => {
 
   test('carries preparation observations only through BuildEvent', () => {
     for (const field of [
-      'projectRevisionMs',
-      'packageLockMs',
-      'preparedGuideKeyMs',
-      'preparedGuideMs',
       'preparedGuideCacheHit',
       'siteBuildCacheHit',
       'publisherRecipeAssetsCacheHit',
-      'templateMaterializeMs',
-      'publisherRuntimeMs',
-      'publisherModelMs',
       'renderSemanticsCacheHit',
-      'renderModelMs',
-      'outputCatalogMs',
-      'publisherArtifactsMs',
-      'siteBuildCloseMs',
-      'closureVerifyMs',
-      'catalogMs',
     ]) {
       expect(CLIENT).not.toContain(`result.metrics.rust.${field}`);
     }
@@ -61,9 +48,9 @@ describe('canonical build observations and failures', () => {
     expect(CONTRACT).not.toContain('RustPrepareMetrics');
   });
 
-  test('reads warm-reuse proof from the Rust prepare event, not a later host timing event', () => {
+  test('reads stable Rust prepare spans from the build event, not a later host timing event', () => {
     expect(E2E).toContain("event?.operation === 'prepare'");
-    expect(E2E).toContain("Object.hasOwn(event.metrics, 'snapshotCompletedLocalCacheHit')");
+    expect(E2E).toContain('Number.isFinite(metrics.rustPrepareTotalMs)');
   });
 
   test('reports compiler, Rust boundary, and host opening through events', () => {

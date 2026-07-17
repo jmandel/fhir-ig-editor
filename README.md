@@ -28,7 +28,8 @@ Live site: <https://joshuamandel.com/fhir-ig-editor/>
   A hard reload can show the prior digest-verified page immediately while the
   current exact build runs; the UI labels it as previous until current
   publication succeeds.
-- Complete, provenanced Publisher-owned runtime outputs. The browser gate checks
+- Provenanced Publisher-owned runtime outputs, including generated TOC and
+  Artifacts pages. The browser gate checks verified structural navigation,
   missing assets, decoded images, required runtime globals, compatibility-shim
   activation, and uncaught exceptions.
 
@@ -55,25 +56,42 @@ fragment discovery is resolved internally by Rust and never becomes an editor
 callback API. Assets are ordinary outputs, and final publication is one verified
 `SiteOutput`.
 
+There are intentionally two Liquid implementations, not one shared parser:
+Publisher uses Rust Liquid with typed fragments and a bounded, own-resource SQL
+subset;
+Cycle uses LiquidJS inside its external renderer. Both consume the same closed
+`SiteBuild`, but their template languages are verified by their own executable
+behavior tests rather than a generated capability inventory.
+
 The shared target-neutral Rust executor is `site_engine::SiteEngine`. The WASM
 crate is a transport facade over that executor, not another preparation layer.
 The browser's `WorkspaceRepository -> Workspace -> ProjectRevision` path keeps
 one working copy per guide and captures one immutable request for `prepare`.
+That complete typed request crosses directly into WASM; JSON-string input is a
+compatibility form decoded by the same strict schema, not a project mirror.
+Its exact path/text-owned per-file projections prevent an unrelated edit from
+reparsing every predefined JSON resource or re-encoding every authored site
+file; the projection has no history beyond the current workspace.
 
 Package transport remains compact `PreparedPackage` v3: authenticated 1 MiB
 chunks, a source-metadata-bound cache key, transactional one-artifact-at-a-time
 warm mount, and bounded lazy member inflation. `SiteBuild` v2 package locks root
 that exact deterministic carrier; they do not assert a second inflated package
 payload. Cache records and worker/preview handles are private execution details,
-not additional build representations.
+not additional build representations. One immutable `PackageEnvironment` owns
+the mounted carriers, labels, package view, and lock material; an atomic mount
+creates its successor, and `prepare` borrows that same environment.
 
-Incremental preparation is likewise private and fail-closed. The engine retains
-at most current+previous successful generations, revalidates per-resource
-snapshot read manifests, and may share an exact-carrier-bound immutable Publisher
-package catalog. It always rebuilds current own-resource state, render state,
-catalog, and page outputs. Failed, unknown, or over-budget candidates fall back
-to the canonical build and cannot promote partial state. The public four
-operations and `PreparedGuide -> SiteBuild -> SiteOutput` handoff do not change.
+Incremental preparation is likewise private and fail-closed. The engine owns
+exactly three bounded current/previous histories: semantic compilation,
+prepared derivations, and installed runtimes. Per-resource snapshot reads are
+revalidated; an unchanged package member may be proven from its authenticated
+PreparedPackage carrier plus member path without inflating it. Unproven sources
+take the canonical read/parse path. One owned target candidate closes and
+verifies completely before one infallible success commit advances any history;
+failed, unknown, or over-budget candidates cannot promote partial state. The
+public four operations and `PreparedGuide -> SiteBuild -> SiteOutput` handoff do
+not change.
 
 ## Repository shape
 

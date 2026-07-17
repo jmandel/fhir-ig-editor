@@ -31,8 +31,10 @@ import type {
   BuildError,
   BuildEvent,
   ContentRef,
+  GeneratorSpec,
   OutputCatalog,
   PreparedProjectResult,
+  ProjectRevision,
   SiteOutput,
 } from '../site/contract.generated';
 import { PREPARED_PACKAGE_FORMAT_VERSION } from '../site/contract.generated';
@@ -43,6 +45,25 @@ import { BuildRuntimeRegistry } from './buildRuntimeRegistry';
 import { unwrapApiEnvelope } from './envelope';
 import { epochMs, pointEvent, spanEvent } from '../performance/timeline';
 import type { CycleBuildRuntime } from './cycleRuntime';
+
+/** Private raw Session transport. The generated PreparedProjectResult remains
+ * the complete native/core contract; this tagged browser projection makes the
+ * one host-boundary difference explicit and statically checkable. */
+type BrowserPrepareSite =
+  | {
+    buildId: string;
+    generator: 'publisher';
+    siteBuild?: never;
+  }
+  | {
+    buildId: string;
+    generator: 'cycle';
+    siteBuild: PreparedProjectResult['site']['siteBuild'];
+  };
+
+type BrowserPreparedProjectResult = Omit<PreparedProjectResult, 'site'> & {
+  site: BrowserPrepareSite;
+};
 
 // The wasm glue is a static asset (not bundled by Vite), so we resolve it against
 // the document base at runtime. `import.meta.env.BASE_URL` is Vite's base path.
@@ -65,7 +86,7 @@ interface WasmSession {
   takePrepared(label: string): Uint8Array;
   resolveProject(config: string, versionIndexJson: string): string;
   resolveTemplate(coordinate: string): string;
-  prepareProject(projectRevisionJson: string, generatorSpecJson: string): string;
+  prepareProject(projectRevision: ProjectRevision | string, generatorSpec: GeneratorSpec | string): string;
   snapshot(input: string): string;
   outputs(handle: string): string;
   render(handle: string, path: string): string;
@@ -716,25 +737,18 @@ const handlers: Handlers = {
 
   async prepare(project, spec) {
     const s = await ensureSession();
-    const serializeStartedMs = epochMs();
-    const projectJson = JSON.stringify(project);
-    const specJson = JSON.stringify(spec);
-    const serializeEvent = spanEvent('site.prepare.serialize', 'worker', serializeStartedMs, {
+    const typedInputStartedMs = epochMs();
+    const typedInputEvent = spanEvent('site.prepare.typed-input', 'worker', typedInputStartedMs, {
       operation: 'prepare',
       stage: 'compile',
-      message: 'Serialized project revision and generator specification.',
-      inputBytes: projectJson.length + specJson.length,
+      message: 'Passed the complete typed project revision and generator specification to Rust.',
     });
     const rustBoundaryStartedMs = epochMs();
     const rustBoundaryStarted = performance.now();
-    let result: PreparedProjectResult;
-    result = unwrapBuild<PreparedProjectResult>(s.prepareProject(
-      projectJson,
-      specJson,
-    ));
+    const result = unwrapBuild<BrowserPreparedProjectResult>(s.prepareProject(project, spec));
     const rustBoundaryMs = performance.now() - rustBoundaryStarted;
     result.events = [
-      serializeEvent,
+      typedInputEvent,
       ...result.events.map((event) => ({
         ...event,
         source: event.source ?? 'rust' as const,
@@ -755,12 +769,18 @@ const handlers: Handlers = {
       const hostPrepareStartedMs = epochMs();
       let cycleRuntimeModuleMs = 0;
       if (prepared.generator === 'cycle') {
+        if (!prepared.siteBuild) {
+          throw new Error('prepare: Cycle transport omitted its closed SiteBuild');
+        }
         const moduleStarted = performance.now();
         const { openCycleBuildRuntime } = await loadCycleRuntimeModule();
         cycleRuntimeModuleMs = performance.now() - moduleStarted;
         const runtime = await openCycleBuildRuntime(s, prepared.buildId, prepared.siteBuild);
         siteBuilds.install(prepared.buildId, runtime);
       } else {
+        if (prepared.siteBuild != null) {
+          throw new Error('prepare: Publisher transport redundantly returned its closed SiteBuild');
+        }
         siteBuilds.install(prepared.buildId, { kind: 'publisher', buildId: prepared.buildId });
       }
       return {

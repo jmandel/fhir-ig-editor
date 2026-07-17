@@ -42,7 +42,7 @@ CASES = {
         "after": "Name used while benchmarking the editor",
         "output": "en/StructureDefinition-editor-user.html",
         "compilation": True,
-        "snapshotPartial": True,
+        "snapshotResourceMisses": 1,
     },
     "ips": {
         "path": "input/fsh/profiles/PatientUvIps.fsh",
@@ -50,7 +50,7 @@ CASES = {
         "after": 'Title: "Patient (IPS) Benchmark Edit"',
         "output": "en/StructureDefinition-Patient-uv-ips.html",
         "compilation": True,
-        "snapshotPartial": True,
+        "snapshotResourceMisses": 0,
     },
     "uscore": {
         "path": "input/resources/structuredefinition-us-core-patient.json",
@@ -60,7 +60,7 @@ CASES = {
         # Predefined resources participate in PreparedGuide/site preparation,
         # but are not duplicated in the compiler inspection result.
         "compilation": False,
-        "snapshotPartial": True,
+        "snapshotResourceMisses": 0,
     },
     "mcode": {
         "path": "input/pagecontent/StructureDefinition-mcode-cancer-patient-intro.md",
@@ -68,7 +68,7 @@ CASES = {
         "after": "### Conformance Benchmark Edit",
         "output": "en/StructureDefinition-mcode-cancer-patient.html",
         "compilation": False,
-        "snapshotPartial": False,
+        "snapshotResourceMisses": None,
     },
 }
 
@@ -441,13 +441,10 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
     retained_misses = metric("retainedBForward", "snapshotResourceCacheMisses")
     fresh_hits = metric("freshBReverse", "snapshotResourceCacheHits")
     fresh_misses = metric("freshBReverse", "snapshotResourceCacheMisses")
-    if metric("freshBReverse", "snapshotCompletedLocalCacheHit") != 0:
-        raise DifferentialFailure(f"{project} fresh B incorrectly reported snapshot reuse")
-    if CASES[project]["snapshotPartial"]:
+    if CASES[project]["snapshotResourceMisses"] is not None:
+        expected_misses = float(CASES[project]["snapshotResourceMisses"])
         if not (
-            metric("retainedBForward", "snapshotCompletedLocalCacheHit") == 0
-            and retained_hits > 0
-            and retained_misses > 0
+            retained_misses == expected_misses
             and fresh_hits == 0
             and fresh_misses > 0
             and retained_hits + retained_misses == fresh_misses
@@ -455,18 +452,18 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
             and metric("freshBReverse", "snapshotDerivationAdmitted") == 1
         ):
             raise DifferentialFailure(
-                f"{project} did not prove partial snapshot reuse: retained "
-                f"{retained_hits}/{retained_misses}, fresh {fresh_hits}/{fresh_misses}"
+                f"{project} did not prove exact per-resource snapshot reuse: retained "
+                f"{retained_hits}/{retained_misses}, expected misses {expected_misses}, "
+                f"fresh {fresh_hits}/{fresh_misses}"
             )
     elif not (
-        metric("retainedBForward", "snapshotCompletedLocalCacheHit") == 1
-        and retained_hits == 0
+        retained_hits == fresh_misses
         and retained_misses == 0
         and fresh_hits == 0
         and fresh_misses > 0
         and metric("freshBReverse", "snapshotDerivationAdmitted") == 1
     ):
-        raise DifferentialFailure(f"{project} did not prove exact whole-snapshot reuse")
+        raise DifferentialFailure(f"{project} did not prove complete per-resource snapshot reuse")
 
     fresh_catalog_entries = metric("freshBReverse", "renderPackageCatalogEntries")
     fresh_catalog_packages = metric("freshBReverse", "renderPackageCatalogPackages")
@@ -486,7 +483,7 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
         raise DifferentialFailure(
             f"{project} fresh B did not prove canonical render package-catalog construction"
         )
-    if CASES[project]["snapshotPartial"]:
+    if CASES[project]["snapshotResourceMisses"] is not None:
         retained_catalog_generations = metric(
             "retainedBForward", "renderPackageCatalogRetainedGenerations"
         )
@@ -592,11 +589,7 @@ def validate_case_receipt(path: Path, project: str) -> dict[str, Any]:
             recovery_metrics, "failedSuccessor", "snapshotResourceCacheMisses"
         )
         if (
-            count_value(
-                recovery_metrics, "failedSuccessor", "snapshotCompletedLocalCacheHit"
-            )
-            != 0
-            or recovery_hits <= 0
+            recovery_hits <= 0
             or recovery_misses <= 0
             or recovery_hits + recovery_misses != fresh_misses
             or fresh_hits != 0
@@ -1024,7 +1017,7 @@ def main() -> int:
                 "report": str(report),
                 "expectedChangedOutput": descriptor["output"],
                 "expectCompilationChange": descriptor["compilation"],
-                "expectSnapshotPartialReuse": descriptor["snapshotPartial"],
+                "expectedSnapshotResourceMisses": descriptor["snapshotResourceMisses"],
                 "templateCoordinate": args.template,
                 "buildEpochSecs": args.build_epoch,
                 "fixture": {

@@ -28,6 +28,7 @@ Environment:
   BENCH_FAST_CPU_THROTTLE=1              (default 1)
   BENCH_THROTTLED_CHROME_CPU_QUOTA_PERCENT=25
                                            (whole-Chrome quota; integer; 0 disables)
+  BENCH_WIDE_PREVIEW=0                     (set 1 only with fast mode)
   BENCH_SERVER_PORT_BASE=43000            (one unique port per run)
   BENCH_CDP_PORT_BASE=45000               (one unique port per run)
 
@@ -199,6 +200,7 @@ function validateReceipt(receipt, expected) {
   }
   if (receipt.environment?.cpuThrottle !== expected.cpuThrottle
       || receipt.environment?.mobile !== expected.mobile
+      || receipt.environment?.widePreview !== expected.widePreview
       || receipt.environment?.networkProfile !== expected.networkProfile
       || receipt.environment?.processCpuQuotaPercent !== expected.processCpuQuotaPercent
       || receipt.environment?.executionClass !== expected.executionClass) {
@@ -229,18 +231,95 @@ function validateReceipt(receipt, expected) {
   if (!Number.isFinite(receipt.phases?.representativeEdit?.criticalElapsedMs)) {
     throw new Error('receipt is missing representativeEdit.criticalElapsedMs');
   }
-  const expectedDebounceMs = expected.project === 'mcode' ? 120 : 300;
-  if (receipt.phases.representativeEdit.explicitDebounceMs !== expectedDebounceMs) {
+  const expectedDebounceMs = 0;
+  if (receipt.phases.representativeEdit.explicitDebounceMs !== expectedDebounceMs
+      || receipt.phases.representativeEdit.scheduling !== 'leading-latest-only') {
     throw new Error(
       `receipt edit debounce ${receipt.phases.representativeEdit.explicitDebounceMs}ms `
-      + `!= ${expectedDebounceMs}ms for ${expected.project}`,
+      + `or scheduler ${receipt.phases.representativeEdit.scheduling} does not match the leading latest-only contract`,
     );
   }
   if (receipt.contracts?.firstPreview?.coldRenderObserved !== true
       || receipt.contracts?.firstPreview?.coldPageLoaded !== true
       || receipt.contracts?.representativeEdit?.renderObserved !== true
-      || receipt.contracts?.representativeEdit?.hotUpdateObserved !== true) {
+      || receipt.contracts?.representativeEdit?.hotUpdateObserved !== true
+      || receipt.contracts?.representativeEdit?.exactRenderObserved !== true
+      || !receipt.contracts?.representativeEdit?.renderBuildId
+      || receipt.contracts?.representativeEdit?.previousPreviewRetained !== true
+      || receipt.contracts?.representativeEdit?.previousPreviewContinuouslyVisible
+        !== expected.widePreview
+      || receipt.contracts?.representativeEdit?.exactSuccessorVisible !== true) {
     throw new Error('receipt did not prove first render/page-load and edited hot update');
+  }
+  const bindings = receipt.phases?.representativeEdit?.previewBindings;
+  const previousBinding = bindings?.previousVisible;
+  const retainedBinding = bindings?.retainedWhileAuthoring;
+  const successorBinding = bindings?.successorVisible;
+  const validSha = (value) => /^[0-9a-f]{64}$/u.test(value || '');
+  if (previousBinding?.generator !== expected.project
+      || previousBinding?.path !== receipt.contracts.representativeEdit.previewPath
+      || previousBinding?.mounted !== true
+      || previousBinding?.visible !== true
+      || previousBinding?.fallback !== false
+      || previousBinding?.readyState !== 'complete'
+      || !Number.isSafeInteger(previousBinding?.generation)
+      || !validSha(previousBinding?.contentSha256)
+      || retainedBinding?.generator !== previousBinding.generator
+      || retainedBinding?.path !== previousBinding.path
+      || retainedBinding?.generation !== previousBinding.generation
+      || retainedBinding?.contentSha256 !== previousBinding.contentSha256
+      || retainedBinding?.mounted !== true
+      || retainedBinding?.visible !== expected.widePreview
+      || retainedBinding?.fallback !== false
+      || successorBinding?.generator !== previousBinding.generator
+      || successorBinding?.path !== previousBinding.path
+      || successorBinding?.generation <= previousBinding.generation
+      || successorBinding?.contentSha256 === previousBinding.contentSha256
+      || !validSha(successorBinding?.contentSha256)
+      || successorBinding?.mounted !== true
+      || successorBinding?.visible !== true
+      || successorBinding?.fallback !== false
+      || successorBinding?.readyState !== 'complete') {
+    throw new Error('receipt does not bind the retained and successor preview documents exactly');
+  }
+  if (expected.widePreview) {
+    const continuity = bindings?.widePreviewContinuity;
+    const baseline = bindings?.widePreviewBaseline;
+    if (baseline?.sameIframeNode !== true
+        || baseline?.iframeCount !== 1
+        || baseline?.authorSelected !== true
+        || baseline?.previewRole !== 'region'
+        || baseline?.viewportWidth !== 1440
+        || baseline?.primaryWidth < 720
+        || baseline?.previewWidth < 420
+        || baseline?.sideBySide !== true
+        || continuity?.sameIframeNode !== true
+        || continuity?.maximumPreviewIframeCount !== 1
+        || continuity?.previousVerifiedVisibleDuringBuild !== true
+        || continuity?.successorObserved !== true
+        || continuity?.primaryWorkspaceStayedSelected !== true
+        || continuity?.currentUrlStateAndHistoryLengthPreserved !== true
+        || continuity?.scrollPreserved !== true
+        || !(continuity?.baselineScrollY > 0)
+        || continuity?.layout?.sideBySide !== true) {
+      throw new Error('receipt does not prove wide preview continuity');
+    }
+  }
+  const selectedPipeline = receipt.phases?.representativeEdit?.selectedPagePipeline;
+  const commonSelectedPipelineInvalid = !selectedPipeline?.buildId
+      || selectedPipeline.buildId !== receipt.contracts.representativeEdit.renderBuildId
+      || selectedPipeline.path !== receipt.contracts.representativeEdit.previewPath
+      || !Number.isFinite(selectedPipeline.render?.startMs)
+      || !Number.isFinite(selectedPipeline.render?.endMs)
+      || !Number.isFinite(selectedPipeline.render?.durationMs)
+      || !Number.isFinite(selectedPipeline.readyAtMs)
+      || !Number.isFinite(selectedPipeline.successorVisibleAtMs)
+      || selectedPipeline.render.startMs > selectedPipeline.render.endMs;
+  const canonicalPipelineOk = selectedPipeline?.mode === 'canonical-render'
+    && selectedPipeline.render.endMs <= selectedPipeline.successorVisibleAtMs;
+  if (commonSelectedPipelineInvalid
+      || !canonicalPipelineOk) {
+    throw new Error('receipt is missing the exact selected-page render stage');
   }
   if (!receipt.provenance?.artifact?.sha256
       || !receipt.provenance?.engine?.commit
@@ -285,11 +364,17 @@ async function main() {
   const modes = listSetting('BENCH_MODES', 'fast,throttled');
   const repeats = positiveInteger('BENCH_REPEATS', 3);
   const networkDefault = process.env.BENCH_NETWORK_PROFILE || 'none';
+  const widePreview = process.env.BENCH_WIDE_PREVIEW === '1';
+  if (process.env.BENCH_WIDE_PREVIEW != null
+      && !['0', '1'].includes(process.env.BENCH_WIDE_PREVIEW)) {
+    throw new Error('BENCH_WIDE_PREVIEW must be 0 or 1');
+  }
   const modeSettings = {
     fast: {
       executionClass: 'fast',
       cpuThrottle: throttleSetting('BENCH_FAST_CPU_THROTTLE', 1),
       mobile: false,
+      widePreview,
       networkProfile: process.env.BENCH_FAST_NETWORK_PROFILE || networkDefault,
       processCpuQuotaPercent: null,
     },
@@ -297,6 +382,7 @@ async function main() {
       executionClass: 'throttled',
       cpuThrottle: 1,
       mobile: true,
+      widePreview: false,
       networkProfile: process.env.BENCH_THROTTLED_NETWORK_PROFILE || networkDefault,
       processCpuQuotaPercent: quotaSetting(
         'BENCH_THROTTLED_CHROME_CPU_QUOTA_PERCENT',
@@ -314,6 +400,9 @@ async function main() {
         `${mode} requests both page CPU throttling and a whole-Chrome CPU quota; `
         + 'set one control to 1/0 so benchmark slowdown has a single cause',
       );
+    }
+    if (widePreview && setting.mobile) {
+      throw new Error('BENCH_WIDE_PREVIEW is available only in a non-mobile mode');
     }
   }
 
@@ -346,6 +435,7 @@ async function main() {
       modes,
       repeats,
       basePath: process.env.BASE_PATH || '/fhir-ig-editor/',
+      widePreview,
       modeSettings: Object.fromEntries(modes.map((mode) => [mode, modeSettings[mode]])),
       dimensions: {
         project: 'four representative guides',
@@ -404,6 +494,7 @@ async function main() {
               BENCH_EXECUTION_CLASS: setting.executionClass,
               BENCH_CPU_THROTTLE: String(setting.cpuThrottle),
               BENCH_MOBILE: setting.mobile ? '1' : '0',
+              BENCH_WIDE_PREVIEW: setting.widePreview ? '1' : '0',
               BENCH_NETWORK_PROFILE: setting.networkProfile,
               BENCH_CHROME_CPU_QUOTA_PERCENT: setting.processCpuQuotaPercent == null
                 ? ''

@@ -104,15 +104,41 @@ if (fs.existsSync(inputDir)) {
   }
 }
 
-const prepareEnv = JSON.parse(session.prepareProject(
-  JSON.stringify({ config, fsh: files, predefined, siteFiles }),
-  JSON.stringify({
-    generator: 'cycle',
-    buildEpochSecs: 1783555200,
-    liquidAssetDirs: [],
-  }),
+const projectRevision = { config, fsh: files, predefined, siteFiles };
+const generatorSpec = {
+  generator: 'cycle',
+  buildEpochSecs: 1783555200,
+  liquidAssetDirs: [],
+};
+const unknownFieldEnv = JSON.parse(session.prepareProject(
+  { ...projectRevision, unexpectedBoundaryField: true },
+  generatorSpec,
 ));
+if (unknownFieldEnv.ok || !unknownFieldEnv.error?.message?.includes('unknown field')) {
+  throw new Error(`typed prepareProject did not preserve deny_unknown_fields: ${JSON.stringify(unknownFieldEnv)}`);
+}
+const inheritedProject = Object.assign(Object.create({ config }), {
+  fsh: files,
+  predefined,
+  siteFiles,
+});
+const inheritedFieldEnv = JSON.parse(session.prepareProject(inheritedProject, generatorSpec));
+if (inheritedFieldEnv.ok || !inheritedFieldEnv.error?.message?.includes('missing field')) {
+  throw new Error(`typed prepareProject accepted an inherited field: ${JSON.stringify(inheritedFieldEnv)}`);
+}
+const prepareEnv = JSON.parse(session.prepareProject(projectRevision, generatorSpec));
 if (!prepareEnv.ok) throw new Error(`session.prepareProject failed: ${prepareEnv.error?.message}`);
+const stringPrepareEnv = JSON.parse(session.prepareProject(
+  JSON.stringify(projectRevision),
+  JSON.stringify(generatorSpec),
+));
+if (!stringPrepareEnv.ok) {
+  throw new Error(`session.prepareProject string fallback failed: ${stringPrepareEnv.error?.message}`);
+}
+if (stringPrepareEnv.result.site.buildId !== prepareEnv.result.site.buildId
+  || JSON.stringify(stringPrepareEnv.result.compiled) !== JSON.stringify(prepareEnv.result.compiled)) {
+  throw new Error('typed and JSON-string prepareProject inputs produced different build identities or compilation');
+}
 const out = prepareEnv.result.compiled;
 
 let match = 0, diff = 0, miss = 0;

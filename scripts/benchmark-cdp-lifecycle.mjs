@@ -52,6 +52,43 @@ export function transientCdpFallback(error, fallback) {
   return fallback;
 }
 
+function samePreviewIdentity(left, right) {
+  return !!left && !!right
+    && left.generator === right.generator
+    && left.path === right.path;
+}
+
+const SHA256 = /^[0-9a-f]{64}$/u;
+
+/** A hidden Author-tab iframe is retained evidence, not a visibility claim. */
+export function isRetainedPreviewBinding(previous, current) {
+  return samePreviewIdentity(previous, current)
+    && current.mounted === true
+    && current.fallback === false
+    && Number.isSafeInteger(previous.generation)
+    && Number.isSafeInteger(current.generation)
+    && SHA256.test(previous.contentSha256 || '')
+    && SHA256.test(current.contentSha256 || '')
+    && current.generation === previous.generation
+    && current.contentSha256 === previous.contentSha256;
+}
+
+/** Bind a hot update to one exact page and a strictly newer authenticated body. */
+export function isExactPreviewSuccessor(previous, current, expected = {}) {
+  return samePreviewIdentity(previous, current)
+    && current.mounted === true
+    && current.fallback === false
+    && current.readyState === 'complete'
+    && Number.isSafeInteger(previous.generation)
+    && Number.isSafeInteger(current.generation)
+    && SHA256.test(previous.contentSha256 || '')
+    && SHA256.test(current.contentSha256 || '')
+    && current.generation > previous.generation
+    && current.contentSha256 !== previous.contentSha256
+    && (!expected.generator || current.generator === expected.generator)
+    && (!expected.path || current.path === expected.path);
+}
+
 // Return a page-owned probe that performs the initial catalog selection only
 // after the exact document's engine and catalog control exist. Installing this
 // before navigation avoids a post-navigation CDP command being stranded on a

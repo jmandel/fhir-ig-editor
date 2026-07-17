@@ -29,28 +29,23 @@ const timeoutScale = Math.max(1, requestedCpuThrottle);
 const STOCK_WARM_EDIT_BUDGET_MS = 2000 * timeoutScale;
 
 function assessWarmEditMetrics(events) {
-  const metrics = [...(events || [])]
+  const event = [...(events || [])]
     .reverse()
     .map((entry) => entry?.event)
     .find((event) => event?.operation === 'prepare'
       && event?.stage === 'site-build'
-      && event.metrics
-      && Object.hasOwn(event.metrics, 'snapshotCompletedLocalCacheHit'))?.metrics;
-  const phaseNames = [
-    'outputCatalogMs',
-    'publisherArtifactsMs',
-    'siteBuildCloseMs',
-    'closureVerifyMs',
-  ];
+      && event.metrics);
+  const metrics = event?.metrics;
   return {
     metrics: metrics || null,
+    durationMs: event?.durationMs ?? null,
     ok: Boolean(metrics
-      && metrics.snapshotCompletedLocalCacheHit === 1
-      && metrics.publisherRecipeAssetsCacheHit === 1
-      && metrics.renderSemanticsCacheHit === 1
-      && metrics.templateMaterializeMs === 0
-      && metrics.publisherRuntimeMs === 0
-      && phaseNames.every((name) => Number.isFinite(metrics[name]) && metrics[name] >= 0)),
+      && Number.isFinite(metrics.compileProjectMs)
+      && metrics.compileProjectMs >= 0
+      && Number.isFinite(metrics.rustPrepareTotalMs)
+      && metrics.rustPrepareTotalMs >= 0
+      && Number.isFinite(event?.durationMs)
+      && event.durationMs >= 0),
   };
 }
 
@@ -224,6 +219,103 @@ async function waitForStable(ws, expr, timeoutMs = 60000, label = expr, samples 
     await sleep(150);
   }
   throw new Error(`TIMEOUT waiting for stable state: ${label}`);
+}
+
+async function measureExclusivePreviewBoundary(ws) {
+  await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }, id);
+  const wide = await evalJs(ws, `(async () => {
+    const authorTab = document.querySelector('#workspace-tab-author');
+    const previewPanel = document.querySelector('#workspace-panel-preview');
+    const frame = document.querySelector('.preview-frame');
+    if (!authorTab || !previewPanel || !frame) return { error: 'missing workspace control' };
+    authorTab.click();
+    for (let step = 0; step < 4; step++) await new Promise(requestAnimationFrame);
+    frame.focus();
+    window.__exclusivePreviewBoundaryFrame = frame;
+    return {
+      width: innerWidth,
+      previewHidden: !!previewPanel.hidden,
+      previewRole: previewPanel.getAttribute('role') || '',
+      frameFocused: document.activeElement === frame,
+    };
+  })()`);
+  await cdp(ws, 'Emulation.setDeviceMetricsOverride', {
+    width: 1199,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }, id);
+  const result = await evalJs(ws, `(async () => {
+    const settle = async () => {
+      for (let frame = 0; frame < 4; frame++) await new Promise(requestAnimationFrame);
+    };
+    const authorTab = document.querySelector('#workspace-tab-author');
+    const previewTab = document.querySelector('#workspace-tab-preview');
+    const baselineFrame = window.__exclusivePreviewBoundaryFrame;
+    delete window.__exclusivePreviewBoundaryFrame;
+    if (!authorTab || !previewTab || !baselineFrame) return { error: 'missing workspace control' };
+    authorTab.click();
+    await settle();
+    const authorPanel = document.querySelector('#workspace-panel-author');
+    const previewPanel = document.querySelector('#workspace-panel-preview');
+    const author = {
+      selected: authorTab.getAttribute('aria-selected'),
+      role: authorPanel?.getAttribute('role') || '',
+      hidden: !!authorPanel?.hidden,
+      previewHidden: !!previewPanel?.hidden,
+      previewRole: previewPanel?.getAttribute('role') || '',
+      visibleWorkspaces: [...document.querySelectorAll('.workspace-view')]
+        .filter((view) => !view.hidden).length,
+      frameCount: document.querySelectorAll('.preview-frame').length,
+      sameFrame: document.querySelector('.preview-frame') === baselineFrame,
+      focusRestoredToSelectedTab: document.activeElement === authorTab,
+    };
+    previewTab.click();
+    await settle();
+    const previewRect = previewPanel?.getBoundingClientRect();
+    const preview = {
+      selected: previewTab.getAttribute('aria-selected'),
+      hidden: !!previewPanel?.hidden,
+      role: previewPanel?.getAttribute('role') || '',
+      visibleWorkspaces: [...document.querySelectorAll('.workspace-view')]
+        .filter((view) => !view.hidden).length,
+      frameCount: document.querySelectorAll('.preview-frame').length,
+      sameFrame: document.querySelector('.preview-frame') === baselineFrame,
+      width: previewRect?.width || 0,
+    };
+    return { width: innerWidth, wide: ${JSON.stringify(wide)}, author, preview };
+  })()`);
+  await cdp(ws, 'Emulation.clearDeviceMetricsOverride', {}, id);
+  return result;
+}
+
+function exclusivePreviewBoundaryPass(result) {
+  return result?.width === 1199
+    && result.wide?.width === 1440
+    && !result.wide?.previewHidden
+    && result.wide?.previewRole === 'region'
+    && result.wide?.frameFocused
+    && result.author?.selected === 'true'
+    && result.author?.role === 'tabpanel'
+    && !result.author?.hidden
+    && result.author?.previewHidden
+    && result.author?.previewRole === 'tabpanel'
+    && result.author?.visibleWorkspaces === 1
+    && result.author?.frameCount === 1
+    && result.author?.sameFrame
+    && result.author?.focusRestoredToSelectedTab
+    && result.preview?.selected === 'true'
+    && !result.preview?.hidden
+    && result.preview?.role === 'tabpanel'
+    && result.preview?.visibleWorkspaces === 1
+    && result.preview?.frameCount === 1
+    && result.preview?.sameFrame
+    && result.preview?.width >= 1198;
 }
 
 async function measureMobileLayout(ws, includeGeometry = false) {
@@ -556,6 +648,12 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       scrollTo(0, Math.min(640, max));
       return scrollY;
     })()`);
+    out.hotReloadLayoutBefore = await tabEval(preview, `({
+      scrollY,
+      scrollHeight: document.documentElement.scrollHeight,
+      innerHeight,
+      maxScrollY: Math.max(0, document.documentElement.scrollHeight - innerHeight),
+    })`);
     await sleep(100);
     await tabEval(preview, `window.__stamp = 'IDX'`);
     await editorEval(`(() => {
@@ -567,8 +665,8 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       });
     })()`);
     // Model the real interaction: typing happens with the editor focused. CDP's
-    // /json/new calls leave the most recently opened preview tab foregrounded,
-    // which can throttle the editor's 120ms prose debounce to a ~1s background timer.
+    // /json/new calls leave the most recently opened preview tab foregrounded;
+    // foreground the editor so scheduling reflects an active authoring session.
     await cdp(editorWs, 'Page.bringToFront', {}, id);
     // Edit index.md's H1 in the editor (via Monaco).
     out.editResult = await editorEval(`(async () => { const leaves = [...document.querySelectorAll('.file-tree *')].filter(e => e.children.length === 0); const row = leaves.find(e => (e.textContent || '').replace(/[^\\x20-\\x7e]/g, '').trim() === 'index.md'); if (!row) return 'no-row'; (row.closest('[class*=row]') || row).click(); await new Promise(r => setTimeout(r, 400)); const ed = window.monaco && window.monaco.editor.getEditors()[0]; if (!ed) return 'no-ed'; const m = ed.getModel(); const v = m.getValue(); if (!/^# /m.test(v)) return 'not-index'; m.setValue(v.replace(/^# .*/m, '# HOTRELOAD ' + Date.now())); return 'ok'; })()`);
@@ -577,7 +675,20 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
     try {
       await tabWaitFor(preview, `window.__stamp !== 'IDX'`, 25000, 'index tab reloaded');
       out.hotReloadMs = Date.now() - tEdit;
-      out.indexHotReloaded = await tabEval(preview, `(async () => { const r = await fetch(location.pathname); const t = await r.text(); return /HOTRELOAD/.test(t); })()`);
+      out.hotReloadFetch = await tabEval(preview, `(async () => {
+        const response = await fetch(location.pathname);
+        const text = await response.text();
+        return {
+          hasMarker: /HOTRELOAD/.test(text),
+          source: response.headers.get('X-IGPreview-Source'),
+          sha256: response.headers.get('X-Content-Sha256'),
+          length: text.length,
+          heading: document.querySelector('h1')?.textContent || '',
+          control: [...document.querySelectorAll('script[data-igpreview="hot-reload"]')]
+            .map((script) => script.textContent.match(/var me=(\\{.*?\\});/)?.[1] || ''),
+        };
+      })()`);
+      out.indexHotReloaded = out.hotReloadFetch.hasMarker;
       if (out.hotReloadScrollBefore > 0) {
         await tabWaitFor(
           preview,
@@ -587,6 +698,12 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
         ).catch(() => {});
       }
       out.hotReloadScrollAfter = await tabEval(preview, `scrollY`);
+      out.hotReloadLayoutAfter = await tabEval(preview, `({
+        scrollY,
+        scrollHeight: document.documentElement.scrollHeight,
+        innerHeight,
+        maxScrollY: Math.max(0, document.documentElement.scrollHeight - innerHeight),
+      })`);
       out.hotReloadScrollPreserved = out.hotReloadScrollBefore > 0
         && Math.abs(out.hotReloadScrollAfter - out.hotReloadScrollBefore) <= 2;
     } catch (e) {
@@ -1009,6 +1126,120 @@ try {
       profileTextLength: doc?.body?.textContent?.length || 0,
     };
   })()`));
+
+  // A semantic successor must remain a complete navigable site, not only a
+  // successfully replaced profile page. Reproduce the reported sequence:
+  // edit the open profile, then follow its real TOC and Artifacts links.
+  results.tinyStructuralNavigation = await evalJs(ws, `(async () => {
+    const frame = document.querySelector('.preview-frame');
+    const win = frame?.contentWindow;
+    const doc = win?.document;
+    const editor = window.monaco?.editor.getEditors()[0];
+    if (!win || !doc || !editor) return { error: 'profile-or-editor-unavailable' };
+    const profilePath = win.location.pathname;
+    const digest = async () => {
+      const response = await win.fetch(profilePath);
+      const bytes = await response.arrayBuffer();
+      const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+        .map(value => value.toString(16).padStart(2, '0')).join('');
+      return { hash, source: response.headers.get('X-IGPreview-Source') };
+    };
+    const before = await digest();
+    win.__tinySemanticStamp = 'old';
+    const model = editor.getModel();
+    const source = model.getValue();
+    if (!source.includes('* name.given 1..* MS')) {
+      return { error: 'expected-cardinality-not-found', profilePath };
+    }
+    model.setValue(source.replace('* name.given 1..* MS', '* name.given 2..* MS'));
+    return { profilePath, before };
+  })()`);
+  if (!results.tinyStructuralNavigation?.error) {
+    await waitFor(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      return frame?.contentWindow?.location.pathname === ${JSON.stringify(results.tinyStructuralNavigation.profilePath)}
+        && frame?.contentWindow?.__tinySemanticStamp !== 'old'
+        && doc?.readyState === 'complete'
+        && !doc.querySelector('[data-igpreview-fallback]')
+        && /Name used while exploring the editor/.test(doc.body?.textContent || '');
+    })()`, 30000, 'tiny semantic profile successor');
+    results.tinyStructuralNavigation.after = await evalJs(ws, `(async () => {
+      const frame = document.querySelector('.preview-frame');
+      const win = frame?.contentWindow;
+      const response = await win.fetch(win.location.pathname);
+      const bytes = await response.arrayBuffer();
+      return {
+        hash: [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+          .map(value => value.toString(16).padStart(2, '0')).join(''),
+        source: response.headers.get('X-IGPreview-Source'),
+      };
+    })()`);
+    results.tinyStructuralNavigation.catalog = await evalJs(ws, `(() => {
+      const values = [...document.querySelectorAll('.preview-page-select option')]
+        .map(option => option.value).filter(Boolean);
+      return {
+        toc: values.includes('en/toc.html'),
+        artifacts: values.includes('en/artifacts.html'),
+        templateInternals: values.filter(value => value.startsWith('template/')),
+      };
+    })()`);
+    results.tinyStructuralNavigation.tocClick = await evalJs(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const win = frame?.contentWindow;
+      const doc = win?.document;
+      const link = [...(doc?.querySelectorAll('a[href]') || [])].find(candidate =>
+        /\\/en\\/toc\\.html$/.test(new URL(candidate.getAttribute('href'), win.location.href).pathname));
+      if (!link) return false;
+      link.click();
+      return true;
+    })()`);
+    await waitFor(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      return /\\/en\\/toc\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+        && doc?.readyState === 'complete'
+        && !doc.querySelector('[data-igpreview-fallback]')
+        && /Table of Contents/.test(doc.body?.textContent || '')
+        && /IG Editor User/.test(doc.body?.textContent || '');
+    })()`, 30000, 'tiny TOC after semantic successor');
+    results.tinyStructuralNavigation.toc = await evalJs(ws, `(async () => {
+      const frame = document.querySelector('.preview-frame');
+      const win = frame?.contentWindow;
+      const doc = win?.document;
+      const response = await win.fetch(win.location.pathname);
+      await response.arrayBuffer();
+      const link = [...doc.querySelectorAll('a[href]')].find(candidate =>
+        /\\/en\\/artifacts\\.html$/.test(new URL(candidate.getAttribute('href'), win.location.href).pathname));
+      if (link) link.click();
+      return {
+        source: response.headers.get('X-IGPreview-Source'),
+        fallback: !!doc.querySelector('[data-igpreview-fallback]'),
+        artifactsClick: !!link,
+      };
+    })()`);
+    await waitFor(ws, `(() => {
+      const frame = document.querySelector('.preview-frame');
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      return /\\/en\\/artifacts\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+        && doc?.readyState === 'complete'
+        && !doc.querySelector('[data-igpreview-fallback]')
+        && /Artifacts Summary/.test(doc.body?.textContent || '')
+        && /IG Editor User/.test(doc.body?.textContent || '');
+    })()`, 30000, 'tiny artifacts after semantic successor');
+    results.tinyStructuralNavigation.artifacts = await evalJs(ws, `(async () => {
+      const frame = document.querySelector('.preview-frame');
+      const win = frame?.contentWindow;
+      const doc = win?.document;
+      const response = await win.fetch(win.location.pathname);
+      await response.arrayBuffer();
+      return {
+        source: response.headers.get('X-IGPreview-Source'),
+        fallback: !!doc.querySelector('[data-igpreview-fallback]'),
+        textLength: doc.body?.textContent?.length || 0,
+      };
+    })()`);
+  }
   await waitFor(ws, `(() => {
     const select = document.querySelector('.preview-page-select select');
     return !!select && Array.from(select.options).some(candidate => /(?:^|\\/)index\\.html$/.test(candidate.value));
@@ -1028,6 +1259,182 @@ try {
       && /Follow one rule all the way through/i.test(doc?.body?.textContent || '');
   })()`, 30000, 'tiny authored narrative');
   results.tinyGuide.narrative = true;
+  results.tinyGuide.queryNavigation = await evalJs(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const narrative = doc?.querySelector('#segment-content');
+    const menu = [...(doc?.querySelectorAll('li.dropdown') || [])]
+      .find(item => /Live queries/.test(item.querySelector('.dropdown-toggle')?.textContent || ''));
+    return {
+      indexTable: !!narrative?.querySelector('a[href$="sql-table.html"]'),
+      indexLiquid: !!narrative?.querySelector('a[href$="sql-liquid.html"]'),
+      menuTable: !!menu?.querySelector('ul.dropdown-menu a[href$="sql-table.html"]'),
+      menuLiquid: !!menu?.querySelector('ul.dropdown-menu a[href$="sql-liquid.html"]'),
+    };
+  })()`);
+
+  await waitFor(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    return !!select && Array.from(select.options).some(candidate => /(?:^|\\/)sql-table\\.html$/.test(candidate.value));
+  })()`, 10000, 'tiny SQL table page option');
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    const option = select && Array.from(select.options).find(candidate => /(?:^|\\/)sql-table\\.html$/.test(candidate.value));
+    if (!select || !option) throw new Error('tiny SQL table page is absent');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-sql-table');
+    return root?.querySelectorAll('table tr').length === 4
+      && /Author/.test(root?.textContent || '')
+      && /Explore/.test(root?.textContent || '')
+      && /Site preview/.test(root?.textContent || '');
+  })()`, 30000, 'tiny direct SQL result');
+  results.tinyGuide.sqlTable = await evalJs(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-sql-table');
+    return {
+      rows: root?.querySelectorAll('table tr').length || 0,
+      cells: root?.querySelectorAll('table td').length || 0,
+      values: [...(root?.querySelectorAll('table tr') || [])].slice(1)
+        .map(row => [...row.querySelectorAll('td')].map(cell => cell.textContent?.trim() || '')),
+      leakedDirective: /\\{%|\\{\\{/.test(doc?.body?.textContent || ''),
+    };
+  })()`);
+
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    const option = select && Array.from(select.options).find(candidate => /(?:^|\\/)sql-liquid\\.html$/.test(candidate.value));
+    if (!select || !option) throw new Error('tiny SQL + Liquid page is absent');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-from-sql');
+    return root?.querySelectorAll('li').length === 3
+      && /3 editor views/.test(doc?.body?.textContent || '')
+      && /Author/.test(root?.textContent || '')
+      && /Explore/.test(root?.textContent || '')
+      && /Site preview/.test(root?.textContent || '');
+  })()`, 30000, 'tiny SQL data consumed by Liquid');
+  results.tinyGuide.sqlLiquid = await evalJs(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-from-sql');
+    return {
+      rows: root?.querySelectorAll('li').length || 0,
+      countText: /3 editor views/.test(doc?.body?.textContent || ''),
+      values: [...(root?.querySelectorAll('li') || [])].map(item => item.textContent?.trim() || ''),
+      leakedDirective: /\\{%|\\{\\{/.test(doc?.body?.textContent || ''),
+    };
+  })()`);
+
+  // The SQL snapshot is current-build input, not a one-time fixture. Edit the
+  // FSH CodeSystem while the SQL+Liquid page is selected, observe that selected
+  // page update, then restore A and require A again.
+  await evalJs(ws, `document.querySelector('#workspace-tab-author')?.click()`);
+  await waitFor(ws, `document.querySelector('#workspace-tab-author')?.getAttribute('aria-selected') === 'true'`, 10000, 'Tiny SQL source author workspace');
+  const sqlEditStarted = Date.now();
+  results.tinyGuide.sqlEdit = await evalJs(ws, `(() => {
+    const select = document.querySelector('.mobile-picker select');
+    const path = [...(select?.options || [])]
+      .map(option => option.value)
+      .find(value => /(?:^|\\/)04-EditorStages\\.fsh$/.test(value));
+    if (!select || !path) return { status: 'no-source' };
+    select.value = path;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return { status: 'selected', path };
+  })()`);
+  await waitFor(ws, `window.monaco?.editor.getModels().some((model) => /04-EditorStages\\.fsh$/.test(model.uri.path)) === true`, 30000, 'Tiny SQL CodeSystem model');
+  const sqlEditApplied = await evalJs(ws, `(() => {
+    const model = window.monaco?.editor.getModels()
+      .find((candidate) => /04-EditorStages\\.fsh$/.test(candidate.uri.path));
+    if (!model) return 'no-model';
+    const before = '* #preview "Site preview" "Read the pages generated from those definitions."';
+    const after = '* #preview "Live preview" "Watch this page regenerate from the current definitions."';
+    const source = model.getValue();
+    if (!source.includes(before)) return 'source-mismatch';
+    window.__tinySqlOriginal = source;
+    model.setValue(source.replace(before, after));
+    return 'ok';
+  })()`);
+  if (sqlEditApplied !== 'ok') throw new Error(`Tiny SQL edit failed: ${sqlEditApplied}`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-from-sql');
+    return root?.querySelectorAll('li').length === 3
+      && /3 editor views/.test(doc?.body?.textContent || '')
+      && /Live preview/.test(root?.textContent || '')
+      && /Watch this page regenerate from the current definitions\./.test(root?.textContent || '');
+  })()`, 30000, 'Tiny FSH edit reaches SQL + Liquid page');
+  results.tinyGuide.sqlEdit = {
+    ...results.tinyGuide.sqlEdit,
+    status: 'updated',
+    elapsedMs: Date.now() - sqlEditStarted,
+  };
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    const option = select && Array.from(select.options).find(candidate => /(?:^|\\/)sql-table\\.html$/.test(candidate.value));
+    if (!select || !option) throw new Error('tiny SQL table page is absent after edit');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-sql-table');
+    return root?.querySelectorAll('table tr').length === 4
+      && /Live preview/.test(root?.textContent || '')
+      && /Watch this page regenerate from the current definitions\./.test(root?.textContent || '');
+  })()`, 30000, 'Tiny FSH edit reaches direct SQL table page');
+  results.tinyGuide.sqlEdit.directRows = await evalJs(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    return doc?.querySelectorAll('#editor-stages-sql-table table tr').length || 0;
+  })()`);
+  await evalJs(ws, `(() => {
+    const select = document.querySelector('.preview-page-select select');
+    const option = select && Array.from(select.options).find(candidate => /(?:^|\\/)sql-liquid\\.html$/.test(candidate.value));
+    if (!select || !option) throw new Error('tiny SQL + Liquid page is absent after edit');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-from-sql');
+    return root?.querySelectorAll('li').length === 3
+      && /3 editor views/.test(doc?.body?.textContent || '')
+      && /Live preview/.test(root?.textContent || '')
+      && /Watch this page regenerate from the current definitions\./.test(root?.textContent || '');
+  })()`, 30000, 'Tiny SQL + Liquid page remains current after direct SQL check');
+  const sqlRestoreStarted = Date.now();
+  const sqlRestoreApplied = await evalJs(ws, `(() => {
+    const model = window.monaco?.editor.getModels()
+      .find((candidate) => /04-EditorStages\\.fsh$/.test(candidate.uri.path));
+    if (!model || typeof window.__tinySqlOriginal !== 'string') return 'no-model';
+    model.setValue(window.__tinySqlOriginal);
+    delete window.__tinySqlOriginal;
+    return 'ok';
+  })()`);
+  if (sqlRestoreApplied !== 'ok') throw new Error(`Tiny SQL restore failed: ${sqlRestoreApplied}`);
+  await waitForStable(ws, `(() => {
+    const frame = document.querySelector('.preview-frame');
+    const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+    const root = doc?.querySelector('#editor-stages-from-sql');
+    return root?.querySelectorAll('li').length === 3
+      && /3 editor views/.test(doc?.body?.textContent || '')
+      && /Site preview/.test(root?.textContent || '')
+      && !/Live preview/.test(root?.textContent || '');
+  })()`, 30000, 'Tiny SQL A-B-A restoration');
+  results.tinyGuide.sqlEdit.restoreElapsedMs = Date.now() - sqlRestoreStarted;
   results.tinyGuide.templatePreferencePreserved = await evalJs(ws,
     `localStorage.getItem('igEditor.templateCoord') === 'hl7.fhir.template#0.10.1'`,
   );
@@ -1037,7 +1444,7 @@ try {
     await waitFor(ws, `(() => localStorage.getItem('igEditor.project') === 'tiny'
       && document.querySelector('.preview-template-select select')?.value === 'hl7.fhir.template'
       && document.querySelector('.preview-template-version select')?.value === '1.0.0'
-      && document.querySelectorAll('.res-row').length === 4)()`, 60000, 'persisted Tiny template after reload');
+      && document.querySelectorAll('.res-row').length === 5)()`, 60000, 'persisted Tiny template after reload');
     results.tinyReload = await evalJs(ws, `(() => ({
       preference: localStorage.getItem('igEditor.templateCoord'),
       family: document.querySelector('.preview-template-select select')?.value || '',
@@ -1197,7 +1604,7 @@ try {
   }
 
   // 5. Introduce an FSH error: select an FSH file, set its Monaco model text to
-  //    something with an unresolvable insert rule, and let the debounced compile run.
+  //    something with an unresolvable insert rule, and let the latest-only build run.
   //    We use Monaco's API via the global editor instance registered by the app.
   const inject = `(async () => {
     // Find the Monaco editor instance holding an .fsh model and append a broken profile.
@@ -1707,6 +2114,19 @@ try {
   if (antFixture === 'example.bad.ant.template#0.0.1') {
     // Load it via the advanced input path (open advanced, type the coord, Load).
     await evalJs(ws, `(() => {
+      window.__antRefusalCapture = null;
+      window.__antRefusalObserver?.disconnect();
+      const capture = () => {
+        const message = document.querySelector('.preview-template-error')?.textContent?.trim() || '';
+        if (/server-side|ant/i.test(message)) window.__antRefusalCapture = message;
+      };
+      window.__antRefusalObserver = new MutationObserver(capture);
+      window.__antRefusalObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      capture();
       const fam = document.querySelector('.preview-template-select select');
       const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
       setter.call(fam, '__advanced__');
@@ -1724,14 +2144,9 @@ try {
       return true;
     })()`);
     // The refusal banner appears with the server-side-rendering message.
-    await waitFor(ws, `(() => {
-      const b = document.querySelector('.preview-template-error');
-      return b && /server-side|ant/i.test(b.textContent);
-    })()`, 30000, 'AntHookError refusal banner');
-    results.antRefusal = await evalJs(ws, `(() => {
-      const b = document.querySelector('.preview-template-error');
-      return b ? b.textContent.trim() : null;
-    })()`);
+    await waitFor(ws, `(() => !!window.__antRefusalCapture)()`, 30000, 'AntHookError refusal banner');
+    results.antRefusal = await evalJs(ws, `window.__antRefusalCapture`);
+    await evalJs(ws, `window.__antRefusalObserver?.disconnect()`);
     // The selector did NOT wedge: it falls back to the previous good template and
     // re-renders. Wait for that fallback render to repopulate the frame (the
     // fallback re-runs the whole build, so allow it time), then assert content.
@@ -2028,8 +2443,68 @@ try {
               remoteTabLinks: tabLinks.filter(link => link.href.split('#')[0] !== current).length,
             };
           })()`);
+
+          results.usCoreStructuralNavigation = await evalJs(ws, `(() => {
+            const frame = document.querySelector('.preview-frame');
+            const win = frame?.contentWindow;
+            const doc = win?.document;
+            const values = [...document.querySelectorAll('.preview-page-select option')]
+              .map(option => option.value).filter(Boolean);
+            const link = [...(doc?.querySelectorAll('a[href]') || [])].find(candidate =>
+              /\\/en\\/toc\\.html$/.test(new URL(candidate.getAttribute('href'), win.location.href).pathname));
+            if (link) link.click();
+            return {
+              catalogToc: values.includes('en/toc.html'),
+              catalogArtifacts: values.includes('en/artifacts.html'),
+              tocClick: !!link,
+            };
+          })()`);
+          await waitFor(ws, `(() => {
+            const frame = document.querySelector('.preview-frame');
+            const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+            return /\\/en\\/toc\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+              && doc?.readyState === 'complete'
+              && !doc.querySelector('[data-igpreview-fallback]')
+              && /Table of Contents/.test(doc.body?.textContent || '');
+          })()`, 30000, 'US Core TOC from CarePlan profile');
+          Object.assign(results.usCoreStructuralNavigation, await evalJs(ws, `(async () => {
+            const frame = document.querySelector('.preview-frame');
+            const win = frame?.contentWindow;
+            const doc = win?.document;
+            const response = await win.fetch(win.location.pathname);
+            await response.arrayBuffer();
+            const link = [...doc.querySelectorAll('a[href]')].find(candidate =>
+              /\\/en\\/artifacts\\.html$/.test(new URL(candidate.getAttribute('href'), win.location.href).pathname));
+            if (link) link.click();
+            return {
+              tocSource: response.headers.get('X-IGPreview-Source'),
+              tocFallback: !!doc.querySelector('[data-igpreview-fallback]'),
+              artifactsClick: !!link,
+            };
+          })()`));
+          await waitFor(ws, `(() => {
+            const frame = document.querySelector('.preview-frame');
+            const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+            return /\\/en\\/artifacts\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+              && doc?.readyState === 'complete'
+              && !doc.querySelector('[data-igpreview-fallback]')
+              && /Artifacts Summary/.test(doc.body?.textContent || '');
+          })()`, 30000, 'US Core Artifacts from TOC');
+          Object.assign(results.usCoreStructuralNavigation, await evalJs(ws, `(async () => {
+            const frame = document.querySelector('.preview-frame');
+            const win = frame?.contentWindow;
+            const doc = win?.document;
+            const response = await win.fetch(win.location.pathname);
+            await response.arrayBuffer();
+            return {
+              artifactsSource: response.headers.get('X-IGPreview-Source'),
+              artifactsFallback: !!doc.querySelector('[data-igpreview-fallback]'),
+              artifactsTextLength: doc.body?.textContent?.length || 0,
+            };
+          })()`));
         } else {
           results.usCoreCarePlan = null;
+          results.usCoreStructuralNavigation = null;
         }
       } else {
         results.usCoreProfilePage = { target: '', htmlLen: 0, textLen: 0, hasHierarchy: false };
@@ -2104,6 +2579,82 @@ try {
       recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
     }))()`);
 
+    // ---- Authored structural-page precedence (Genomics) -------------------
+    // This guide deliberately supplies input/pages/artifacts.md, including a
+    // SQL-to-Liquid query. It must replace only the generated artifacts
+    // default while the ordinary verified catalog and TOC remain intact.
+    results.genomicsClicked = await evalJs(ws, `(() => {
+      const select = document.querySelector('.open-ig-select');
+      if (!select || ![...select.options].some((option) => option.value === 'genomics')) return 'no-genomics-option';
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'genomics');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'clicked';
+    })()`);
+    if (results.genomicsClicked === 'clicked') {
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'genomics' && !!document.querySelector('.open-progress')`, 30000, 'Genomics open-progress overlay appeared');
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'genomics' && !document.querySelector('.open-progress')`, 180000, 'Genomics preparation completed');
+      await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+      await waitFor(ws, `(() => [...document.querySelectorAll('.preview-page-select option')]
+        .some((option) => option.value === 'en/artifacts.html'))()`, 120000, 'Genomics authored artifacts page in catalog');
+      await evalJs(ws, `(() => {
+        const select = document.querySelector('.preview-page-select select');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(select, 'en/artifacts.html');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await waitForStable(ws, `(() => {
+        const frame = document.querySelector('.preview-frame');
+        const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+        return /\\/preview\\/genomics\\/en\\/artifacts\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+          && doc?.readyState === 'complete'
+          && !doc.querySelector('[data-igpreview-fallback]')
+          && /Abstract Profiles/.test(doc.body?.textContent || '')
+          && /Operation Definitions/.test(doc.body?.textContent || '');
+      })()`, 120000, 'Genomics authored SQL artifacts page rendered');
+      results.genomicsAuthoredArtifacts = await evalJs(ws, `(async () => {
+        const frame = document.querySelector('.preview-frame');
+        const win = frame?.contentWindow;
+        const doc = win?.document;
+        const response = await win.fetch(win.location.pathname);
+        await response.arrayBuffer();
+        return {
+          project: localStorage.getItem('igEditor.project'),
+          catalogToc: [...document.querySelectorAll('.preview-page-select option')]
+            .some((option) => option.value === 'en/toc.html'),
+          source: response.headers.get('X-IGPreview-Source'),
+          fallback: !!doc.querySelector('[data-igpreview-fallback]'),
+          rawSql: /{%\\s*sql(?:ToData)?/.test(doc.documentElement?.textContent || ''),
+          textLength: doc.body?.textContent?.length || 0,
+        };
+      })()`);
+      await evalJs(ws, `(() => {
+        const select = document.querySelector('.preview-page-select select');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(select, 'en/toc.html');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await waitForStable(ws, `(() => {
+        const frame = document.querySelector('.preview-frame');
+        const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+        return /\\/preview\\/genomics\\/en\\/toc\\.html$/.test(frame?.contentWindow?.location.pathname || '')
+          && doc?.readyState === 'complete'
+          && !doc.querySelector('[data-igpreview-fallback]')
+          && /Table of Contents/.test(doc.body?.textContent || '');
+      })()`, 120000, 'Genomics generated TOC rendered beside authored artifacts');
+      Object.assign(results.genomicsAuthoredArtifacts, await evalJs(ws, `(async () => {
+        const frame = document.querySelector('.preview-frame');
+        const win = frame?.contentWindow;
+        const doc = win?.document;
+        const response = await win.fetch(win.location.pathname);
+        await response.arrayBuffer();
+        return {
+          tocSource: response.headers.get('X-IGPreview-Source'),
+          tocFallback: !!doc.querySelector('[data-igpreview-fallback]'),
+        };
+      })()`));
+    }
+
     // Restore the exact stock-template project state the preview-window gate needs:
     // re-open the Cycle fixture, switch its preview generator to the stock template,
     // and wait for its page list + index render. (Opening catalog IGs switched the
@@ -2122,7 +2673,7 @@ try {
       select.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    await waitForStable(ws, `localStorage.getItem('igEditor.project') === 'cycle' && !document.querySelector('.open-progress')`, 120000, 'Cycle project replaced mCODE');
+    await waitForStable(ws, `localStorage.getItem('igEditor.project') === 'cycle' && !document.querySelector('.open-progress')`, 120000, 'Cycle project replaced catalog guide');
     // Resource rows only exist while Explore is mounted. The catalog checks above
     // intentionally leave the single-surface UI on Site preview, so assert the
     // compiled Cycle resources after selecting their owning surface instead of
@@ -2202,13 +2753,28 @@ try {
     await waitFor(ws, `!!document.querySelector('.preview-generator-select select')`, 30000, 'preview generator select present');
     await waitForStable(ws, `document.querySelector('.preview-generator-select select')?.value === 'cycle'`, 30000, 'Cycle fixture reset to Cycle generator');
     await evalJs(ws, `(() => {
+      window.__e2ePublisherMetricStart = window.__igDebug?.metrics?.length || 0;
       const sel = document.querySelector('.preview-generator-select select');
       const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
       setter.call(sel, 'hl7.fhir.template');
       sel.dispatchEvent(new Event('change', { bubbles: true }));
       return sel.value;
     })()`);
-    await waitFor(ws, `(() => { const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value); return opts.some(v => v.startsWith('en/')); })()`, 90000, 'stock template page list restored');
+    // A prior verified page/catalog is intentionally visible while rebuilding.
+    // Require this exact Publisher generation to finish before the independent
+    // window test, or stale-but-valid content can satisfy the page-list wait.
+    await waitForStable(ws, `(() => {
+      const generator = document.querySelector('.preview-generator-select select');
+      const opts = [...document.querySelectorAll('.preview-page-select option')].map(o => o.value);
+      const currentEvents = (window.__igDebug?.metrics || [])
+        .slice(window.__e2ePublisherMetricStart || 0)
+        .map((entry) => entry.event);
+      return generator?.value === 'hl7.fhir.template'
+        && !document.querySelector('#workspace-tab-preview .tab-busy')
+        && !document.querySelector('.preview-error')
+        && currentEvents.some((event) => event.phase === 'preview.publish')
+        && opts.some(v => v.startsWith('en/'));
+    })()`, 90000, 'current stock template page list restored');
     await evalJs(ws, `(() => {
       const sel = document.querySelector('.preview-page-select select');
       const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
@@ -2321,6 +2887,11 @@ try {
       page: document.querySelector('.preview-page-select select')?.value || '',
       mode: document.querySelector('.workspace-views')?.dataset.mode || '',
     }))()`);
+
+    // The wide companion switches off at the exact 1200px boundary. Prove the
+    // already-mounted iframe returns to the ordinary one-visible-tab contract
+    // at 1199px before exercising the narrower phone layout.
+    results.exclusivePreview1199 = await measureExclusivePreviewBoundary(ws);
 
     // Certify the real 390px browser layout, not just CSS source. Author and
     // Explore must each expose one mobile picker while their desktop sidebars
@@ -2600,13 +3171,56 @@ try {
     && /IG Editor User/.test(tiny.profileTitle || '')
     && tiny.profileTextLength > 500
     && tiny.narrative
+    && tiny.queryNavigation?.indexTable
+    && tiny.queryNavigation?.indexLiquid
+    && tiny.queryNavigation?.menuTable
+    && tiny.queryNavigation?.menuLiquid
+    && tiny.sqlTable?.rows === 4
+    && tiny.sqlTable?.cells === 12
+    && JSON.stringify(tiny.sqlTable?.values) === JSON.stringify([
+      ['author', 'Author', 'Edit the FSH source that defines the guide.'],
+      ['explore', 'Explore', 'Inspect the compiled FHIR definitions.'],
+      ['preview', 'Site preview', 'Read the pages generated from those definitions.'],
+    ])
+    && tiny.sqlTable?.leakedDirective === false
+    && tiny.sqlLiquid?.rows === 3
+    && tiny.sqlLiquid?.countText === true
+    && JSON.stringify(tiny.sqlLiquid?.values) === JSON.stringify([
+      'Author (author) — Edit the FSH source that defines the guide.',
+      'Explore (explore) — Inspect the compiled FHIR definitions.',
+      'Site preview (preview) — Read the pages generated from those definitions.',
+    ])
+    && tiny.sqlLiquid?.leakedDirective === false
+    && tiny.sqlEdit?.status === 'updated'
+    && /04-EditorStages\.fsh$/.test(tiny.sqlEdit?.path || '')
+    && Number.isFinite(tiny.sqlEdit?.elapsedMs)
+    && Number.isFinite(tiny.sqlEdit?.restoreElapsedMs)
     && tiny.templatePreferencePreserved
-    // prepare exposes the four authored FSH products; the generated
+    // prepare exposes the five authored FSH products; the generated
     // ImplementationGuide is deliberately a disk/native-only SUSHI output.
-    && results.tinyResourceCount === 4
+    && results.tinyResourceCount === 5
     && results.tinyCleanDiagnostics === 0
   )) {
     console.error('assert: tiny Source -> Definition -> standard Publisher page story failed —', JSON.stringify(tiny)); ok = false;
+  }
+  {
+    const structural = results.tinyStructuralNavigation || {};
+    const verifiedSources = new Set(['content-store', 'build-cache', 'content-transfer', 'render']);
+    if (structural.error
+      || structural.before?.hash === structural.after?.hash
+      || !verifiedSources.has(structural.after?.source)
+      || !structural.catalog?.toc
+      || !structural.catalog?.artifacts
+      || structural.catalog?.templateInternals?.length !== 0
+      || !structural.tocClick
+      || structural.toc?.fallback
+      || !verifiedSources.has(structural.toc?.source)
+      || !structural.toc?.artifactsClick
+      || structural.artifacts?.fallback
+      || !verifiedSources.has(structural.artifacts?.source)
+      || !(structural.artifacts?.textLength > 100)) {
+      console.error('assert: semantic profile edit did not retain navigable verified TOC/artifacts outputs —', JSON.stringify(structural)); ok = false;
+    }
   }
   if (!results.packageBatchProgress.some((event) => /of [2-9] dependencies/.test(event.message))
     || results.packageBatchProgress.some((event) => event.totalBytes != null || /^Loaded /.test(event.message))) {
@@ -2681,6 +3295,36 @@ try {
     ) {
       console.error('assert: US Core CarePlan contains nested/remote tab content —', JSON.stringify(carePlan)); ok = false;
     }
+    const structural = results.usCoreStructuralNavigation;
+    const verifiedSources = new Set(['content-store', 'build-cache', 'content-transfer', 'render']);
+    if (
+      !structural?.catalogToc
+      || !structural?.catalogArtifacts
+      || !structural?.tocClick
+      || !structural?.artifactsClick
+      || !verifiedSources.has(structural?.tocSource)
+      || !verifiedSources.has(structural?.artifactsSource)
+      || structural?.tocFallback !== false
+      || structural?.artifactsFallback !== false
+      || structural?.artifactsTextLength < 500
+    ) {
+      console.error('assert: US Core profile -> TOC -> Artifacts reached missing/unverified output —', JSON.stringify(structural)); ok = false;
+    }
+  }
+  {
+    const genomics = results.genomicsAuthoredArtifacts || {};
+    const verifiedSources = new Set(['content-store', 'build-cache', 'content-transfer', 'render']);
+    if (results.genomicsClicked !== 'clicked'
+      || genomics.project !== 'genomics'
+      || !genomics.catalogToc
+      || !verifiedSources.has(genomics.source)
+      || !verifiedSources.has(genomics.tocSource)
+      || genomics.fallback
+      || genomics.tocFallback
+      || genomics.rawSql
+      || !(genomics.textLength > 1000)) {
+      console.error('assert: Genomics authored SQL artifacts page did not override only its structural default —', JSON.stringify({ clicked: results.genomicsClicked, genomics })); ok = false;
+    }
   }
   // mCODE catalog regression: opening the baked catalog entry must reach the
   // stock generator's real index page, not merely finish loading source files.
@@ -2746,7 +3390,8 @@ try {
       console.error('assert: profile page did not contain exactly one correctly-scoped hot-reload control block —', JSON.stringify(pw.profileHotReloadPayloads)); ok = false;
     }
     if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
-    if (!(pw.previewWorkerRestart?.ok && /[?&]protocol=6(?:&|$)/.test(pw.previewWorkerRestart.scriptURL || ''))) {
+    const restartProtocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_PROTOCOL}(?:&|$)`);
+    if (!(pw.previewWorkerRestart?.ok && restartProtocolPattern.test(pw.previewWorkerRestart.scriptURL || ''))) {
       console.error('assert: preview worker did not restart at the current module protocol —', pw.previewWorkerRestart); ok = false;
     }
     if (!(pw.persistedAfterRestart
@@ -2808,8 +3453,8 @@ try {
   if (results.editTitleResult !== 'ok') { console.error('assert: could not edit index title —', results.editTitleResult); ok = false; }
   else if (!results.previewUpdatedAfterEdit) { console.error('assert: preview did not update after FSH/page edit'); ok = false; }
   // F6 stock-template gates: renders + a 2s warm-edit automation budget. The
-  // measured span includes the 120ms prose debounce, compile, stage, Publisher render,
-  // fragment fills, iframe publication, and up to one 120ms polling interval.
+  // measured span includes latest-only scheduling, compile, canonical Publisher
+  // preparation/render, fragment fills, iframe publication, and observer latency.
   // This still catches gross regressions without claiming a sub-second result
   // that the controlled browser does not consistently achieve.
   if (!(results.stockIndexLen > 500)) { console.error('assert: stock template index did not render'); ok = false; }
@@ -2844,13 +3489,16 @@ try {
   if (!mobileLayoutPass(results.mobile390)) {
     console.error('assert: 390px single-surface layout failed —', JSON.stringify(results.mobile390)); ok = false;
   }
+  if (!exclusivePreviewBoundaryPass(results.exclusivePreview1199)) {
+    console.error('assert: 1199px exclusive preview boundary failed —', JSON.stringify(results.exclusivePreview1199)); ok = false;
+  }
   if (results.stockEditResult !== 'ok') {
     console.error('assert: stock warm edit was not applied —', results.stockEditResult); ok = false;
   } else if (!(results.stockWarmEditMs < STOCK_WARM_EDIT_BUDGET_MS)) {
     console.error('assert: stock warm edit took', results.stockWarmEditMs, `ms (gate: <${STOCK_WARM_EDIT_BUDGET_MS})`); ok = false;
   }
   if (!results.stockWarmReuse?.ok) {
-    console.error('assert: stock warm edit missed exact private reuse —', JSON.stringify(results.stockWarmReuse)); ok = false;
+    console.error('assert: stock warm edit did not report stable compile/prepare spans —', JSON.stringify(results.stockWarmReuse)); ok = false;
   }
   // #40 template selector: curated version catalog (default UX — no typing).
   const tc = results.templateCatalog || {};

@@ -40,12 +40,24 @@ workspace once as an immutable `ProjectRevision`. Switching projects selects a
 different workspace instead of replacing a global working tree, so authored
 edits survive A -> B -> A and reload. `ProjectRevision` crosses the worker only
 through `prepare`; Rust derives the canonical content-addressed source revision.
+Each live text path owns one deterministic projection used by that capture:
+FSH text, a frozen parsed predefined resource, and/or the authored-site base64
+carrier. An edit replaces only that path's projection; deletion and rename
+remove it. This is the bounded current source node, not a historical build
+cache or a second project representation.
 
 The target-neutral Rust executor is `site_engine::SiteEngine`. Its preparation
 state owns semantic compilation reuse, complete `PreparedGuide` construction,
 generator projection, Publisher assembly, and bounded immutable runtimes. A
 host supplies an explicit resolver-scoped `PackageEnvironment`; `wasm_api`
-only parses and serializes transport and has no parallel preparation path.
+strictly decodes and encodes transport and has no parallel preparation path.
+The browser passes the complete typed `ProjectRevision` and `GeneratorSpec`
+directly to WASM, where the canonical serde schemas reject unknown or inherited
+fields. Raw JSON strings are compatibility inputs to that same decoder, not a
+second API or stored project representation. One immutable `PackageEnvironment`
+is the authority for authenticated carriers, mounted labels, the package view,
+and lock material; mounting constructs an atomic immutable successor rather
+than rebuilding a parallel environment during every edit.
 Publisher `SiteBuild` artifacts root semantic documents, all authored roles,
 the materialized template tree, assembled runtime tree, exact source revision,
 and package lock. SiteBuild v2 makes each locked package's `content` the exact
@@ -167,26 +179,37 @@ implementation recipe, options, and addressed content. Cache keys are private
 indexes for those identities. A cache hit reconstructs and verifies the same
 domain value; it never authorizes a parallel cached representation.
 
-Within one `SiteEngine`, derivation reuse is bounded to the current and previous
-successful semantic generations. It remains behind `prepare`; it is not another
-host operation or handoff value. Reusable StructureDefinition snapshots carry
+Within one `SiteEngine`, derivation reuse lives in exactly three bounded
+current/previous histories: semantic compilations, prepared derivations, and
+installed runtimes. It remains behind `prepare`; it is not another host
+operation or handoff value. Reusable StructureDefinition snapshots carry
 opaque manifests of every positive, negative, precedence, provenance, body, and
 recursive package/local read and are accepted only after revalidation against
-the new exact package context. Publisher rendering may share only an immutable,
-carrier-keyed package metadata catalog; current PreparedGuide resources, own
-resource maps, terminology state, mixed lookup caches, render state, output
-catalog, and page bodies are rebuilt for the new generation.
+the new exact package context. A positive package-resource fact may use one
+domain-separated opaque identity derived from the authenticated
+`PreparedPackage` carrier `ContentRef` plus the normalized member path. The
+same carrier and path prove the same immutable member without inflating it;
+different carriers or paths never compare equal. Ordinary filesystem, mutable,
+unscoped, or otherwise unproven sources read, parse, and hash the value
+canonically. This proof is an input-node identity inside the existing manifest,
+not a package cache, database, handoff, or second snapshot representation.
+Publisher rendering may share only an immutable, carrier-keyed package metadata
+catalog; current PreparedGuide resources, own resource maps, terminology state,
+mixed lookup caches, render state, output catalog, and page bodies are rebuilt
+for the new generation.
 
-Candidates are staged off-side to their complete authority boundary. Snapshot
-derivations promote only after the new `PreparedGuide` succeeds; Publisher
-package catalogs promote only after the complete target runtime installs. A
-failure before either boundary promotes nothing at that boundary. Empty,
+One owned compilation candidate and one owned target candidate stay off-side
+for both Publisher and Cycle until every fallible close, object-admission, and
+verification step succeeds. One infallible `commit_success` then advances
+semantic, preparation, and runtime history together. A failure before that
+boundary changes none of the prior histories or their recency. Empty,
 incomplete, unknown, or over-budget evidence takes the canonical full path and
-installs a bounded tombstone so older facts still age out. Snapshot and render-
-catalog evidence is limited by explicit resource/fact/byte ceilings.
-Declaration-level compiler reuse and cross-build page replay remain disabled
-until they can supply complete read manifests; elapsed time, filenames, or a
-prior successful output are never reuse authority.
+installs a bounded tombstone so older facts still age out.
+Snapshot and render-catalog evidence is limited by explicit
+resource/fact/byte ceilings.
+Declaration-level compiler reuse and cross-build page replay have no production
+plumbing. They remain deferred until they can supply complete read manifests;
+elapsed time, filenames, or a prior successful output are never reuse authority.
 
 Warm preview may expose the prior immutable publication pointer/catalog and its
 individually verified `ContentRef`s before the compiler is ready for the current
@@ -250,6 +273,11 @@ place.
 | generation-specific HTML cache identity and regex normalization | canonical renderer bytes plus response-time preview control injection |
 | overlapping normative architecture prose in root/subproject READMEs and `SPEC.md` | this document; other docs orient, operate, or explain one implementation |
 | singleton project VFS plus global whole-tree replacement on every guide switch | project-scoped `WorkspaceRepository -> Workspace -> ProjectRevision` capture |
+| compiler instance evaluator and disabled dependency-observation/page-replay graph | canonical compiler execution plus opaque per-SD derivations; later experiments stay external until independently justified |
+| exact `PreparedGuide`, separate Cycle, snapshot-completed, and lazy Publisher output caches | three bounded histories: semantic, preparation, and runtime |
+| Publisher pending-project/generation/promotion graph | owned compilation/target candidates and one infallible `commit_success` |
+| page/Liquid-owned SQL database lifecycle | one bounded pre-Liquid SQLite expansion into ordinary catalog files |
+| generated Liquid capability inventory and receipt-specific production microtimers | hand-written capability docs, executable behavior tests, and stable whole-phase spans/reuse counters |
 
 ## Reduction rules and completion evidence
 

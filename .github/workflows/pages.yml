@@ -62,6 +62,9 @@ jobs:
           cargo test -p site_build --release
           # Typed fragment resolution/read-set behavior is renderer-owned.
           cargo test -p render_page --release
+          # Publisher-owned structural outputs and the bounded pre-Liquid SQL
+          # expansion are separate correctness boundaries.
+          cargo test -p publisher_sql -p site_producer --release
           # Fig's hermetic tests cover native capture/publication safety,
           # strict SiteEngine admission, external finalization, and output-cache
           # verification. The deleted staged watch/dirty-cone architecture has

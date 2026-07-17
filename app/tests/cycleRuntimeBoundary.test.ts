@@ -36,6 +36,7 @@ describe('lazy Cycle worker capability', () => {
     );
     expect(cycleBranch).toContain('await loadCycleRuntimeModule()');
     expect(cycleBranch).toContain('await openCycleBuildRuntime(');
+    expect(cycleBranch).toContain('Cycle transport omitted its closed SiteBuild');
     expect(cycleBranch.indexOf('await openCycleBuildRuntime('))
       .toBeLessThan(cycleBranch.indexOf('siteBuilds.install('));
 
@@ -45,6 +46,7 @@ describe('lazy Cycle worker capability', () => {
     );
     expect(publisherBranch).not.toContain('loadCycleRuntimeModule');
     expect(publisherBranch).toContain("kind: 'publisher'");
+    expect(publisherBranch).toContain('Publisher transport redundantly returned its closed SiteBuild');
   });
 
   test('preserves the closed non-page and four-operation runtime semantics', () => {

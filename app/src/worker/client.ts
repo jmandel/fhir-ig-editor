@@ -1219,7 +1219,7 @@ export class EngineClient {
         message: 'Compiling definitions and preparing the site…',
         fileCount: Object.keys(project.fsh).length,
       });
-      const result = await this.call('prepare', project, spec);
+      const result: PrepareTransportResult = await this.call('prepare', project, spec);
       this.projectGeneration += 1;
       this.snapshotCache.clear();
       for (const event of result.events) emitProgress(report, event);

@@ -88,6 +88,7 @@ cd vendor/sushi-rs
 cargo test -p compiler -p wasm_api -p snapshot_gen -p prepared_guide -p site_engine --release
 cargo test -p site_build --release
 cargo test -p render_page --release
+cargo test -p publisher_sql -p site_producer --release
 cargo test -p fig --release
 cd ../..
 ```
@@ -129,9 +130,12 @@ BASE_PATH=/fhir-ig-editor/ bash scripts/run-browser-gates.sh app/dist
 
 The script serves a private snapshot rather than the live worktree. Its CDP
 harness covers engine boot and commit identity, compilation/diagnostics,
-snapshot/terminology behavior, Cycle and stock rendering, arbitrary template
-loading/refusal, US Core runtime closure, independent-window navigation,
-reload/history, IG-scoped hot reload, and editor-close cache/fallback behavior.
+snapshot/terminology behavior, Cycle and stock rendering, Tiny's bounded SQL
+pages, verified TOC/Artifacts navigation, arbitrary template loading/refusal,
+US Core runtime closure, real mCODE dependency resolution, independent-window
+navigation, reload/history, IG-scoped hot reload, scroll preservation, mobile
+reachability, and editor-close cache/fallback behavior. Structural navigation
+must report `fallback:false`; a shell or stale preview is not a pass.
 
 The runtime-closure assertion requires zero broken images, zero missing or
 HTML-fallback same-origin assets, required table globals, the exact gated jQuery
@@ -209,12 +213,19 @@ After Pages succeeds:
 
 1. Load <https://joshuamandel.com/fhir-ig-editor/> with a fresh profile and
    confirm the engine commit.
-2. Open Cycle, render with the Cycle generator, edit page content, and confirm
+2. Open Tiny, verify both SQL pages show all three `EditorStage` concepts, make
+   a real FSH concept/profile edit, and confirm the selected verified page hot
+   updates without losing scroll.
+3. From Tiny's changed profile navigate to TOC and Artifacts; both must be
+   cataloged verified outputs with `fallback:false`.
+4. Open Cycle, render with the Cycle generator, edit page content, and confirm
    only Cycle preview windows for the changed page reload.
-3. Switch to the stock template and render/edit a profile or page.
-4. Open US Core, render `StructureDefinition-us-core-patient.html`, and inspect
-   tables/icons/images.
-5. Open an independent preview tab and exercise links, back/forward, and reload.
+5. Open US Core at `StructureDefinition-us-core-careplan.html`, then navigate
+   to TOC and Artifacts and inspect tables/icons/images.
+6. Open mCODE and require its exact dependency closure to resolve; keep its
+   known diagram 404s explicit rather than claiming zero failures.
+7. Exercise an independent preview tab, links, back/forward, reload, mobile
+   Preview reachability, and retained scroll across a hot update.
 
 The automated artifact gate is authoritative; the smoke check catches hosting,
 cache, custom-domain, or browser-policy conditions outside the build runner.
@@ -242,6 +253,9 @@ unrelated WASM module.
   source/template/tool/options (or an authenticated precomputed result), not an
   authored-asset side channel.
 - Publisher and Cycle both use the common immutable four-operation host API;
-  no compatibility database is a supported renderer input.
+  no compatibility database is a host or renderer input. Publisher's internal
+  pre-Liquid SQLite step currently supports own compiled Resources, CodeSystem
+  rows, and basic ConceptMap rows only; full dependency/terminology tables and
+  Java `package.db` parity require a pinned oracle and remain unclaimed.
 - Large catalog guides are sampled by the browser gate rather than exhaustively
   rendering every page on every deployment.

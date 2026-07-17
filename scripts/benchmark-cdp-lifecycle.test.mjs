@@ -10,6 +10,8 @@ import {
   CdpTransportError,
   TopLevelNavigationLifecycle,
   createCatalogSelectionProbe,
+  isExactPreviewSuccessor,
+  isRetainedPreviewBinding,
   isCommittedTopLevelFrame,
   reconcileCompletedWorkerBody,
   reconcileNetworkRuleEvidence,
@@ -18,6 +20,38 @@ import {
   summarizeAppliedNetworkRuleCoverage,
   transientCdpFallback,
 } from './benchmark-cdp-lifecycle.mjs';
+
+test('preview bindings distinguish retained hidden content from an exact successor', () => {
+  const previous = {
+    generator: 'ips',
+    path: 'en/StructureDefinition-Patient-uv-ips.html',
+    generation: 10,
+    contentSha256: 'a'.repeat(64),
+    mounted: true,
+    visible: true,
+    fallback: false,
+    readyState: 'complete',
+  };
+  const retainedHidden = { ...previous, visible: false };
+  assert.equal(isRetainedPreviewBinding(previous, retainedHidden), true);
+  assert.equal(isExactPreviewSuccessor(previous, retainedHidden), false);
+
+  const successor = {
+    ...previous,
+    generation: 11,
+    contentSha256: 'b'.repeat(64),
+  };
+  assert.equal(isRetainedPreviewBinding(previous, successor), false);
+  assert.equal(isExactPreviewSuccessor(previous, successor, {
+    generator: 'ips',
+    path: previous.path,
+  }), true);
+  assert.equal(isExactPreviewSuccessor(previous, { ...successor, fallback: true }), false);
+  assert.equal(isExactPreviewSuccessor(previous, { ...successor, path: 'en/index.html' }), false);
+  assert.equal(isExactPreviewSuccessor(previous, { ...successor, contentSha256: previous.contentSha256 }), false);
+  assert.equal(isExactPreviewSuccessor(previous, { ...successor, contentSha256: 'not-a-digest' }), false);
+  assert.equal(isRetainedPreviewBinding(previous, { ...retainedHidden, generation: 10.5 }), false);
+});
 
 test('setup frame proof binds the exact top-level loader without requiring a runtime context', () => {
   const navigation = { frameId: 'frame-1', loaderId: 'loader-2' };
