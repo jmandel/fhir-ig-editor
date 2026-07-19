@@ -1,5 +1,83 @@
 # FHIR IG Editor working agreement
 
+## Active correctness round (2026-07-18, landing)
+
+The user authorized dependency-order commit/push/deploy after complete gates.
+This round fixes three live failures: PDex package resolution and large VSAC
+carrier preparation, SDC R4 `Expression` conversion, and preview timeouts/
+ownership. Engine `e72ffa10` is pushed identically to `snapshot-gen`/`main` and
+Cycle `45fac48` is pushed to `main`; editor commits `9344f8c` and `1a7ae0f` are
+locally certified and awaiting the final editor push/Pages/live verification.
+
+Preview protocol 8 has no total-duration deadline for activation, commit,
+persisted-pointer read, render/content transfer, publication, or scroll
+restoration. One exact committing WindowClient owns unresolved output; a 1 s
+observation cadence detects that concrete client disappearing but missed
+heartbeats never manufacture failure. Commit reposts are idempotent status
+checks, and the Service Worker retains at most one completion waiter. Protocol
+replacement reacquires a semantically compatible worker and replays the same
+commit id. Schema-4/5 verified pointers and output caches remain readable until
+the first successful schema-6 publication for that same IG; publishing another
+guide cannot erase them. The physical protocol-8 worker and
+its controls module are both versioned behind the protocol-6 compatibility URL.
+The 60 s package transport guard is renewable no-progress policy, not total
+work time or package validity. The former uncalibrated 250 ms Worker-recycle
+grace is replaced by one task yield; Chromium exposes no memory-release
+acknowledgement, so whole-browser memory gates—not a guessed sleep—remain
+authoritative.
+
+Streaming PreparedPackage v3 preparation retains canonical nested package
+bytes without the old 256 MiB aggregate map. A frozen deployed-engine oracle is
+exact: 1,077 bytes / SHA-256 `f5054d7b...42118`. Gzip CRC/truncation/
+concatenation/tail and legacy JSON semantics are covered. The exact real
+`us.nlm.vsac#0.18.0` carrier at `/tmp/us.nlm.vsac-0.18.0.tgz` has SHA-256
+`50d8739f...bfbd`; native release preparation passes in 9.7 s: 95,737,525 input
+bytes, 1,184,717,662 logical raw bytes, 30,151 members, and a 129,277,934-byte
+v3 artifact (`8e485ea2...a191`). Sampled native single-process peak RSS was
+543,316 KiB. The exact committed-stamp WASM is 8,097,098 bytes, SHA-256
+`2733235a...bc4366`, and reports engine `e72ffa10`. The final semantic-source
+combined-artifact PDEx receipt at
+`/tmp/fhir-final-pdex.json` is `ok:true`: real preview, hard reload, and
+same-Worker reopen all pass with no site error; cold Ready is 131.947 s,
+persistent reload 12.075 s, reopen 0.555 s, observed whole-Chromium peak RSS
+2,932,846,592 bytes, and peak observed WASM linear memory 1,212,743,680 bytes.
+These whole-process values—not the 640 MiB per-call estimate—are the honest
+browser cost. The 1.5 GiB logical, 32 MiB metadata, and 64x+8 MiB ratio bounds
+remain resource policy, not package validity claims.
+
+The final combined-artifact SDC receipt at `/tmp/fhir-final-sdc.json` is also
+`ok:true`: cold 28.967 s, persistent reload 11.816 s, same-Worker reopen
+0.482 s, real preview, no site error, 1,647,529,984-byte whole-Chromium peak,
+and 422,445,056-byte peak observed WASM linear memory. This closes the reported
+`SdcQuestionLibrary` R4 `Expression` preparation failure because the failing
+conversion precedes SiteBuild closure.
+
+Streaming preparation resource-policy exhaustion is now distinct from carrier
+integrity failure at the package_store, private WASM envelope, and canonical
+BuildError boundaries. It is non-retryable: the app does not fetch the same
+coordinate from another registry, and explains that the package may still be
+valid, the 640 MiB value is a per-call estimate, and native publishing is the
+current alternative. Corrupt carriers retain the existing integrity fallback.
+No cap changed. Package_store 67/67, focused WASM carrier 3/3, wasm32, focused
+app 18/18, TypeScript, generated-contract drift, formatting, and diff checks
+pass for this classification slice.
+
+App 164/164 (892 assertions), focused preview 16/16 (117 assertions),
+TypeScript, package_store 67/67, snapshot_gen 34/34, wasm_api 30/30,
+SiteEngine 51 pass/1 fixture ignore, wasm32 release, and workspace all-target
+checks pass. Independent final diff review found no remaining code blocker.
+The complete committed-stamp artifact (206 files / 180,131,686 bytes, SHA-256
+`5903f8b1...bf1`, recipe `aa32c465...b54`) passes the full Pages-subpath
+browser gate at `/tmp/fhir-pdex-sdc-committed-stamp-browser.log` with protocol 8
+and `E2E GATE: PASS`: exact deployed protocol-6 state/output A survives takeover
+and a current Tiny B publication, Tiny SQL A -> B -> A, US Core one-shell/TOC/
+Artifacts and 1,535/1,535 images + 85/85 assets, real mCODE/Genomics, two
+zero-delay Worker recycles, restart/persistence, 601 ms Cycle hot reload with
+scroll preserved, fallback after owner close, and mobile geometry. Then commit
+engine, push identical `snapshot-gen`/`main`, rebuild the committed stamp, commit
+Cycle/editor, push, monitor every Pages job, and fresh-profile verify the live
+origin. The editor push, Pages run, and live verification remain.
+
 ## Authority and safety
 
 - Work only in `/home/jmandel/hobby/fhir-ig-editor` and its vendored repositories.
