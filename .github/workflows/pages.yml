@@ -37,7 +37,10 @@ jobs:
           submodules: recursive
 
       - name: Install Rust + wasm target
-        uses: dtolnay/rust-toolchain@stable
+        # Release bytes and local acceptance evidence are bound to this exact
+        # compiler. A floating `stable` silently moved Pages to Rust 1.97.1 on
+        # 2026-07-18 while the certified local artifact still used Rust 1.96.
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown
 

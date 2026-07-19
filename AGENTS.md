@@ -3,11 +3,16 @@
 ## Active correctness round (2026-07-18, landing)
 
 The user authorized dependency-order commit/push/deploy after complete gates.
-This round fixes three live failures: PDex package resolution and large VSAC
+This round fixes three live failures: PDEx package resolution and large VSAC
 carrier preparation, SDC R4 `Expression` conversion, and preview timeouts/
-ownership. Engine `e72ffa10` is pushed identically to `snapshot-gen`/`main` and
-Cycle `45fac48` is pushed to `main`; editor commits `9344f8c` and `1a7ae0f` are
-locally certified and awaiting the final editor push/Pages/live verification.
+ownership. Engine `e72ffa10` is pushed identically to `snapshot-gen`/`main`,
+Cycle `45fac48` is pushed to `main`, and editor `605b89c` is pushed to `main`.
+Pages run `29671429179` passed every build, Chromium, upload, and deploy job.
+The fresh live full gate and isolated PDEx/SDC gates are green, but artifact
+audit found that the workflow's floating Rust `stable` had advanced to 1.97.1
+while the documented/local release toolchain is 1.96. The workflow is now
+locally pinned to 1.96; commit/push, replacement Pages success, exact artifact
+match, and final fresh-profile live verification remain before closure.
 
 Preview protocol 8 has no total-duration deadline for activation, commit,
 persisted-pointer read, render/content transfer, publication, or scroll
@@ -66,17 +71,35 @@ App 164/164 (892 assertions), focused preview 16/16 (117 assertions),
 TypeScript, package_store 67/67, snapshot_gen 34/34, wasm_api 30/30,
 SiteEngine 51 pass/1 fixture ignore, wasm32 release, and workspace all-target
 checks pass. Independent final diff review found no remaining code blocker.
-The complete committed-stamp artifact (206 files / 180,131,686 bytes, SHA-256
+The complete Rust-1.96 committed-stamp artifact (206 files / 180,131,686 bytes, SHA-256
 `5903f8b1...bf1`, recipe `aa32c465...b54`) passes the full Pages-subpath
 browser gate at `/tmp/fhir-pdex-sdc-committed-stamp-browser.log` with protocol 8
 and `E2E GATE: PASS`: exact deployed protocol-6 state/output A survives takeover
 and a current Tiny B publication, Tiny SQL A -> B -> A, US Core one-shell/TOC/
 Artifacts and 1,535/1,535 images + 85/85 assets, real mCODE/Genomics, two
 zero-delay Worker recycles, restart/persistence, 601 ms Cycle hot reload with
-scroll preserved, fallback after owner close, and mobile geometry. Then commit
-engine, push identical `snapshot-gen`/`main`, rebuild the committed stamp, commit
-Cycle/editor, push, monitor every Pages job, and fresh-profile verify the live
-origin. The editor push, Pages run, and live verification remain.
+scroll preserved, fallback after owner close, and mobile geometry.
+
+The initial live deployment is functionally green. The disposable-profile
+receipt `/tmp/fhir-pdex-sdc-live-full.log` ends in `E2E GATE: PASS` against app
+`assets/index-BA9gjwRo.js`, Worker `assets/engine.worker-C_8XSV9A.js`, preview
+protocol 8, and engine `e72ffa1`; it covers Tiny SQL A -> B -> A, US Core one
+shell/TOC/Artifacts and 1,535/1,535 images + 85/85 assets, real mCODE/Genomics,
+Cycle, restart, 569 ms hot reload with preserved scroll, and mobile geometry.
+The isolated live PDEx receipt `/tmp/fhir-pdex-live-e72ffa1.json` is `ok:true`:
+128.086 s cold, 11.948 s persistent reload, 0.562 s same-Worker reopen, 180
+resources, verified preview in every phase, and no site error. The independently
+restarted SDC receipt `/tmp/fhir-sdc-live-e72ffa1-summary.json` is `ok:true`:
+29.381 s cold, 12.037 s reload, 0.532 s reopen, 201 resources, verified preview
+in every phase, and no site error.
+
+Do not use the initial CI artifact as the byte-reproducibility checkpoint. Its
+actual downloaded Pages artifact is 179 files / 113,709,498 bytes, SHA-256
+`4b3e591d...f7c3`, recipe `aa32c465...b54`, with an 8,071,346-byte WASM
+(`9806c9ec...ec7b`); the job log proves Rust 1.97.1. It is semantically green
+but differs from the certified Rust-1.96 WASM above. Finish the exact-toolchain
+replacement deployment and verify its bytes and live behavior before declaring
+this round complete.
 
 ## Authority and safety
 
