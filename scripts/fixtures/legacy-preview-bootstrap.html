@@ -6,6 +6,7 @@
     const registration = await navigator.serviceWorker.register('./__legacy-preview-sw.js', {
       scope: './preview/',
       updateViaCache: 'none',
+      type: 'module',
     });
     const worker = registration.installing || registration.waiting || registration.active;
     if (!worker) throw new Error('legacy fixture did not create a worker');
@@ -23,6 +24,71 @@
         changed();
       });
     }
-    return { scriptURL: registration.active?.scriptURL || worker.scriptURL };
+    // Exercise the exact deployed protocol-6 contracts before takeover: one
+    // schema-4 pointer plus one unresolved page rendered by an old editor and
+    // authenticated into the v4 output cache.
+    const pageText = '<!doctype html><html><body>verified protocol-6 preview</body></html>';
+    const pageBytes = new TextEncoder().encode(pageText);
+    const pageDigest = Array.from(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', pageBytes)),
+      byte => byte.toString(16).padStart(2, '0'),
+    ).join('');
+    const source = {
+      igId: 'legacy-fixture',
+      buildId: 'legacy-protocol-6-build',
+      catalog: {
+        buildId: 'legacy-protocol-6-build',
+        outputs: [{ path: 'en/index.html', kind: 'page', mediaType: 'text/html' }],
+      },
+    };
+    navigator.serviceWorker.addEventListener('message', event => {
+      const message = event.data;
+      const port = event.ports[0];
+      if (message?.type !== 'igpreview:render'
+        || message.igId !== source.igId
+        || message.buildId !== source.buildId
+        || message.path !== 'en/index.html'
+        || !port) return;
+      const body = new TextEncoder().encode(pageText).buffer;
+      port.postMessage({
+        ok: true,
+        path: 'en/index.html',
+        mediaType: 'text/html',
+        content: { sha256: pageDigest, byteLength: body.byteLength, mediaType: 'text/html' },
+        body,
+      }, [body]);
+    });
+    const acknowledgement = await new Promise((resolve, reject) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = event => resolve(event.data);
+      channel.port1.onmessageerror = reject;
+      (registration.active || worker).postMessage({
+        type: 'igpreview:commit',
+        generation: 71,
+        source,
+      }, [channel.port2]);
+    });
+    if (!acknowledgement?.ok || acknowledgement.protocol !== 6) {
+      throw new Error('deployed protocol-6 fixture rejected its publication');
+    }
+    const previewUrl = new URL('./preview/legacy-fixture/en/index.html', location.href);
+    const frame = document.createElement('iframe');
+    frame.src = previewUrl.href;
+    document.body.append(frame);
+    await new Promise((resolve, reject) => {
+      frame.addEventListener('load', resolve, { once: true });
+      frame.addEventListener('error', () => reject(new Error('protocol-6 preview navigation failed')), { once: true });
+    });
+    const rendered = await frame.contentWindow.fetch(previewUrl);
+    const renderedText = await rendered.text();
+    if (!rendered.ok || !renderedText.includes('verified protocol-6 preview')) {
+      throw new Error('deployed protocol-6 fixture did not render its cached page');
+    }
+    return {
+      scriptURL: registration.active?.scriptURL || worker.scriptURL,
+      previewUrl: previewUrl.href,
+      source: rendered.headers.get('X-IGPreview-Source'),
+      generation: acknowledgement.generation,
+    };
   })();
 </script>

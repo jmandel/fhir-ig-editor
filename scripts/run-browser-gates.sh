@@ -60,6 +60,10 @@ DIST="$WORK/artifact"
 if [ "${PREINSTALL_LEGACY_PREVIEW_SW:-0}" = 1 ]; then
   cp "$HERE/fixtures/legacy-preview-sw.js" "$DIST/__legacy-preview-sw.js"
   cp "$HERE/fixtures/legacy-preview-bootstrap.html" "$DIST/__legacy-preview-bootstrap.html"
+  # The deployed protocol-6 Worker imported this mutable compatibility path.
+  # Protocol 8 imports preview-controls-v8.js directly, so replacing the facade
+  # here reproduces the exact old module graph without changing current code.
+  cp "$HERE/fixtures/legacy-preview-controls.js" "$DIST/preview-controls.js"
 fi
 
 if [ "$BASE_PATH" = / ]; then

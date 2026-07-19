@@ -11,11 +11,11 @@ import { contentStore } from '../storage/contentStore';
 const BASE = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
 export const PREVIEW_ROOT = `${BASE}preview/`;
 const CHANNEL_NAME = 'igpreview';
-export const PREVIEW_SW_PROTOCOL = 6;
+export const PREVIEW_SW_PROTOCOL = 8;
+const PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL = 6;
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_OUTPUTS = 20_000;
 const MAX_CATALOG_CHARS = 8 * 1024 * 1024;
-const PREVIEW_CLIENT_TTL_MS = 5 * 60_000;
 
 export interface PreviewSource {
   igId: string;
@@ -24,7 +24,7 @@ export interface PreviewSource {
 }
 
 export function previewWorkerScriptPath(base = BASE): string {
-  return `${base.replace(/\/?$/, '/')}preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}`;
+  return `${base.replace(/\/?$/, '/')}preview-sw.js?protocol=${PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL}`;
 }
 
 export function previewUrl(igId: string, pagePath: string): string {
@@ -108,64 +108,108 @@ let swRegistration: ServiceWorkerRegistration | null = null;
 let compatibleWorker: ServiceWorker | null = null;
 let swReadyPromise: Promise<ServiceWorker | null> | null = null;
 
+export type PreviewRetryScheduler = (retry: () => void) => () => void;
+
+const schedulePreviewRetry: PreviewRetryScheduler = (retry) => {
+  const handle = globalThis.setTimeout(retry, 1_000);
+  return () => globalThis.clearTimeout(handle);
+};
+
 export function isCompatiblePreviewWorkerPong(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const pong = value as { type?: unknown; protocol?: unknown };
   return pong.type === 'igpreview:pong' && pong.protocol === PREVIEW_SW_PROTOCOL;
 }
 
-export async function previewWorkerProtocol(
-  worker: Pick<ServiceWorker, 'postMessage'>,
-  timeoutMs = 1_500,
+/** Semantic protocol negotiation has no elapsed deadline. The exact Worker
+ * either answers, becomes redundant, or fails its message channel. */
+export function previewWorkerProtocol(
+  worker: ServiceWorker,
+  scheduleRetry: PreviewRetryScheduler = schedulePreviewRetry,
 ): Promise<number | null> {
-  const channel = new MessageChannel();
   return new Promise<number | null>((resolve) => {
     let settled = false;
+    let channel: MessagePort | null = null;
+    let cancelRetry: (() => void) | null = null;
     const finish = (protocol: number | null) => {
       if (settled) return;
       settled = true;
-      globalThis.clearTimeout(timer);
-      channel.port1.close();
+      cancelRetry?.();
+      channel?.close();
+      worker.removeEventListener('statechange', stateChanged);
       resolve(protocol);
     };
-    const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
-    channel.port1.onmessage = (event) => {
-      finish(isCompatiblePreviewWorkerPong(event.data) ? PREVIEW_SW_PROTOCOL : null);
-    };
-    try {
-      worker.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
-    } catch {
-      finish(null);
+    function stateChanged() {
+      if (worker.state === 'redundant') finish(null);
     }
+    const attempt = () => {
+      cancelRetry = null;
+      if (settled) return;
+      channel?.close();
+      const next = new MessageChannel();
+      channel = next.port1;
+      next.port1.onmessage = (event) => {
+        finish(isCompatiblePreviewWorkerPong(event.data) ? PREVIEW_SW_PROTOCOL : null);
+      };
+      next.port1.onmessageerror = () => {
+        next.port1.close();
+        if (channel === next.port1) channel = null;
+      };
+      try {
+        worker.postMessage({ type: 'igpreview:ping', protocol: PREVIEW_SW_PROTOCOL }, [next.port2]);
+      } catch {
+        finish(null);
+        return;
+      }
+      cancelRetry = scheduleRetry(attempt);
+    };
+    worker.addEventListener('statechange', stateChanged);
+    if (worker.state === 'redundant') {
+      finish(null);
+      return;
+    }
+    attempt();
   });
 }
 
-export interface PreviewWorkerWaitOptions {
-  timeoutMs?: number;
-  pollMs?: number;
-  pingTimeoutMs?: number;
-}
-
 export async function waitForCompatiblePreviewWorker(
-  registration: Pick<ServiceWorkerRegistration, 'active' | 'update'>,
+  registration: Pick<
+    ServiceWorkerRegistration,
+    | 'active' | 'installing' | 'waiting'
+  >,
   desiredScriptUrl: string,
-  options: PreviewWorkerWaitOptions = {},
 ): Promise<ServiceWorker> {
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const pollMs = options.pollMs ?? 100;
-  const pingTimeoutMs = options.pingTimeoutMs ?? 1_500;
-  const deadline = Date.now() + timeoutMs;
-  void registration.update().catch(() => undefined);
-  while (Date.now() < deadline) {
-    const active = registration.active;
-    if (
-      active?.state === 'activated'
-      && active.scriptURL === desiredScriptUrl
-      && (await previewWorkerProtocol(active, pingTimeoutMs)) === PREVIEW_SW_PROTOCOL
-    ) return active;
-    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, pollMs));
+  // A waiting/installing update at the stable compatibility URL is newer than
+  // the active implementation at that same URL. Semantic ping decides after
+  // activation; URL equality alone never does.
+  const candidate = [registration.waiting, registration.installing, registration.active]
+    .find((worker) => worker?.scriptURL === desiredScriptUrl && worker.state !== 'redundant');
+  if (!candidate) {
+    throw new Error(`preview Service Worker protocol ${PREVIEW_SW_PROTOCOL} did not install`);
   }
-  throw new Error(`preview Service Worker protocol ${PREVIEW_SW_PROTOCOL} did not activate`);
+  const activated = candidate.state === 'activated'
+    ? candidate
+    : await new Promise<ServiceWorker>((resolve, reject) => {
+    const stateChanged = () => {
+      if (candidate.state === 'activated') {
+        candidate.removeEventListener('statechange', stateChanged);
+        resolve(candidate);
+      } else if (candidate.state === 'redundant') {
+        candidate.removeEventListener('statechange', stateChanged);
+        reject(new Error(`preview Service Worker protocol ${PREVIEW_SW_PROTOCOL} became redundant`));
+      }
+    };
+    candidate.addEventListener('statechange', stateChanged);
+    // Close the event-listener race if activation happened between selection
+    // and subscription.
+    if (candidate.state === 'activated' || candidate.state === 'redundant') {
+      stateChanged();
+    }
+  });
+  if (await previewWorkerProtocol(activated) !== PREVIEW_SW_PROTOCOL) {
+    throw new Error(`preview Service Worker does not implement protocol ${PREVIEW_SW_PROTOCOL}`);
+  }
+  return activated;
 }
 
 async function registerCompatiblePreviewWorker(): Promise<ServiceWorker> {
@@ -179,7 +223,7 @@ async function registerCompatiblePreviewWorker(): Promise<ServiceWorker> {
     console.warn('[igpreview] replacing incompatible preview Service Worker:', firstError);
     await swRegistration.unregister();
     swRegistration = await navigator.serviceWorker.register(scriptPath, options);
-    return waitForCompatiblePreviewWorker(swRegistration, desiredScriptUrl, { timeoutMs: 20_000 });
+    return waitForCompatiblePreviewWorker(swRegistration, desiredScriptUrl);
   }
 }
 
@@ -220,43 +264,66 @@ export interface PersistedPreviewPublication {
  * presentation fast path, not a derivation cache hit: callers must keep it
  * visibly stale until prepare reproduces a current closed SiteBuild. */
 export async function previewWorkerPublication(
-  worker: Pick<ServiceWorker, 'postMessage'>,
+  worker: ServiceWorker,
   igId: string,
-  timeoutMs = 1_500,
+  scheduleRetry: PreviewRetryScheduler = schedulePreviewRetry,
 ): Promise<PersistedPreviewPublication | null> {
-  const channel = new MessageChannel();
   return new Promise<PersistedPreviewPublication | null>((resolve) => {
     let settled = false;
+    let channel: MessagePort | null = null;
+    let cancelRetry: (() => void) | null = null;
     const finish = (publication: PersistedPreviewPublication | null) => {
       if (settled) return;
       settled = true;
-      globalThis.clearTimeout(timer);
-      channel.port1.close();
+      cancelRetry?.();
+      channel?.close();
+      worker.removeEventListener('statechange', stateChanged);
       resolve(publication);
     };
-    const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
-    channel.port1.onmessage = (event) => {
-      const reply = event.data as Record<string, unknown> | null;
-      if (!reply?.ok || reply.protocol !== PREVIEW_SW_PROTOCOL) {
+    function stateChanged() {
+      if (worker.state === 'redundant') finish(null);
+    }
+    const attempt = () => {
+      cancelRetry = null;
+      if (settled) return;
+      channel?.close();
+      const next = new MessageChannel();
+      channel = next.port1;
+      next.port1.onmessage = (event) => {
+        const reply = event.data as Record<string, unknown> | null;
+        if (!reply?.ok || reply.protocol !== PREVIEW_SW_PROTOCOL) {
+          finish(null);
+          return;
+        }
+        try {
+          if (!Number.isSafeInteger(reply.generation) || (reply.generation as number) < 0) {
+            throw new Error('invalid persisted preview generation');
+          }
+          const restored = validatePreviewSource(reply.source as PreviewSource);
+          if (restored.igId !== igId) throw new Error('persisted preview belongs to another IG');
+          finish({ generation: reply.generation as number, source: restored });
+        } catch {
+          finish(null);
+        }
+      };
+      next.port1.onmessageerror = () => {
+        next.port1.close();
+        if (channel === next.port1) channel = null;
+      };
+      try {
+        worker.postMessage({ type: 'igpreview:read', protocol: PREVIEW_SW_PROTOCOL, igId }, [next.port2]);
+      } catch {
         finish(null);
         return;
       }
-      try {
-        if (!Number.isSafeInteger(reply.generation) || (reply.generation as number) < 0) {
-          throw new Error('invalid persisted preview generation');
-        }
-        const restored = validatePreviewSource(reply.source as PreviewSource);
-        if (restored.igId !== igId) throw new Error('persisted preview belongs to another IG');
-        finish({ generation: reply.generation as number, source: restored });
-      } catch {
-        finish(null);
-      }
+      cancelRetry = scheduleRetry(attempt);
     };
-    try {
-      worker.postMessage({ type: 'igpreview:read', igId }, [channel.port2]);
-    } catch {
+    worker.addEventListener('statechange', stateChanged);
+    if (worker.state === 'redundant') {
       finish(null);
+      return;
     }
+    attempt();
   });
 }
 
@@ -281,30 +348,13 @@ async function commitToPreviewWorker(
   source: PreviewSource,
   generation: number,
   mayCommit: () => boolean,
-): Promise<number | null> {
+): Promise<{ generation: number; openPaths: string[] } | null> {
   const sw = await activePreviewWorker();
   if (!mayCommit()) return null;
   if (!sw) throw new Error('compatible preview Service Worker is unavailable');
-  const post = (order: number) => new Promise<Record<string, unknown>>((resolve, reject) => {
-    const channel = new MessageChannel();
-    const timer = globalThis.setTimeout(() => {
-      channel.port1.close();
-      reject(new Error('preview Service Worker commit acknowledgement timed out'));
-    }, 12_000);
-    channel.port1.onmessage = (event) => {
-      globalThis.clearTimeout(timer);
-      channel.port1.close();
-      resolve(event.data || {});
-    };
-    try {
-      sw.postMessage({ type: 'igpreview:commit', generation: order, source }, [channel.port2]);
-    } catch (error) {
-      globalThis.clearTimeout(timer);
-      channel.port1.close();
-      reject(error);
-    }
-  });
+  const post = (order: number) => postPreviewCommit(sw, source, order, mayCommit);
   let acknowledgement = await post(generation);
+  if (acknowledgement.cancelled) return null;
   // A hard reload or wall-clock correction can start below the persisted
   // order. Retry above the worker's authenticated pointer; never weaken the
   // worker's stale-write rejection.
@@ -312,11 +362,159 @@ async function commitToPreviewWorker(
     && Number.isSafeInteger(acknowledgement.generation)
     && mayCommit()) {
     acknowledgement = await post((acknowledgement.generation as number) + 1);
+    if (acknowledgement.cancelled) return null;
   }
   if (acknowledgement.ok && Number.isSafeInteger(acknowledgement.generation)) {
-    return acknowledgement.generation as number;
+    if (!Array.isArray(acknowledgement.openPaths)
+      || !acknowledgement.openPaths.every(isSafePreviewPath)) {
+      throw new Error('preview Service Worker returned invalid open preview paths');
+    }
+    return {
+      generation: acknowledgement.generation as number,
+      openPaths: [...new Set(acknowledgement.openPaths as string[])],
+    };
   }
   throw new Error(String(acknowledgement.error || 'preview Service Worker rejected publication'));
+}
+
+function newCommitId(): string {
+  return globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Send one commit through an acknowledged lifecycle. Neither acceptance nor
+ * durable CacheStorage work has a wall-clock deadline. Reposting one immutable
+ * commit id is both an idempotent status query and crash recovery: a restarted
+ * Worker either replays the durable result or performs the still-missing write. */
+export function postPreviewCommit(
+  worker: ServiceWorker,
+  source: PreviewSource,
+  generation: number,
+  mayContinue: () => boolean = () => true,
+  scheduleRetry: PreviewRetryScheduler = schedulePreviewRetry,
+  replacementWorker: () => Promise<ServiceWorker | null> = activePreviewWorker,
+): Promise<Record<string, unknown>> {
+  return new Promise<Record<string, unknown>>((resolve, reject) => {
+    const commitId = newCommitId();
+    const channels = new Set<MessagePort>();
+    let currentWorker = worker;
+    let settled = false;
+    let reacquiring = false;
+    let cancelRetry: (() => void) | null = null;
+    const cleanup = () => {
+      cancelRetry?.();
+      cancelRetry = null;
+      for (const channel of channels) channel.close();
+      channels.clear();
+      currentWorker.removeEventListener('statechange', stateChanged);
+    };
+    const finish = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    function stateChanged() {
+      if (currentWorker.state !== 'redundant' || settled) return;
+      for (const channel of channels) channel.close();
+      channels.clear();
+      cancelRetry?.();
+      cancelRetry = scheduleRetry(attempt);
+    }
+    const attempt = () => {
+      cancelRetry = null;
+      if (settled) return;
+      if (!mayContinue()) {
+        finish({ cancelled: true });
+        return;
+      }
+      if (currentWorker.state === 'redundant') {
+        if (reacquiring) return;
+        reacquiring = true;
+        void replacementWorker().then((next) => {
+          reacquiring = false;
+          if (settled) return;
+          if (!next) {
+            cancelRetry = scheduleRetry(attempt);
+            return;
+          }
+          currentWorker.removeEventListener('statechange', stateChanged);
+          currentWorker = next;
+          currentWorker.addEventListener('statechange', stateChanged);
+          attempt();
+        }, () => {
+          reacquiring = false;
+          if (!settled) cancelRetry = scheduleRetry(attempt);
+        });
+        return;
+      }
+      // Only the newest status channel is needed. Reposting the same immutable
+      // id attaches this attempt to the same in-flight/durable operation.
+      for (const prior of channels) prior.close();
+      channels.clear();
+      const channel = new MessageChannel();
+      const port = channel.port1;
+      channels.add(port);
+      let accepted = false;
+      port.onmessage = (event) => {
+        const reply = (event.data || {}) as Record<string, unknown>;
+        if (reply.type === 'igpreview:accepted'
+          && reply.protocol === PREVIEW_SW_PROTOCOL
+          && reply.commitId === commitId) {
+          accepted = true;
+          return;
+        }
+        if (!accepted) {
+          fail(new Error('preview Service Worker returned a result before accepting publication'));
+          return;
+        }
+        if (reply.type === 'igpreview:pending'
+          && reply.protocol === PREVIEW_SW_PROTOCOL
+          && reply.commitId === commitId) {
+          port.close();
+          channels.delete(port);
+          return;
+        }
+        if (reply.type !== 'igpreview:complete'
+          || reply.protocol !== PREVIEW_SW_PROTOCOL
+          || reply.commitId !== commitId) {
+          fail(new Error('preview Service Worker returned an invalid publication result'));
+          return;
+        }
+        finish(reply);
+      };
+      port.onmessageerror = () => {
+        port.close();
+        channels.delete(port);
+      };
+      try {
+        currentWorker.postMessage({
+          type: 'igpreview:commit',
+          protocol: PREVIEW_SW_PROTOCOL,
+          commitId,
+          generation,
+          source,
+        }, [channel.port2]);
+      } catch (error) {
+        if ((currentWorker.state as ServiceWorkerState) === 'redundant') {
+          stateChanged();
+          return;
+        }
+        fail(error);
+        return;
+      }
+      cancelRetry = scheduleRetry(attempt);
+    };
+    currentWorker.addEventListener('statechange', stateChanged);
+    attempt();
+  });
 }
 
 // ---- Immutable publication + live unresolved-output responder -----------------
@@ -329,32 +527,6 @@ let lastPublicationOrder = 0;
 let channel: BroadcastChannel | null = null;
 let responderWired = false;
 const resolvedRefs = new Map<string, ContentRef>();
-
-export interface PreviewClientRegistration {
-  igId: string;
-  path: string;
-  lastSeen: number;
-}
-
-const openPreviews = new Map<string, PreviewClientRegistration>();
-
-export function registeredPreviewPaths(
-  registry: ReadonlyMap<string, PreviewClientRegistration>,
-  igId: string,
-  now = Date.now(),
-): string[] {
-  return [...new Set([...registry.values()]
-    .filter((client) => client.igId === igId && now - client.lastSeen <= PREVIEW_CLIENT_TTL_MS)
-    .map((client) => client.path))];
-}
-
-function registerPreviewPath(clientId: string, igId: string, path: string): void {
-  const now = Date.now();
-  openPreviews.set(clientId, { igId, path, lastSeen: now });
-  for (const [id, client] of openPreviews) {
-    if (now - client.lastSeen > PREVIEW_CLIENT_TTL_MS) openPreviews.delete(id);
-  }
-}
 
 function descriptor(catalog: OutputCatalog, path: string): OutputDescriptor | null {
   return catalog.outputs.find((output) => output.path === path) ?? null;
@@ -379,39 +551,6 @@ async function resolveRef(build: PreviewSource, path: string): Promise<ContentRe
   return content;
 }
 
-/** Resolve only the pages that are already open before publishing a successor.
- * The complete catalog remains authoritative for arbitrary later navigation;
- * enriching these existing descriptors simply lets the Service Worker reload
- * changed open pages from ContentStore without a second renderer round-trip. */
-export async function resolvePreviewOutputRefs(
-  build: PreviewSource,
-  paths: readonly string[],
-  render: RenderOutput,
-  mayContinue: () => boolean = () => true,
-): Promise<PreviewSource | null> {
-  const outputs = [...build.catalog.outputs];
-  let changed = false;
-  for (const path of new Set(paths)) {
-    if (!mayContinue()) return null;
-    const index = outputs.findIndex((output) => output.path === path);
-    if (index < 0 || outputs[index].content) continue;
-    const output = outputs[index];
-    const content = await render(build.buildId, path);
-    if (!mayContinue()) return null;
-    if (content.mediaType !== output.mediaType || !validContentRef(content)) {
-      throw new Error(`renderer returned an invalid output for ${path}`);
-    }
-    outputs[index] = { ...output, content };
-    resolvedRefs.set(resolvedKey(build, path), content);
-    changed = true;
-  }
-  if (!changed) return build;
-  return {
-    ...build,
-    catalog: { ...build.catalog, outputs },
-  };
-}
-
 export function wirePreviewResponder(render: RenderOutput): void {
   renderOutput = render;
   if (responderWired) return;
@@ -427,76 +566,87 @@ export function wirePreviewResponder(render: RenderOutput): void {
   }
   try {
     channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.onmessage = (event) => {
-      const message = event.data;
-      if (message?.type !== 'hello'
-        || typeof message.clientId !== 'string'
-        || typeof message.generator !== 'string'
-        || !isSafePreviewPath(message.path)) return;
-      registerPreviewPath(message.clientId, message.generator, message.path);
-      const current = source;
-      if (current && current.igId === message.generator) {
-        const announcedSha = typeof message.contentSha256 === 'string' && SHA256.test(message.contentSha256)
-          ? message.contentSha256
-          : null;
-        void resolveRef(current, message.path).then((latest) => {
-          if (source !== current || !latest || latest.sha256 === announcedSha) return;
-          channel?.postMessage({
-            type: 'reload',
-            generator: current.igId,
-            generation: sourceGeneration,
-            paths: [message.path],
-          });
-        }).catch(() => undefined);
-      }
-    };
-    channel.postMessage({ type: 'who' });
   } catch {
     channel = null;
   }
 }
 
+function previewResponder(message: Record<string, unknown>, port: MessagePort) {
+  const requestId = message.protocol === PREVIEW_SW_PROTOCOL
+    && typeof message.requestId === 'string'
+    && message.requestId.length <= 160
+    ? message.requestId
+    : null;
+  return {
+    accept() {
+      if (!requestId) return;
+      port.postMessage({ type: 'igpreview:accepted', protocol: PREVIEW_SW_PROTOCOL, requestId });
+    },
+    complete(result: Record<string, unknown>, transfer: Transferable[]) {
+      port.postMessage(requestId ? {
+        type: 'igpreview:complete',
+        protocol: PREVIEW_SW_PROTOCOL,
+        requestId,
+        ok: true,
+        ...result,
+      } : { ok: true, ...result }, transfer);
+    },
+    fail(error?: unknown) {
+      port.postMessage(requestId ? {
+        type: 'igpreview:failed',
+        protocol: PREVIEW_SW_PROTOCOL,
+        requestId,
+        ok: false,
+        ...(error == null ? {} : { error: String(error) }),
+      } : {
+        ok: false,
+        ...(error == null ? {} : { error: String(error) }),
+      });
+    },
+  };
+}
+
 async function answerRender(message: Record<string, unknown>, port: MessagePort): Promise<void> {
+  const responder = previewResponder(message, port);
   try {
     const current = source;
     if (!current
       || message.igId !== current.igId
       || message.buildId !== current.buildId
       || !isSafePreviewPath(message.path)) {
-      port.postMessage({ ok: false });
+      responder.fail();
       return;
     }
     const output = descriptor(current.catalog, message.path);
     // Ready outputs are never requested from the editor. Refuse them here too,
     // making the SW's OPFS path the only ready-output path.
     if (!output || output.content || !renderOutput) {
-      port.postMessage({ ok: false });
+      responder.fail();
       return;
     }
-    const content = await renderOutput(current.buildId, output.path);
-    if (content.mediaType !== output.mediaType || !validContentRef(content)) {
-      throw new Error('renderer output does not match catalog');
-    }
-    resolvedRefs.set(resolvedKey(current, output.path), content);
+    responder.accept();
+    // Hot-reload comparison may already have rendered this exact immutable
+    // build/path. Resolve through the shared ref seam so serving the refreshed
+    // page does not invoke the renderer a second time.
+    const content = await resolveRef(current, output.path);
+    if (!content) throw new Error('renderer output is unavailable');
     const body = await contentStore.get(content);
     if (!body) throw new Error('rendered output is absent from ContentStore');
-    port.postMessage(
-      { ok: true, path: output.path, mediaType: output.mediaType, content, body },
-      [body],
-    );
+    responder.complete({ path: output.path, mediaType: output.mediaType, content, body }, [body]);
   } catch (error) {
-    port.postMessage({ ok: false, error: String(error) });
+    responder.fail(error);
   }
 }
 
 async function answerContent(message: Record<string, unknown>, port: MessagePort): Promise<void> {
+  const responder = previewResponder(message, port);
   try {
     const current = source;
     if (!current
       || message.igId !== current.igId
       || message.buildId !== current.buildId
       || !isSafePreviewPath(message.path)) {
-      port.postMessage({ ok: false });
+      responder.fail();
       return;
     }
     const output = descriptor(current.catalog, message.path);
@@ -505,17 +655,20 @@ async function answerContent(message: Record<string, unknown>, port: MessagePort
       || !validContentRef(requested)
       || requested.sha256 !== output.content.sha256
       || requested.byteLength !== output.content.byteLength) {
-      port.postMessage({ ok: false });
+      responder.fail();
       return;
     }
+    responder.accept();
     const body = await contentStore.get(output.content);
     if (!body) throw new Error('output is absent from ContentStore');
-    port.postMessage(
-      { ok: true, path: output.path, mediaType: output.mediaType, content: output.content, body },
-      [body],
-    );
+    responder.complete({
+      path: output.path,
+      mediaType: output.mediaType,
+      content: output.content,
+      body,
+    }, [body]);
   } catch (error) {
-    port.postMessage({ ok: false, error: String(error) });
+    responder.fail(error);
   }
 }
 
@@ -524,34 +677,25 @@ export async function publishPreviewSource(
   generation: number,
   mayCommit: () => boolean = () => true,
 ): Promise<boolean> {
-  const candidate = validatePreviewSource(next);
-  const resolved = renderOutput
-    ? await resolvePreviewOutputRefs(
-      candidate,
-      registeredPreviewPaths(openPreviews, candidate.igId),
-      renderOutput,
-      mayCommit,
-    )
-    : candidate;
-  if (!resolved || !mayCommit()) return false;
-  const published = validatePreviewSource(resolved);
+  const published = validatePreviewSource(next);
+  if (!mayCommit()) return false;
   if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('invalid preview generation');
   const previous = source;
   // UI counters restart on a hard reload. Publication order is deliberately
   // process-independent and has no role in cache/content identity.
   const order = Math.max(Date.now(), generation, lastPublicationOrder + 1);
-  const committedOrder = await commitToPreviewWorker(published, order, mayCommit);
-  if (committedOrder == null) return false;
+  const committed = await commitToPreviewWorker(published, order, mayCommit);
+  if (committed == null) return false;
   // Once the Service Worker acknowledges the durable pointer, mirror that
   // exact authority locally even if a newer edit revoked the UI lease during
   // the write. Returning false still prevents the superseded generation from
   // changing React state; the next build will advance both authorities again.
   const stillCurrent = mayCommit();
-  lastPublicationOrder = committedOrder;
+  lastPublicationOrder = committed.generation;
   source = published;
-  sourceGeneration = committedOrder;
+  sourceGeneration = committed.generation;
   if (stillCurrent && previous && previous.igId === published.igId) {
-    void refreshOpenPreviews(previous, published, committedOrder);
+    void refreshOpenPreviews(previous, published, committed.generation, committed.openPaths);
   }
   return stillCurrent;
 }
@@ -560,9 +704,10 @@ async function refreshOpenPreviews(
   previous: PreviewSource,
   next: PreviewSource,
   generation: number,
+  paths: readonly string[],
 ): Promise<void> {
   if (!channel || source !== next || sourceGeneration !== generation) return;
-  for (const path of registeredPreviewPaths(openPreviews, next.igId)) {
+  for (const path of paths) {
     try {
       const [before, after] = await Promise.all([resolveRef(previous, path), resolveRef(next, path)]);
       if (source !== next || sourceGeneration !== generation) return;

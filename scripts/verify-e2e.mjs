@@ -18,7 +18,8 @@ import { assessRuntimeClosure, runtimeClosureExpression } from './preview-runtim
 const base = process.argv[2] || 'http://localhost:4173/';
 const cdpPort = Number(process.env.CDP_PORT || 9222);
 const cdpHttp = `http://127.0.0.1:${cdpPort}`;
-const PREVIEW_SW_PROTOCOL = 6;
+const PREVIEW_SW_PROTOCOL = 8;
+const PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL = 6;
 const requestedCpuThrottle = Number(process.env.E2E_CPU_THROTTLE || 0);
 const requestedTimeoutScale = Number(process.env.E2E_TIMEOUT_SCALE || 1);
 if (!Number.isFinite(requestedTimeoutScale) || requestedTimeoutScale < 1) {
@@ -637,13 +638,12 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       const profilePreviewPath = pathOf(PREVIEW + 'cycle/' + profilePath);
       await tabWaitFor(profile, `location.pathname === ${JSON.stringify(profilePreviewPath)} && document.readyState === 'complete' && document.body && document.body.textContent.length > 300 && !document.querySelector('[data-igpreview-fallback]')`, 30000, 'profile preview URL and document');
     }
-    // Re-announce both pages and let any PRE-EXISTING stale-generation check
-    // settle before installing the test stamps. Otherwise a legitimate catch-up
-    // navigation from opening the tab can be misattributed to the edit below.
-    // The responder timeout is 8s, so 9s closes that protocol window.
+    // Re-announce both pages before installing the test stamps. The committed
+    // preview has one exact editor owner and no responder timeout window to
+    // outwait; each page already carries the generation/content identity that
+    // its hello message compares.
     out.helloResent = await tabEval(preview, `(() => { window.dispatchEvent(new Event('pageshow')); return true; })()`);
     if (profile) await tabEval(profile, `window.dispatchEvent(new Event('pageshow'))`);
-    await sleep(9000);
     await tabWaitFor(preview, `document.readyState === 'complete' && !document.querySelector('[data-igpreview-fallback]')`, 10000, 'settled index preview baseline');
     if (profile) await tabWaitFor(profile, `document.readyState === 'complete' && !document.querySelector('[data-igpreview-fallback]')`, 10000, 'settled profile preview baseline');
     if (profile) {
@@ -759,26 +759,25 @@ async function runPreviewWindowGate(base, editorWs, editorEval, editorWaitFor, e
       const scope = new URL('preview/', location.href).href;
       const previous = await navigator.serviceWorker.getRegistration(scope);
       if (previous) await previous.unregister();
-      const script = new URL('preview-sw.js?protocol=${PREVIEW_SW_PROTOCOL}', location.href).href;
+      const script = new URL('preview-sw.js?protocol=${PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL}', location.href).href;
       const registration = await navigator.serviceWorker.register(script, {
         scope,
         type: 'module',
         updateViaCache: 'none',
       });
-      const deadline = Date.now() + 15000;
-      while (Date.now() < deadline) {
-        if (registration.active?.state === 'activated') {
-          const protocol = await new Promise(resolve => {
-            const channel = new MessageChannel();
-            const timer = setTimeout(() => resolve(null), 1000);
-            channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data?.protocol ?? null); };
-            registration.active.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
-          });
-          if (protocol === ${PREVIEW_SW_PROTOCOL}) return { ok: true, scriptURL: registration.active.scriptURL };
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      return { ok: false, state: registration.active?.state || null };
+      const candidate = registration.installing || registration.waiting || registration.active;
+      if (!candidate) return { ok: false, state: null };
+      if (candidate.state !== 'activated') await new Promise((resolve, reject) => {
+        candidate.addEventListener('statechange', () => {
+          if (candidate.state === 'activated') resolve();
+          if (candidate.state === 'redundant') reject(new Error('replacement preview Worker became redundant'));
+        });
+      });
+      return {
+        ok: candidate.scriptURL === script,
+        scriptURL: candidate.scriptURL,
+        state: candidate.state,
+      };
     })()`);
     if (editorTabId) await closeTab(editorTabId);
     await sleep(500);
@@ -970,25 +969,51 @@ try {
     const registration = await navigator.serviceWorker.getRegistration(scope);
     return registration?.active?.state === 'activated';
   })()`, 30000, 'preview Service Worker activation');
-  results.previewWorker = await evalJs(ws, `(async () => {
+  results.previewWorker = await evalJs(ws, `(() => {
     const scope = new URL('preview/', location.href).href;
-    const registration = await navigator.serviceWorker.getRegistration(scope);
-    const worker = registration && registration.active;
-    if (!worker) return { error: 'no-active-worker' };
-    const protocol = await new Promise(resolve => {
+    return navigator.serviceWorker.getRegistration(scope).then(registration => new Promise(resolve => {
+      const worker = registration && registration.active;
+      if (!worker) { resolve({ error: 'no-active-worker' }); return; }
       const channel = new MessageChannel();
-      const timer = setTimeout(() => resolve(null), 3000);
-      channel.port1.onmessage = event => {
-        clearTimeout(timer);
-        resolve(event.data && event.data.protocol);
-      };
-      worker.postMessage({ type: 'igpreview:ping' }, [channel.port2]);
-    });
-    return { scriptURL: worker.scriptURL, protocol };
+      channel.port1.onmessage = event => resolve({
+        scriptURL: worker.scriptURL,
+        addressProtocol: Number(new URL(worker.scriptURL).searchParams.get('protocol')),
+        protocol: event.data?.protocol,
+        state: worker.state,
+      });
+      worker.postMessage({ type: 'igpreview:ping', protocol: ${PREVIEW_SW_PROTOCOL} }, [channel.port2]);
+    }));
   })()`);
-  const protocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_PROTOCOL}(?:&|$)`);
+  const protocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL}(?:&|$)`);
   if (results.previewWorker.protocol !== PREVIEW_SW_PROTOCOL || !protocolPattern.test(results.previewWorker.scriptURL || '')) {
     throw new Error('preview Service Worker protocol upgrade failed: ' + JSON.stringify(results.previewWorker));
+  }
+  if (process.env.PREINSTALL_LEGACY_PREVIEW_SW === '1') {
+    results.legacyPreviewAfterTakeover = await evalJs(ws, `(async () => {
+      const url = ${JSON.stringify(new URL('preview/legacy-fixture/en/index.html', base).href)};
+      const frame = document.createElement('iframe');
+      frame.id = 'legacy-takeover-preview';
+      frame.src = url;
+      document.body.append(frame);
+      await new Promise((resolve, reject) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.addEventListener('error', () => reject(new Error('legacy takeover navigation failed')), { once: true });
+      });
+      const response = await frame.contentWindow.fetch(url);
+      const body = await response.text();
+      return {
+        status: response.status,
+        source: response.headers.get('X-IGPreview-Source'),
+        preserved: body.includes('verified protocol-6 preview'),
+        caches: (await caches.keys()).filter(name => /igpreview-(?:state|output):v4/.test(name)).sort(),
+      };
+    })()`);
+    if (results.legacyPreviewAfterTakeover.status !== 200
+      || results.legacyPreviewAfterTakeover.source !== 'build-cache'
+      || !results.legacyPreviewAfterTakeover.preserved) {
+      throw new Error('protocol-6 verified preview did not survive protocol-8 takeover: '
+        + JSON.stringify(results.legacyPreviewAfterTakeover));
+    }
   }
   // Engine boot loads only the package catalog. No package body should be
   // fetched until a concrete project reaches the Rust resolver.
@@ -1087,6 +1112,25 @@ try {
       && !!published
       && !published.disabled;
   })()`, 60000, 'tiny published consequence ready');
+  if (process.env.PREINSTALL_LEGACY_PREVIEW_SW === '1') {
+    results.legacyPreviewAfterOtherGuide = await evalJs(ws, `(async () => {
+      const frame = document.querySelector('#legacy-takeover-preview');
+      if (!frame?.contentWindow) throw new Error('legacy takeover client disappeared');
+      const response = await frame.contentWindow.fetch(${JSON.stringify(new URL('preview/legacy-fixture/en/index.html', base).href)});
+      const body = await response.text();
+      return {
+        status: response.status,
+        source: response.headers.get('X-IGPreview-Source'),
+        preserved: body.includes('verified protocol-6 preview'),
+      };
+    })()`);
+    if (results.legacyPreviewAfterOtherGuide.status !== 200
+      || results.legacyPreviewAfterOtherGuide.source !== 'build-cache'
+      || !results.legacyPreviewAfterOtherGuide.preserved) {
+      throw new Error('publishing Tiny erased another IG\'s protocol-6 preview: '
+        + JSON.stringify(results.legacyPreviewAfterOtherGuide));
+    }
+  }
   results.tinyReadyMs = performance.now() - tinyOpenStarted;
   results.tinyCompileMs = await evalJs(
     ws,
@@ -3407,7 +3451,7 @@ try {
       console.error('assert: profile page did not contain exactly one correctly-scoped hot-reload control block —', JSON.stringify(pw.profileHotReloadPayloads)); ok = false;
     }
     if (!pw.unrelatedStayedPut) { console.error('assert: an UNRELATED preview tab reloaded (should not have)'); ok = false; }
-    const restartProtocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_PROTOCOL}(?:&|$)`);
+    const restartProtocolPattern = new RegExp(`[?&]protocol=${PREVIEW_SW_COMPAT_ADDRESS_PROTOCOL}(?:&|$)`);
     if (!(pw.previewWorkerRestart?.ok && restartProtocolPattern.test(pw.previewWorkerRestart.scriptURL || ''))) {
       console.error('assert: preview worker did not restart at the current module protocol —', pw.previewWorkerRestart); ok = false;
     }
