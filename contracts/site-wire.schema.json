@@ -3272,6 +3272,7 @@
             "invalid-input",
             "unavailable",
             "integrity",
+            "resource-limit",
             "compile-failed",
             "renderer-failed",
             "unknown-build",

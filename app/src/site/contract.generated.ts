@@ -200,5 +200,5 @@ source?: BuildEventSource,
 startMs?: number, stage: BuildStage, label?: string, bytes?: number, totalBytes?: number, message: string, fraction?: number, fromCache?: boolean, durationMs?: number, inputBytes?: number, outputBytes?: number, fileCount?: number, metrics?: { [key in string]: number }, };
 export type BuildOperation = "lifecycle" | "prepare" | "outputs" | "render" | "finalize";
 export type BuildErrorPhase = "lifecycle" | "input" | "package-resolution" | "package-transport" | "compilation" | "preparation" | "renderer" | "content-store" | "publication" | "finalization";
-export type BuildErrorCode = "invalid-input" | "unavailable" | "integrity" | "compile-failed" | "renderer-failed" | "unknown-build" | "cancelled" | "internal";
+export type BuildErrorCode = "invalid-input" | "unavailable" | "integrity" | "resource-limit" | "compile-failed" | "renderer-failed" | "unknown-build" | "cancelled" | "internal";
 export type BuildError<C> = { operation: BuildOperation, phase: BuildErrorPhase, code: BuildErrorCode, message: string, retryable: boolean, successfulCompilation?: C, };

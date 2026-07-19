@@ -38,7 +38,11 @@ import type {
   ProjectRevision,
   SiteOutput,
 } from '../site/contract.generated';
-import type { ResolveOutcome, ResolverMountTransaction } from './packageResolver';
+import type {
+  BlockedPackage,
+  ResolveOutcome,
+  ResolverMountTransaction,
+} from './packageResolver';
 import { assertCompatibleEngineCommit } from './engineVersion';
 import {
   BakedBundleTransportError,
@@ -120,10 +124,43 @@ class ImmutableBuild implements Build {
 
 /** Typed failure from any Build lifecycle or functional operation. */
 export class BuildFailure extends Error {
-  constructor(readonly detail: BuildError<CompileResult>) {
+  constructor(
+    readonly detail: BuildError<CompileResult>,
+    readonly blockedPackages: readonly BlockedPackage[] = [],
+  ) {
     super(detail.message);
     this.name = 'BuildFailure';
   }
+}
+
+function requireSatisfiedPackageResolution(outcome: ResolveOutcome): void {
+  if (outcome.step.satisfied) return;
+  const blockedPackages = outcome.blocked.length > 0
+    ? [...outcome.blocked]
+    : outcome.step.missing.map((missing): BlockedPackage => ({
+      packageId: missing.package_id,
+      version: missing.version,
+      why: missing.reason.kind === 'unresolved_version'
+        ? `no concrete version satisfied ${missing.reason.requested}`
+        : 'the required package bytes are not mounted',
+      remedies: [
+        'Drop the package .tgz into the editor (works offline / air-gapped)',
+        'Configure a package proxy URL in Settings (for CORS-blocked networks)',
+        'Check the package id#version exists on a configured registry',
+      ],
+    }));
+  const coordinates = blockedPackages
+    .map(({ packageId, version }) => `${packageId}#${version}`)
+    .join(', ');
+  throw new BuildFailure({
+    operation: 'prepare',
+    phase: 'package-resolution',
+    code: 'unavailable',
+    message: coordinates.length > 0
+      ? `Package resolution is incomplete: ${coordinates}`
+      : 'Package resolution is incomplete.',
+    retryable: true,
+  }, blockedPackages);
 }
 
 export type EngineInitializationStage = 'manifest' | 'wasm';
@@ -381,23 +418,25 @@ export class EngineClient {
     }, recycleStartedMs));
     const retired = this.worker;
     // Close the request gate before terminating. Even a direct protocol caller
-    // racing the bounded memory-release wait must reject, never post to a dead
+    // racing the termination yield must reject, never post to a dead
     // Worker and remain pending forever. createWorker reopens the gate.
     this.workerFailure = new Error('compiler Worker is recycling');
     this.detachWorker(retired);
     retired.terminate();
-    // Worker termination is asynchronous below the DOM API. Yield before
-    // creating another WASM instance so Chromium can retire the old thread and
-    // linear memory instead of briefly overlapping both multi-GB heaps.
-    const waitStartedMs = epochMs();
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    const waitFinishedMs = epochMs();
-    emitProgress(report, spanEvent('engine.recycle.wait', 'window', waitStartedMs, {
+    // Worker termination is asynchronous below the DOM API, but browsers expose
+    // no acknowledgement for thread/linear-memory reclamation. Yield exactly
+    // one task so termination can run before replacement; a guessed wall-clock
+    // sleep cannot guarantee GC and only adds latency. Whole-browser memory is
+    // enforced by the browser acceptance gate instead.
+    const yieldStartedMs = epochMs();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const yieldFinishedMs = epochMs();
+    emitProgress(report, spanEvent('engine.recycle.yield', 'window', yieldStartedMs, {
       stage: 'wasm',
       label: recycleLabel,
-      message: 'Allowed the retired compiler Worker to release its linear memory.',
-      metrics: { configuredWaitMs: 250, recycleCount: nextRecycle },
-    }, waitFinishedMs));
+      message: 'Yielded after terminating the retired compiler Worker.',
+      metrics: { recycleCount: nextRecycle },
+    }, yieldFinishedMs));
     if (this.disposed) throw new Error('engine client is disposed');
     this.worker = this.createWorker();
     this.inited = false;
@@ -464,7 +503,6 @@ export class EngineClient {
       message: 'Replacement compiler engine ready.',
       metrics: {
         recycleCount: nextRecycle,
-        configuredWaitMs: 250,
         wasmMemoryBytes: workerEvents.find((event) => event.phase === 'engine.session.init')
           ?.metrics?.wasmMemoryBytes ?? 0,
       },
@@ -1203,7 +1241,14 @@ export class EngineClient {
           || (this.lastCompiledResourceCount === 0 && !smallCycleSuccessor))) {
         await this.recycleWorker(report);
       }
-      await this.acquireForProject(project.config, report, packageSource, packageLocalEpoch);
+      requireSatisfiedPackageResolution(
+        await this.acquireForProject(
+          project.config,
+          report,
+          packageSource,
+          packageLocalEpoch,
+        ),
+      );
       if (spec.generator === 'publisher') {
         await this.ensureTemplatePackages(
           spec.templateCoordinate,
@@ -1211,7 +1256,14 @@ export class EngineClient {
           packageSource,
           packageLocalEpoch,
         );
-        await this.acquireForProject(project.config, report, packageSource, packageLocalEpoch);
+        requireSatisfiedPackageResolution(
+          await this.acquireForProject(
+            project.config,
+            report,
+            packageSource,
+            packageLocalEpoch,
+          ),
+        );
       }
       emitProgress(report, {
         operation: 'prepare',

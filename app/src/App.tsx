@@ -715,13 +715,16 @@ export function App({ startup }: { startup: EngineStartup }) {
       if (lease.isLatest()) setBlockedPackages([]);
     } catch (e) {
       failure = e;
-      if (lease.isLatest() && e instanceof BuildFailure && e.detail.phase === 'compilation') {
-        setPredefinedResources([]);
-        setCompile({
-          resources: [],
-          diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
-        });
-        setCompileMs(0);
+      if (lease.isLatest()) {
+        setBlockedPackages(e instanceof BuildFailure ? [...e.blockedPackages] : []);
+        if (e instanceof BuildFailure && e.detail.phase === 'compilation') {
+          setPredefinedResources([]);
+          setCompile({
+            resources: [],
+            diagnostics: [{ severity: 'error', message: `compile failed: ${String(e)}` }],
+          });
+          setCompileMs(0);
+        }
       }
     } finally {
       if (lease.isLatest()) setCompiling(false);

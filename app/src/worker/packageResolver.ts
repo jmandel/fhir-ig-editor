@@ -10,7 +10,7 @@
 // Fetch sources, in priority order (spec §4b / task step 4):
 //   (a) same-origin prebuilt bundles  — the baked manifest (fast, offline-capable)
 //   (b) local .tgz drag-drop           — user-provided packages (air-gapped)  [*]
-//   (c) direct FHIR registry           — packages.fhir.org / packages2 (CORS-open)
+//   (c) direct FHIR registry           — browser-readable exact package URLs
 //   (d) user-configured proxy          — for locked-down networks (wraps (c))
 //   [*] local packages are checked BEFORE the network so a provided tarball wins.
 //
@@ -31,6 +31,7 @@ import type { BakedBundleEntry } from './bundleIntegrity';
 import { openPackageTransport } from './transportInactivity';
 import { getLocalPackage, hasLocalPackage, localLabels } from './localPackages';
 import {
+  directMetadataReadable,
   metadataUrl,
   packageSourceSnapshot,
   tarballUrl,
@@ -739,6 +740,12 @@ export async function fetchRegistryVersions(
   let anyReplied = false; // at least one registry answered (any HTTP status)
   let complete = true;
   for (const registry of source.registries) {
+    // packages2's exact `/web/*.tgz` objects are readable, but its metadata
+    // response has invalid duplicate ACAO headers. Do not issue a request the
+    // browser must reject (and noisily log); a proxy can still expose it.
+    if (!source.proxy && !directMetadataReadable(registry)) {
+      continue;
+    }
     const url = viaPackageSource(source, metadataUrl(registry, id));
     const fetchStartedMs = epochMs();
     onProgress(pointEvent('package.version-fetch-start', 'window', {

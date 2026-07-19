@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import {
+  fetchRegistryVersions,
   obtainRawPackageByLabel,
   retryRegistryTgzCarrier,
 } from '../src/worker/packageResolver';
@@ -31,18 +32,60 @@ function useRegistries(...registries: string[]): void {
 }
 
 describe('registry TGZ fallback', () => {
-  test('retries only the canonical typed Worker integrity failure per slot', () => {
+  test('uses packages2 final blob directly after the primary registry misses', async () => {
+    useRegistries('https://packages.fhir.org', 'https://packages2.fhir.org/packages');
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.startsWith('https://packages.fhir.org/')) {
+        return new Response(null, { status: 404 });
+      }
+      return new Response('valid-tgz', {
+        status: 200,
+        headers: { 'content-length': '9' },
+      });
+    }) as typeof fetch;
+
+    const carrier = await obtainRawPackageByLabel('us.nlm.vsac#0.24.0');
+    expect(carrier?.kind).toBe('tgz');
+    expect(requested).toEqual([
+      'https://packages.fhir.org/us.nlm.vsac/0.24.0',
+      'https://packages2.fhir.org/web/us.nlm.vsac-0.24.0.tgz',
+    ]);
+  });
+
+  test('does not issue packages2 metadata request that Chromium must reject', async () => {
+    useRegistries('https://packages.fhir.org', 'https://packages2.fhir.org/packages');
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requested.push(String(input));
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+
+    const observation = await fetchRegistryVersions('example.mutable', () => {});
+    expect(requested).toEqual(['https://packages.fhir.org/example.mutable']);
+    expect(observation).toEqual({ versions: [], unreachable: false, cacheable: true });
+  });
+
+  test('retries only integrity failures and makes resource-policy exhaustion final', () => {
     const worker = readFileSync(new URL('../src/worker/engine.worker.ts', import.meta.url), 'utf8');
     const client = readFileSync(new URL('../src/worker/client.ts', import.meta.url), 'utf8');
+    const contract = readFileSync(new URL('../src/site/contract.generated.ts', import.meta.url), 'utf8');
     expect(worker).toContain("phase: 'package-transport'");
     expect(worker).toContain("code: 'integrity'");
     expect(worker).toContain('retryable: true');
+    expect(worker).toContain("error.kind === 'resource-limit'");
+    expect(worker).toContain("code: 'resource-limit'");
+    expect(worker).toContain('retryable: false');
+    expect(worker).toContain('Trying another registry will not help.');
     expect(worker).toContain('throw tgzPreparationFailure(item.label, error)');
     expect(client).toContain("error.detail.phase !== 'package-transport'");
     expect(client).toContain("error.detail.code !== 'integrity'");
     expect(client).toContain('isFailedRegistryTgzCarrier(error, input)');
     expect(client).toContain("input.kind === 'tgz' ? [input.bytes] : []");
     expect(client).toContain('retryRegistryTgzCarrier(');
+    expect(contract).toContain('"resource-limit"');
   });
 
   test('continues at the next registry after Worker preparation rejects a carrier', async () => {

@@ -138,7 +138,9 @@ describe('page-process engine startup owner', () => {
     expect(client).toContain('worker.onerror = (event) =>');
     expect(client).toContain('worker.onmessageerror = () =>');
     expect(client).toContain('this.rejectPending(reason)');
-    expect(client).toContain("spanEvent('engine.recycle.wait'");
+    expect(client).toContain("spanEvent('engine.recycle.yield'");
+    expect(client).toContain('setTimeout(resolve, 0)');
+    expect(client).not.toContain('configuredWaitMs');
     expect(main).toContain('engineStartup.dispose(new Error(`editor application module failed:');
     expect(client).toContain('for (const event of [moduleEvent, ...workerEvents, rpcEvent]) emitProgress(report, event)');
     expect(client).toContain('onFatal(listener: EngineFatalCb)');

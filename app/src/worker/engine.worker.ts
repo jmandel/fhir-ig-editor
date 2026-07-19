@@ -259,10 +259,35 @@ class EngineBuildFailure extends Error {
   }
 }
 
-/** A registry may answer an exact coordinate with a corrupt/non-package TGZ.
- * Keep that failure typed at the private Worker boundary so the host can try
- * the next registry without treating unrelated mount failures as retryable. */
+type TgzPreparationFailureKind = 'integrity' | 'resource-limit';
+
+class TgzPreparationError extends Error {
+  constructor(readonly kind: TgzPreparationFailureKind, message: string) {
+    super(message);
+    this.name = 'TgzPreparationError';
+  }
+}
+
+function unwrapTgzPreparation<T>(envelopeJson: string): T {
+  return unwrapApiEnvelope<T, { kind: TgzPreparationFailureKind; message: string }>(
+    envelopeJson,
+    (error) => new TgzPreparationError(error.kind, error.message),
+  );
+}
+
+/** Keep malformed bytes and local resource-policy exhaustion distinct at the
+ * private Worker boundary. Only malformed registry bytes may justify trying
+ * the next registry; a deterministic per-call policy result must stay final. */
 function tgzPreparationFailure(label: string, error: unknown): EngineBuildFailure {
+  if (error instanceof TgzPreparationError && error.kind === 'resource-limit') {
+    return new EngineBuildFailure({
+      operation: 'lifecycle',
+      phase: 'package-transport',
+      code: 'resource-limit',
+      message: `Package ${JSON.stringify(label)} exceeds this editor's current in-browser preparation resource policy. The package may still be valid; the policy uses a per-call working-set estimate and is not a whole-browser memory-safety guarantee. Trying another registry will not help. Use a native FHIR publishing workflow for this guide, or ask the editor maintainer to review the policy. Details: ${error.message}`,
+      retryable: false,
+    });
+  }
   return new EngineBuildFailure({
     operation: 'lifecycle',
     phase: 'package-transport',
@@ -498,7 +523,7 @@ const handlers: Handlers = {
         const prepareStartedMs = epochMs();
         const prepareWasmStarted = performance.now();
         try {
-          result = unwrap<PrepareMountResult>(
+          result = unwrapTgzPreparation<PrepareMountResult>(
             s.prepareTgzArtifact(item.label, new Uint8Array(item.bytes)),
           );
         } catch (error) {

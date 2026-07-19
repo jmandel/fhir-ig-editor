@@ -164,6 +164,9 @@ describe('baked package transport integrity', () => {
       (error: unknown) => error,
     );
 
+    // Response.arrayBuffer starts consumption on the stream's pull microtask;
+    // advance the injected clock only after that first guarded read is active.
+    await flushMicrotasks();
     scheduler.advance(1_000);
     const error = await outcome;
     expect(error).toBeInstanceOf(PackageTransportInactivityError);

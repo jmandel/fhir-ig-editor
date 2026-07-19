@@ -2,12 +2,11 @@
 // runtime resolver fetches missing packages from, plus an optional pass-through
 // proxy for CORS-blocked or air-gapped environments.
 //
-// Defaults mirror the engine's own registry order (package_acquisition
-// resolution-config.json): packages.fhir.org first, then packages2.fhir.org.
-// Both were verified to send `Access-Control-Allow-Origin: *` on metadata AND
-// tarball responses (see the task #32 CORS findings), so a browser fetch works
-// directly with NO proxy for the common case. The proxy is only for locked-down
-// networks where even those are blocked.
+// `packages2.fhir.org` emits two Access-Control-Allow-Origin headers on its
+// `/packages/*` metadata and redirect responses, which browsers reject. Its
+// final `/web/<id>-<version>.tgz` objects are CORS-readable, however, so exact
+// package fetches use that endpoint directly. Mutable-version metadata from
+// packages2 still requires the existing pass-through proxy.
 //
 // Persisted in localStorage (small strings), so the settings survive reloads
 // without touching any project Workspace.
@@ -24,10 +23,7 @@ export interface PackageSourceSnapshot {
   readonly sourceKey: string;
 }
 
-/** The default FHIR package registries, in try order. `packages.fhir.org` first:
- *  its CORS is a clean single `Access-Control-Allow-Origin: *`; packages2 emits a
- *  duplicate ACAO header alongside `*`, which some browsers reject — so it is the
- *  fallback, not the primary. */
+/** Default FHIR package registries, in resolver order. */
 export const DEFAULT_REGISTRIES = [
   'https://packages.fhir.org',
   'https://packages2.fhir.org/packages',
@@ -60,7 +56,7 @@ export function setRegistries(list: string[]): void {
 
 /** An optional pass-through proxy base. When set, a package tarball URL `U` is
  *  fetched as `<proxy>?url=<encodeURIComponent(U)>` (a common CORS-proxy shape).
- *  Empty by default (direct registry fetch — both defaults are CORS-open). */
+ *  Empty by default; exact package bytes from both defaults are CORS-readable. */
 export function getPackageProxy(): string {
   try {
     return localStorage.getItem(PROXY_KEY)?.trim().replace(/\/+$/, '') ?? '';
@@ -110,11 +106,23 @@ export function setPackageProxy(url: string): void {
   }
 }
 
-/** Build the tarball URL for `id#version` against one registry base. The FHIR
- *  registry serves the tarball at `<registry>/<id>/<version>` (a 200
- *  `application/tar+gzip`, or a CORS-open 302 to the actual blob on packages2).
- *  Mirrors package_acquisition `fallback_tarball_url` default shape. */
+function isPackages2Registry(registry: string): boolean {
+  try {
+    const url = new URL(registry);
+    return url.hostname === 'packages2.fhir.org'
+      && url.pathname.replace(/\/+$/, '') === '/packages';
+  } catch {
+    return false;
+  }
+}
+
+/** Build the browser-readable tarball URL for one exact coordinate. Most FHIR
+ *  registries serve `<registry>/<id>/<version>`. packages2's redirect response
+ *  is not CORS-readable, but its deterministic final blob is. */
 export function tarballUrl(registry: string, id: string, version: string): string {
+  if (isPackages2Registry(registry)) {
+    return `https://packages2.fhir.org/web/${encodeURIComponent(id)}-${encodeURIComponent(version)}.tgz`;
+  }
   return `${registry.replace(/\/+$/, '')}/${id}/${version}`;
 }
 
@@ -122,6 +130,13 @@ export function tarballUrl(registry: string, id: string, version: string): strin
  *  versions, used to build the resolver's version index for `latest`/`x`. */
 export function metadataUrl(registry: string, id: string): string {
   return `${registry.replace(/\/+$/, '')}/${id}`;
+}
+
+/** Whether metadata at this direct registry URL can be read by a browser. A
+ * configured proxy can expose any registry, so callers use this only in direct
+ * mode. */
+export function directMetadataReadable(registry: string): boolean {
+  return !isPackages2Registry(registry);
 }
 
 /** Wrap a URL through the configured proxy (if any). */

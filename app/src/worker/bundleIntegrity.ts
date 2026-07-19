@@ -109,41 +109,61 @@ export async function readResponseBytes(
     return bytes;
   }
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
   let length = 0;
   let reportedLength = 0;
   let reportedAt = performance.now();
-  try {
-    while (true) {
-      const operation = reader.read();
-      const { done, value } = transportGuard
-        ? await transportGuard.wait(operation, 'response body')
-        : await operation;
-      if (done) break;
-      if (!value?.byteLength) continue;
-      chunks.push(value);
-      length += value.byteLength;
-      const now = performance.now();
-      if (length === totalBytes || now - reportedAt >= 100) {
-        onProgress?.(length, totalBytes);
-        reportedLength = length;
-        reportedAt = now;
+  const measuredBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        // Empty chunks do not satisfy a pending pull. Keep reading until this
+        // pull either publishes bytes or closes the stream; each underlying
+        // read still gets its own renewable no-progress boundary.
+        while (true) {
+          const operation = reader.read();
+          const { done, value } = transportGuard
+            ? await transportGuard.wait(operation, 'response body')
+            : await operation;
+          if (done) {
+            if (reportedLength !== length) onProgress?.(length, totalBytes);
+            controller.close();
+            return;
+          }
+          if (!value?.byteLength) continue;
+          length += value.byteLength;
+          const now = performance.now();
+          if (length === totalBytes || now - reportedAt >= 100) {
+            onProgress?.(length, totalBytes);
+            reportedLength = length;
+            reportedAt = now;
+          }
+          controller.enqueue(value);
+          return;
+        }
+      } catch (error) {
+        // The fetch's AbortSignal normally terminates the reader. Cancellation
+        // also releases synthetic/test streams not connected to that signal.
+        void reader.cancel(error).catch(() => {});
+        controller.error(error);
       }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  try {
+    // Let the Fetch implementation assemble one ArrayBuffer directly. The old
+    // path retained every response chunk and then allocated a second joined
+    // buffer, needlessly doubling large-package JS memory before wasm-bindgen's
+    // unavoidable copy into WASM.
+    const bytes = await new Response(measuredBody).arrayBuffer();
+    if (bytes.byteLength !== length) {
+      throw new Error(`response body accounting mismatch: consumed ${length}, assembled ${bytes.byteLength}`);
     }
+    return bytes;
   } catch (error) {
-    // The fetch's AbortSignal normally terminates the reader. Cancellation also
-    // releases synthetic/test streams that are not connected to that signal.
     void reader.cancel(error).catch(() => {});
     throw error;
   }
-  if (reportedLength !== length) onProgress?.(length, totalBytes);
-  const joined = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return joined.buffer;
 }
 
 /** Read and authenticate a compressed baked bundle before any inflater or engine

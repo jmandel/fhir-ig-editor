@@ -75,10 +75,11 @@ export function PackageSettings({
           <div className="tx-settings-title">FHIR package sources</div>
           <p className="tx-settings-help">
             Missing packages an IG needs are fetched from the prebuilt bundles,
-            then the registries below (both send <code>Access-Control-Allow-Origin: *</code>,
-            so no proxy is needed in most browsers). For locked-down networks, set a
-            pass-through proxy; for air-gapped use, <strong>drop package <code>.tgz</code>
-            files here</strong> and they win over the network.
+            then the registries below. Exact packages from both defaults are
+            directly readable by browsers. A pass-through proxy is needed for
+            mutable-version metadata from a registry without valid CORS, or for
+            a locked-down network; for air-gapped use, <strong>drop package
+            <code>.tgz</code> files here</strong> and they win over the network.
           </p>
 
           <label className="tx-settings-title">Registries (one per line, in try order)</label>

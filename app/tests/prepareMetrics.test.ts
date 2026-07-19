@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const CONTRACT = readFileSync(new URL('../src/site/contract.ts', import.meta.url), 'utf8');
 const WORKER = readFileSync(new URL('../src/worker/engine.worker.ts', import.meta.url), 'utf8');
 const CLIENT = readFileSync(new URL('../src/worker/client.ts', import.meta.url), 'utf8');
+const APP = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const PROTOCOL = readFileSync(new URL('../src/worker/protocol.ts', import.meta.url), 'utf8');
 const INSPECTOR = readFileSync(new URL('../src/views/ResourceInspector.tsx', import.meta.url), 'utf8');
 const E2E = readFileSync(new URL('../../scripts/verify-e2e.mjs', import.meta.url), 'utf8');
@@ -143,9 +144,7 @@ describe('canonical build observations and failures', () => {
       .toBeLessThan(prepare.indexOf('const packageSource = packageSourceSnapshot()'));
     expect(prepare).toContain('const packageLocalEpoch = localPackageEpoch()');
     expect(prepare.match(/packageSourceSnapshot\(\)/gu)).toHaveLength(1);
-    expect(prepare).toContain(
-      'this.acquireForProject(project.config, report, packageSource, packageLocalEpoch)',
-    );
+    expect(prepare.match(/await this\.acquireForProject\(/gu)).toHaveLength(2);
     expect(prepare).toContain('packageSource,\n          packageLocalEpoch,');
     expect(prepare).toContain('this.localPackageAuthority.commit()');
     expect(prepare).toContain('this.localPackageAuthority.rollback()');
@@ -154,6 +153,28 @@ describe('canonical build observations and failures', () => {
       CLIENT.indexOf('  // ---- runtime package resolution'),
     );
     expect(dispose).toContain('this.localPackageAuthority.rollback()');
+  });
+
+  test('requires both project-resolution checkpoints before prepare and surfaces blockers', () => {
+    const guard = CLIENT.slice(
+      CLIENT.indexOf('function requireSatisfiedPackageResolution('),
+      CLIENT.indexOf('export type EngineInitializationStage'),
+    );
+    expect(guard).toContain('if (outcome.step.satisfied) return');
+    expect(guard).toContain("phase: 'package-resolution'");
+    expect(guard).toContain("code: 'unavailable'");
+    expect(guard).toContain('}, blockedPackages)');
+
+    const prepare = CLIENT.slice(
+      CLIENT.indexOf('async prepare(\n'),
+      CLIENT.indexOf('  open(buildId: string)'),
+    );
+    expect(prepare.match(/requireSatisfiedPackageResolution\(/gu)).toHaveLength(2);
+    expect(prepare.indexOf("this.call('prepare', project, spec)"))
+      .toBeGreaterThan(prepare.lastIndexOf('requireSatisfiedPackageResolution('));
+    expect(APP).toContain(
+      'setBlockedPackages(e instanceof BuildFailure ? [...e.blockedPackages] : [])',
+    );
   });
 
   test('passes the expected label into Rust before a warm slot is occupied', () => {
