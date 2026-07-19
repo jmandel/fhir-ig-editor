@@ -1,18 +1,18 @@
 # FHIR IG Editor working agreement
 
-## Active correctness round (2026-07-18, landing)
+## Active correctness round (2026-07-18, live and verified)
 
 The user authorized dependency-order commit/push/deploy after complete gates.
 This round fixes three live failures: PDEx package resolution and large VSAC
 carrier preparation, SDC R4 `Expression` conversion, and preview timeouts/
 ownership. Engine `e72ffa10` is pushed identically to `snapshot-gen`/`main`,
-Cycle `45fac48` is pushed to `main`, and editor `605b89c` is pushed to `main`.
-Pages run `29671429179` passed every build, Chromium, upload, and deploy job.
-The fresh live full gate and isolated PDEx/SDC gates are green, but artifact
-audit found that the workflow's floating Rust `stable` had advanced to 1.97.1
-while the documented/local release toolchain is 1.96. The workflow is now
-locally pinned to 1.96; commit/push, replacement Pages success, exact artifact
-match, and final fresh-profile live verification remain before closure.
+Cycle `45fac48` is pushed to `main`, and editor `7c3232bf` is pushed to `main`.
+The initial Pages run `29671429179` was semantically green but exposed that the
+workflow's floating Rust `stable` had advanced to 1.97.1. Editor commit
+`7c3232bf` pins `dtolnay/rust-toolchain@1.96.0`; replacement Pages run
+`29672331685` proves rustc 1.96.0 in its log and passed every native, Rust,
+WASM, Cycle, app, complete Chromium, artifact-upload, and deploy job. Fresh
+live full, PDEx, and SDC receipts against that exact deployment are green.
 
 Preview protocol 8 has no total-duration deadline for activation, commit,
 persisted-pointer read, render/content transfer, publication, or scroll
@@ -30,6 +30,17 @@ work time or package validity. The former uncalibrated 250 ms Worker-recycle
 grace is replaced by one task yield; Chromium exposes no memory-release
 acknowledgement, so whole-browser memory gates—not a guessed sleep—remain
 authoritative.
+
+The timeout audit is explicit. No production `8_000 ms` deadline remains; the
+only 8 s values are Cycle headless smoke-test process watchdogs and frozen
+legacy fixtures. The preview protocol has no elapsed-time correctness deadline.
+Its 1 s liveness poll is only an observation cadence and missed polls cannot
+fail work. The app's 500 ms interval only repaints the displayed elapsed time,
+and `setTimeout(0)` is one task yield after Worker termination. The renewable
+60 s package no-progress interval is mechanically deterministic and fake-
+scheduler tested, but 60 s is still an explicit dead-connection policy, not an
+empirically calibrated truth. CI/benchmark watchdogs remain outside product
+correctness so broken automation eventually terminates.
 
 Streaming PreparedPackage v3 preparation retains canonical nested package
 bytes without the old 256 MiB aggregate map. A frozen deployed-engine oracle is
@@ -93,13 +104,40 @@ restarted SDC receipt `/tmp/fhir-sdc-live-e72ffa1-summary.json` is `ok:true`:
 29.381 s cold, 12.037 s reload, 0.532 s reopen, 201 resources, verified preview
 in every phase, and no site error.
 
-Do not use the initial CI artifact as the byte-reproducibility checkpoint. Its
-actual downloaded Pages artifact is 179 files / 113,709,498 bytes, SHA-256
-`4b3e591d...f7c3`, recipe `aa32c465...b54`, with an 8,071,346-byte WASM
-(`9806c9ec...ec7b`); the job log proves Rust 1.97.1. It is semantically green
-but differs from the certified Rust-1.96 WASM above. Finish the exact-toolchain
-replacement deployment and verify its bytes and live behavior before declaring
-this round complete.
+Do not use the initial CI artifact as the release checkpoint. Its downloaded
+Pages artifact is 179 files / 113,709,498 bytes, SHA-256 `4b3e591d...f7c3`,
+recipe `aa32c465...b54`, with an 8,071,346-byte WASM
+(`9806c9ec...ec7b`); the job log proves Rust 1.97.1. It is only historical
+semantic evidence.
+
+The authoritative pinned-toolchain Pages artifact downloaded from run
+`29672331685` is 179 files / 113,758,749 bytes, SHA-256
+`98bf076d...553a`, recipe `aa32c465...b54`. Its 8,120,597-byte WASM has
+SHA-256 `c3fe2e82...731`; a no-cache live-origin fetch has the same length and
+hash, and the live app serves `assets/index-DjH2MThC.js` with Worker
+`assets/engine.worker-DLOFb2r2.js`. The local explicit Rust-1.96 rebuild
+reproduces the earlier 8,097,098-byte `2733235a...4366` WASM exactly. It is not
+byte-identical to CI because release panic/source strings retain absolute Cargo
+registry roots (`/home/jmandel/.cargo/...` versus `/home/runner/.cargo/...`).
+Both embed rustc 1.96.0 and engine `e72ffa1`; use the downloaded/live CI hash,
+not a cross-build-root equality claim, as deployment provenance. In this shell
+`/usr/bin/rustc` precedes rustup and is currently Arch Rust 1.97, so release
+checks/builds must use the absolute Rust-1.96 paths documented below rather
+than assuming `rustc +1.96.0` reaches the rustup proxy.
+
+The exact deployed-artifact full receipt
+`/tmp/fhir-pdex-sdc-live-rust196-full.log` ends in `E2E GATE: PASS`. It proves
+protocol 8, Tiny SQL A -> B -> A, one-shell US Core TOC/Artifacts and
+1,535/1,535 images + 85/85 assets, real mCODE/Genomics, restart/persistence,
+503 ms Cycle hot reload with scroll preserved, fallback after owner close, and
+mobile geometry. Isolated receipts are also `ok:true` and carry the exact
+`98bf076d...553a` provenance: PDEx at
+`/tmp/fhir-pdex-live-rust196-summary.json` (125.357 s cold, 12.478 s reload,
+0.573 s reopen, 180 resources, real preview in every phase, no site error) and
+SDC at `/tmp/fhir-sdc-live-rust196-summary.json` (28.090 s cold, 11.373 s
+reload, 0.502 s reopen, 201 resources, real preview in every phase, no site
+error). The reported PDEx fixpoint/large-VSAC and SDC R4 `Expression` failures
+are therefore independently closed on the live pinned build.
 
 ## Authority and safety
 
