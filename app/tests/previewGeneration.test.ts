@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import type { ContentRef } from '../src/site/contract';
 import {
   PREVIEW_SW_PROTOCOL,
+  durablePreviewCommit,
   isSafePreviewPath,
   postPreviewCommit,
   previewContentChanged,
@@ -409,6 +410,47 @@ test('an accepted publication recovers by idempotent status after Worker executi
   expect(await pending).toMatchObject({ ok: true, generation: 44 });
   expect(commitIds).toHaveLength(2);
   expect(commitIds[0]).toBe(commitIds[1]);
+});
+
+test('lease revocation after a lost first reply still observes the submitted commit to durability', async () => {
+  const commitIds: string[] = [];
+  let attempt = 0;
+  let mayContinue = true;
+  let retry: (() => void) | null = null;
+  const worker = Object.assign(new EventTarget(), {
+    state: 'activated' as ServiceWorkerState,
+    postMessage(message: unknown, transfer: Transferable[]) {
+      attempt += 1;
+      const commitId = (message as { commitId: string }).commitId;
+      commitIds.push(commitId);
+      const port = transfer[0] as MessagePort;
+      if (attempt > 1) {
+        port.postMessage({ type: 'igpreview:accepted', protocol: PREVIEW_SW_PROTOCOL, commitId });
+        port.postMessage({
+          type: 'igpreview:complete',
+          ok: true,
+          protocol: PREVIEW_SW_PROTOCOL,
+          commitId,
+          generation: 46,
+          openPaths: ['../not-a-preview-path'],
+        });
+      }
+    },
+  }) as unknown as ServiceWorker;
+  const pending = postPreviewCommit(worker, source(), 46, () => mayContinue, (scheduled) => {
+    retry = scheduled;
+    return () => {};
+  });
+  // The first transfer succeeded but its acknowledgement channel was lost.
+  // Revocation must not make the host assume that no durable commit exists.
+  mayContinue = false;
+  retry?.();
+
+  const acknowledgement = await pending;
+  expect(acknowledgement.cancelled).toBeUndefined();
+  expect(commitIds).toHaveLength(2);
+  expect(commitIds[0]).toBe(commitIds[1]);
+  expect(durablePreviewCommit(acknowledgement)).toEqual({ generation: 46, openPaths: [] });
 });
 
 test('an accepted publication follows a compatible replacement with the same commit id', async () => {

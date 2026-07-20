@@ -87,6 +87,7 @@ interface WasmSession {
   resolveProject(config: string, versionIndexJson: string): string;
   resolveTemplate(coordinate: string): string;
   prepareProject(projectRevision: ProjectRevision | string, generatorSpec: GeneratorSpec | string): string;
+  releaseBuild(handle: string): boolean;
   snapshot(input: string): string;
   outputs(handle: string): string;
   render(handle: string, path: string): string;
@@ -786,6 +787,7 @@ const handlers: Handlers = {
     ];
     const compiled = result.compiled;
     const prepared = result.site;
+    const retainedBeforeHostOpen = siteBuilds.get(prepared.buildId);
     try {
       if (prepared.generator !== spec.generator) {
         throw new Error('prepare: Rust returned a different generator');
@@ -793,19 +795,28 @@ const handlers: Handlers = {
       const hostPrepareStarted = performance.now();
       const hostPrepareStartedMs = epochMs();
       let cycleRuntimeModuleMs = 0;
-      if (prepared.generator === 'cycle') {
-        if (!prepared.siteBuild) {
-          throw new Error('prepare: Cycle transport omitted its closed SiteBuild');
+      let reusedHostRuntime = false;
+      if (prepared.generator === 'cycle' && !prepared.siteBuild) {
+        throw new Error('prepare: Cycle transport omitted its closed SiteBuild');
+      }
+      if (prepared.generator !== 'cycle' && prepared.siteBuild != null) {
+        throw new Error('prepare: Publisher transport redundantly returned its closed SiteBuild');
+      }
+      if (retainedBeforeHostOpen) {
+        if (retainedBeforeHostOpen.kind !== prepared.generator) {
+          throw new Error('prepare: retained host runtime has a different generator');
         }
+        if (siteBuilds.touch(prepared.buildId) !== retainedBeforeHostOpen) {
+          throw new Error('prepare: exact retained host runtime disappeared');
+        }
+        reusedHostRuntime = true;
+      } else if (prepared.generator === 'cycle') {
         const moduleStarted = performance.now();
         const { openCycleBuildRuntime } = await loadCycleRuntimeModule();
         cycleRuntimeModuleMs = performance.now() - moduleStarted;
         const runtime = await openCycleBuildRuntime(s, prepared.buildId, prepared.siteBuild);
         siteBuilds.install(prepared.buildId, runtime);
       } else {
-        if (prepared.siteBuild != null) {
-          throw new Error('prepare: Publisher transport redundantly returned its closed SiteBuild');
-        }
         siteBuilds.install(prepared.buildId, { kind: 'publisher', buildId: prepared.buildId });
       }
       return {
@@ -820,7 +831,7 @@ const handlers: Handlers = {
             startMs: hostPrepareStartedMs,
             stage: 'site-build',
             label: prepared.buildId,
-            message: `Opened ${prepared.generator} renderer for ${prepared.buildId}.`,
+            message: `${reusedHostRuntime ? 'Reused' : 'Opened'} ${prepared.generator} renderer for ${prepared.buildId}.`,
             durationMs: performance.now() - hostPrepareStarted,
             metrics: {
               rustBoundaryMs,
@@ -832,6 +843,14 @@ const handlers: Handlers = {
         ],
       };
     } catch (error) {
+      // Rust has already installed the closed target when host-side Cycle
+      // renderer opening begins. If that final host step rejects a genuinely
+      // new handle, release it here so a failed prepare cannot consume the
+      // predecessor slot. An exact retained handle remains owned by its prior
+      // successful Build and must not be dropped.
+      if (!retainedBeforeHostOpen && !siteBuilds.get(prepared.buildId)) {
+        s.releaseBuild(prepared.buildId);
+      }
       if (error instanceof EngineBuildFailure) throw error;
       throw new EngineBuildFailure({
         operation: 'prepare',
@@ -855,6 +874,16 @@ const handlers: Handlers = {
     }
     assertClosedNonPageCatalog(catalog);
     return catalog;
+  },
+
+  async releaseBuild(handle) {
+    const s = await ensureSession();
+    const rustReleased = s.releaseBuild(handle);
+    const hostReleased = siteBuilds.release(handle);
+    if (rustReleased !== hostReleased) {
+      throw new Error(`releaseBuild: runtime registries disagree for ${handle}`);
+    }
+    return rustReleased;
   },
 
   async render(handle, path) {

@@ -14,7 +14,7 @@ import type {
 import { workspaceStartup } from './vfs/workspaceStartup';
 import { loadProject, CATALOG_IGS } from './vfs/demoIg';
 import type { CompileResult, Diagnostic, EngineVersion } from './worker/protocol';
-import type { GeneratorSpec, OutputDescriptor } from './site/contract';
+import type { Build, GeneratorSpec, OutputDescriptor } from './site/contract';
 import {
   ensurePreviewServiceWorker,
   wirePreviewResponder,
@@ -405,6 +405,7 @@ export function App({ startup }: { startup: EngineStartup }) {
               || bootFailed
               || !publication
               || projectIdRef.current !== publication.source.igId) return;
+            engine.retainPublishedBuild(publication.source.buildId);
             const pages = publication.source.catalog.outputs.filter((output) => output.kind === 'page');
             if (pages.length === 0) return;
             siteGenerationRef.current = Math.max(siteGenerationRef.current, publication.generation);
@@ -569,9 +570,17 @@ export function App({ startup }: { startup: EngineStartup }) {
         return first ? resourceIdentity(first) : allResources[0] ? resourceIdentity(allResources[0]) : null;
       });
     };
+    let build: Build | null = null;
+    let publicationCommitted = false;
+    const releaseUnpublished = async () => {
+      if (!build || publicationCommitted) return;
+      const candidate = build;
+      build = null;
+      await engine.releaseUnpublishedBuild(candidate);
+    };
     try {
       const siteStartedMs = epochMs();
-      const build = await engine.prepare(
+      build = await engine.prepare(
         project,
         generatorSpec(genId, selectedTemplate, capture.buildEpochSecs),
         report,
@@ -579,7 +588,10 @@ export function App({ startup }: { startup: EngineStartup }) {
       // Compilation remains useful UI state even if catalog validation,
       // rendering, or preview publication subsequently fails.
       showCompiled(build.compilation);
-      if (!lease.isLatest()) return;
+      if (!lease.isLatest()) {
+        await releaseUnpublished();
+        return;
+      }
       const catalog = await build.outputs();
       const pages = catalog.outputs.filter((output) => output.kind === 'page');
       report(spanEvent('site.pipeline-to-catalog', 'window', siteStartedMs, {
@@ -587,7 +599,10 @@ export function App({ startup }: { startup: EngineStartup }) {
         message: `Prepared ${pages.length} site pages.`,
         fileCount: pages.length,
       }));
-      if (!lease.isLatest()) return;
+      if (!lease.isLatest()) {
+        await releaseUnpublished();
+        return;
+      }
       // Template loaded cleanly — remember it as the fallback + clear any prior
       // load error (#40).
       if (genId === PUBLISHER_GENERATOR) {
@@ -600,7 +615,7 @@ export function App({ startup }: { startup: EngineStartup }) {
         stage: 'preview-publish',
         message: 'Publishing preview generation…',
       }, publishStartedMs));
-      const published = await publishPreviewSource(
+      const publication = await publishPreviewSource(
         {
           igId: capture.projectId,
           buildId: catalog.buildId,
@@ -609,7 +624,10 @@ export function App({ startup }: { startup: EngineStartup }) {
         nextGeneration,
         () => lease.isLatest(),
       );
-      if (!published || !lease.isLatest()) return;
+      publicationCommitted = publication.committed;
+      if (publicationCommitted) engine.retainPublishedBuild(catalog.buildId);
+      else await releaseUnpublished();
+      if (!publication.latest || !lease.isLatest()) return;
       report(spanEvent('preview.publish', 'window', publishStartedMs, {
         stage: 'preview-publish',
         message: `Published preview generation ${nextGeneration}.`,
@@ -627,13 +645,19 @@ export function App({ startup }: { startup: EngineStartup }) {
       });
       setPreviewStale(false);
     } catch (e) {
+      let failure = e;
+      try {
+        await releaseUnpublished();
+      } catch (releaseError) {
+        failure = releaseError;
+      }
       if (lease.isLatest()) {
-        if (e instanceof BuildFailure && e.detail.successfulCompilation) {
-          showCompiled(e.detail.successfulCompilation);
+        if (failure instanceof BuildFailure && failure.detail.successfulCompilation) {
+          showCompiled(failure.detail.successfulCompilation);
         }
-        setSiteError(String(e));
+        setSiteError(String(failure));
         setPreviewStale(true);
-        throw e; // let selectTemplate see the failure so it can fall back
+        throw failure; // let selectTemplate see the failure so it can fall back
       }
     } finally {
       setSiteBuilding(false);

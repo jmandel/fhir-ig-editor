@@ -249,6 +249,13 @@ export class EngineClient {
   /** Snapshot inspection joins the currently installing semantic revision. */
   private prepareBarrier: Promise<void> = Promise.resolve();
   private builds = new Map<string, Build>();
+  /** Private lifecycle address for each Build facade. The public Build contract
+   * deliberately does not expose its handle. */
+  private readonly buildOwners = new WeakMap<Build, { handle: string; recycle: number }>();
+  /** Exact handle durably owned by the preview Service Worker. An identical
+   * rebuild may lose its UI lease without making this published runtime
+   * releasable. */
+  private publishedBuildId: string | null = null;
   /** One resolver-loop outcome bound to exact config bytes and the current
    * package-mount generation. Rust invalidates its fixpoint on a fresh mount;
    * the host mirrors that law here. */
@@ -1293,6 +1300,7 @@ export class EngineClient {
         () => this.call('finalize', result.buildId),
         report,
       );
+      this.buildOwners.set(build, { handle: result.buildId, recycle: this.recycleCount });
       this.builds.delete(result.buildId);
       this.builds.set(result.buildId, build);
       while (this.builds.size > 2) {
@@ -1323,6 +1331,26 @@ export class EngineClient {
 
   open(buildId: string): Build | undefined {
     return this.builds.get(buildId);
+  }
+
+  /** Record the handle whose durable SW publication currently owns unresolved
+   * preview rendering. This is lifecycle routing, not another Build operation. */
+  retainPublishedBuild(buildId: string): void {
+    this.publishedBuildId = buildId;
+  }
+
+  /** Abandon one successfully prepared candidate which never became the
+   * published preview. Awaiting the serialized Worker acknowledgement before a
+   * queue task settles prevents its successor from evicting the still-published
+   * predecessor. */
+  async releaseUnpublishedBuild(build: Build): Promise<boolean> {
+    const owner = this.buildOwners.get(build);
+    if (!owner
+      || owner.recycle !== this.recycleCount
+      || owner.handle === this.publishedBuildId) return false;
+    const released = await this.call('releaseBuild', owner.handle);
+    if (this.builds.get(owner.handle) === build) this.builds.delete(owner.handle);
+    return released;
   }
 
   /** Acquire exactly the template coordinates requested by Rust's private

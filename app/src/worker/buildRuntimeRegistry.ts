@@ -7,6 +7,15 @@ export class BuildRuntimeRegistry<T> {
     return this.values.get(handle);
   }
 
+  /** Reuse an exact retained runtime and make its successful preparation the
+   * current generation. Ordinary reads deliberately remain recency-neutral. */
+  touch(handle: string): T | undefined {
+    const value = this.values.get(handle);
+    if (value === undefined) return undefined;
+    this.recent = [handle, ...this.recent.filter((candidate) => candidate !== handle)];
+    return value;
+  }
+
   /** Install only after preparation has fully succeeded. Current and immediate
    * predecessor remain callable for preview hash comparison; older values go. */
   install(handle: string, value: T): void {
@@ -16,6 +25,14 @@ export class BuildRuntimeRegistry<T> {
     for (const candidate of this.values.keys()) {
       if (!retained.has(candidate)) this.values.delete(candidate);
     }
+  }
+
+  /** Drop an unpublished candidate while preserving every other retained
+   * runtime and its recency. Repeated release is deliberately harmless. */
+  release(handle: string): boolean {
+    const released = this.values.delete(handle);
+    this.recent = this.recent.filter((candidate) => candidate !== handle);
+    return released;
   }
 
   handles(): string[] {

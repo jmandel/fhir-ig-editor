@@ -364,17 +364,24 @@ async function commitToPreviewWorker(
     acknowledgement = await post((acknowledgement.generation as number) + 1);
     if (acknowledgement.cancelled) return null;
   }
-  if (acknowledgement.ok && Number.isSafeInteger(acknowledgement.generation)) {
-    if (!Array.isArray(acknowledgement.openPaths)
-      || !acknowledgement.openPaths.every(isSafePreviewPath)) {
-      throw new Error('preview Service Worker returned invalid open preview paths');
-    }
-    return {
-      generation: acknowledgement.generation as number,
-      openPaths: [...new Set(acknowledgement.openPaths as string[])],
-    };
-  }
+  const durable = durablePreviewCommit(acknowledgement);
+  if (durable) return durable;
   throw new Error(String(acknowledgement.error || 'preview Service Worker rejected publication'));
+}
+
+/** Validate the authority-bearing fields of one terminal acknowledgement.
+ * `openPaths` is only a best-effort hot-reload hint: malformed ancillary data
+ * must not make the host forget that the Service Worker durably committed the
+ * build and release the runtime which now owns that publication. */
+export function durablePreviewCommit(
+  acknowledgement: Record<string, unknown>,
+): { generation: number; openPaths: string[] } | null {
+  if (!acknowledgement.ok || !Number.isSafeInteger(acknowledgement.generation)) return null;
+  const openPaths = Array.isArray(acknowledgement.openPaths)
+    && acknowledgement.openPaths.every(isSafePreviewPath)
+    ? [...new Set(acknowledgement.openPaths as string[])]
+    : [];
+  return { generation: acknowledgement.generation as number, openPaths };
 }
 
 function newCommitId(): string {
@@ -400,6 +407,7 @@ export function postPreviewCommit(
     const channels = new Set<MessagePort>();
     let currentWorker = worker;
     let settled = false;
+    let submittedOnce = false;
     let reacquiring = false;
     let cancelRetry: (() => void) | null = null;
     const cleanup = () => {
@@ -431,7 +439,11 @@ export function postPreviewCommit(
     const attempt = () => {
       cancelRetry = null;
       if (settled) return;
-      if (!mayContinue()) {
+      // Before the first successful transfer the caller still owns
+      // cancellation. Afterwards the Worker may already have accepted or even
+      // durably committed despite a lost reply channel, so keep querying that
+      // same id until its terminal acknowledgement.
+      if (!submittedOnce && !mayContinue()) {
         finish({ cancelled: true });
         return;
       }
@@ -502,9 +514,14 @@ export function postPreviewCommit(
           generation,
           source,
         }, [channel.port2]);
+        submittedOnce = true;
       } catch (error) {
         if ((currentWorker.state as ServiceWorkerState) === 'redundant') {
           stateChanged();
+          return;
+        }
+        if (submittedOnce) {
+          cancelRetry = scheduleRetry(attempt);
           return;
         }
         fail(error);
@@ -676,20 +693,21 @@ export async function publishPreviewSource(
   next: PreviewSource,
   generation: number,
   mayCommit: () => boolean = () => true,
-): Promise<boolean> {
+): Promise<{ committed: boolean; latest: boolean }> {
   const published = validatePreviewSource(next);
-  if (!mayCommit()) return false;
+  if (!mayCommit()) return { committed: false, latest: false };
   if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('invalid preview generation');
   const previous = source;
   // UI counters restart on a hard reload. Publication order is deliberately
   // process-independent and has no role in cache/content identity.
   const order = Math.max(Date.now(), generation, lastPublicationOrder + 1);
   const committed = await commitToPreviewWorker(published, order, mayCommit);
-  if (committed == null) return false;
+  if (committed == null) return { committed: false, latest: false };
   // Once the Service Worker acknowledges the durable pointer, mirror that
   // exact authority locally even if a newer edit revoked the UI lease during
-  // the write. Returning false still prevents the superseded generation from
-  // changing React state; the next build will advance both authorities again.
+  // the write. The separate `latest` result still prevents the superseded
+  // generation from changing React state; the next build will advance both
+  // authorities again.
   const stillCurrent = mayCommit();
   lastPublicationOrder = committed.generation;
   source = published;
@@ -697,7 +715,7 @@ export async function publishPreviewSource(
   if (stillCurrent && previous && previous.igId === published.igId) {
     void refreshOpenPreviews(previous, published, committed.generation, committed.openPaths);
   }
-  return stillCurrent;
+  return { committed: true, latest: stillCurrent };
 }
 
 async function refreshOpenPreviews(

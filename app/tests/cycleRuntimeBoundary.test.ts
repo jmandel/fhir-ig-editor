@@ -30,23 +30,33 @@ describe('lazy Cycle worker capability', () => {
   });
 
   test('loads the capability only in the Cycle preparation branch', () => {
+    const cycleStart = WORKER.indexOf("} else if (prepared.generator === 'cycle') {");
+    const publisherStart = WORKER.indexOf('} else {', cycleStart);
     const cycleBranch = WORKER.slice(
-      WORKER.indexOf("if (prepared.generator === 'cycle')"),
-      WORKER.indexOf("} else {", WORKER.indexOf("if (prepared.generator === 'cycle')")),
+      cycleStart,
+      publisherStart,
     );
     expect(cycleBranch).toContain('await loadCycleRuntimeModule()');
     expect(cycleBranch).toContain('await openCycleBuildRuntime(');
-    expect(cycleBranch).toContain('Cycle transport omitted its closed SiteBuild');
+    expect(WORKER).toContain('Cycle transport omitted its closed SiteBuild');
     expect(cycleBranch.indexOf('await openCycleBuildRuntime('))
       .toBeLessThan(cycleBranch.indexOf('siteBuilds.install('));
 
     const publisherBranch = WORKER.slice(
-      WORKER.indexOf("} else {", WORKER.indexOf("if (prepared.generator === 'cycle')")),
-      WORKER.indexOf('return {', WORKER.indexOf("if (prepared.generator === 'cycle')")),
+      publisherStart,
+      WORKER.indexOf('return {', publisherStart),
     );
     expect(publisherBranch).not.toContain('loadCycleRuntimeModule');
     expect(publisherBranch).toContain("kind: 'publisher'");
-    expect(publisherBranch).toContain('Publisher transport redundantly returned its closed SiteBuild');
+    expect(WORKER).toContain('Publisher transport redundantly returned its closed SiteBuild');
+
+    const retainedBranch = WORKER.slice(
+      WORKER.indexOf('if (retainedBeforeHostOpen)'),
+      cycleStart,
+    );
+    expect(retainedBranch).toContain('siteBuilds.touch(prepared.buildId)');
+    expect(retainedBranch).not.toContain('loadCycleRuntimeModule');
+    expect(retainedBranch).not.toContain('openCycleBuildRuntime');
   });
 
   test('preserves the closed non-page and four-operation runtime semantics', () => {

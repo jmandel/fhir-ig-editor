@@ -194,11 +194,13 @@ export interface EngineOps {
   snapshot: { args: [url: string]; result: SnapshotResult };
   /** Private acquisition handshake; only EngineClient.prepare drives it. */
   resolveTemplate: { args: [coordinate: string]; result: TemplateResolution };
-  // The complete public site-generation surface.
+  // The complete public site-generation surface is these four operations.
   prepare: { args: [project: ProjectRevision, spec: GeneratorSpec]; result: PrepareTransportResult };
   outputs: { args: [handle: string]; result: OutputCatalog };
   render: { args: [handle: string, path: string]; result: ContentRef };
   finalize: { args: [handle: string]; result: SiteOutput };
+  /** Private lifecycle routing for a prepared handle that was never published. */
+  releaseBuild: { args: [handle: string]; result: boolean };
 }
 
 export type Op = keyof EngineOps;

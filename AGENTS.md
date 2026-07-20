@@ -1,5 +1,49 @@
 # FHIR IG Editor working agreement
 
+## Active SDC output/lifecycle correctness round (2026-07-20, uncommitted)
+
+The user authorized dependency-order commit/push/deploy and fresh live
+verification. Do not call the live site fixed until Pages and disposable-profile
+live gates pass. Engine `45ff1233` is pushed identically to `snapshot-gen` and
+`main`; the editor commit/push, Pages run, and live verification remain.
+
+Three independent live failures are closed locally. First, the standard
+CodeSystem layout consumed a doubly wrapped vscs fragment and exposed the inner
+`{% raw %}` token. FragmentEngine now removes exactly the legacy vscs wrapper
+at its private body seam before applying its one canonical wrapper. Second,
+Publisher closure now includes authored XML pagecontent (`project.xml`), declared
+resource format pages, and exact current raw JSON. JSON uses the configured
+template shell and `application/fhir+json`; XML/TTL use standard page chrome and
+an honest capability page with no dead Raw/Download link because no canonical
+serializer exists. Third, A -> superseded B -> C could evict published A before
+B reached durable publication, producing `unknown build handle`. Unpublished
+candidates are now explicitly released in both bounded runtime histories;
+once a Service Worker commit is first submitted it is polled by the same id to
+a terminal result despite lease revocation/lost reply; exact retained Cycle
+runtimes are touched/reused in both histories rather than reopened.
+
+The exact committed-engine Pages artifact is
+`d4756ba94687960f4ef42e271c444e11f7be576d3aee49e60e13c9653b8f892b`
+(206 files / 180,144,459 bytes), recipe `6fd5c4c1...`, with an 8,108,644-byte
+WASM (`7184cdfd...`) reporting `45ff1233`. The complete Pages-subpath browser
+receipt `/tmp/fhir-sdc-output-lifecycle-committed-browser.log` ends in
+`E2E GATE: PASS`. It proves verified 200/no-fallback/no-raw-leak output for SDC
+project, Bundle primary/XML/JSON/TTL, CodeSystem, and parsed raw Bundle JSON;
+XML/TTL pages have no unsupported raw link. It also passes Tiny SQL, US Core
+one-shell/runtime closure/TOC/Artifacts, mCODE, Genomics, Cycle, restart,
+hot-reload scroll preservation, and mobile geometry.
+
+The exact SDC edit receipt `/tmp/fhir-sdc-code-edit-committed.json` is `ok:true`.
+There is no edit debounce: first Worker work begins at 5.0 ms. CodeSystem title
+edit -> visible successor is 6,706.2 ms: canonical compile 5,737.1 ms, retained
+Rust preparation 526.3 ms, outputs 34.3 ms, publication 18.7 ms, selected-page
+render 13.3 ms, then page scripts/paint. This is real work, not a hard-coded
+wait. Cold SDC is 28.438 s, persisted hard reload 11.952 s, and exact same-Worker
+reopen 0.469 s. Full app is 168/168 (916 assertions); Rust combined suites,
+wasm32 release, workspace all-targets, TypeScript, wire drift, lifecycle/identity
+42/42, formatting, and diff checks pass. Commit/push/Pages/live verification
+remain.
+
 ## Active correctness round (2026-07-18, live and verified)
 
 The user authorized dependency-order commit/push/deploy after complete gates.

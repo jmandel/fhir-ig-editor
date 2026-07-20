@@ -2640,6 +2640,121 @@ try {
       recycleCount: window.__igDebug?.engine?.recycleCount ?? -1,
     }))()`);
 
+    // ---- SDC authored/resource-format output closure ---------------------
+    // These are real links emitted by the standard Publisher template. The
+    // complete gate must prove that the catalog, renderer, and preview Service
+    // Worker agree on every address rather than accepting a working index page
+    // alongside link-time "No verified output" failures.
+    const sdcPagePaths = [
+      'en/project.html',
+      'en/Bundle-questionnaire-sdc-profile-example.html',
+      'en/Bundle-questionnaire-sdc-profile-example.xml.html',
+      'en/Bundle-questionnaire-sdc-profile-example.json.html',
+      'en/Bundle-questionnaire-sdc-profile-example.ttl.html',
+      'en/CodeSystem-AustralianStateCodes.html',
+    ];
+    const sdcRawJsonPath = 'en/Bundle-questionnaire-sdc-profile-example.json';
+    results.sdcClicked = await evalJs(ws, `(() => {
+      const select = document.querySelector('.open-ig-select');
+      if (!select || ![...select.options].some((option) => option.value === 'sdc')) return 'no-sdc-option';
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'sdc');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'clicked';
+    })()`);
+    if (results.sdcClicked === 'clicked') {
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'sdc' && !!document.querySelector('.open-progress')`, 30000, 'SDC open-progress overlay appeared');
+      await waitFor(ws, `localStorage.getItem('igEditor.project') === 'sdc' && !document.querySelector('.open-progress')`, 180000, 'SDC preparation completed');
+      await evalJs(ws, `(() => { const t=[...document.querySelectorAll('.inspect-tab')].find(x=>/preview/i.test(x.textContent||'')); if(t) t.click(); return true; })()`);
+      await waitFor(ws, `(() => {
+        if (document.querySelector('.preview-error')) return true;
+        return [...document.querySelectorAll('.preview-page-select option')]
+          .some((option) => /(^|\\/)index\\.html$/iu.test(option.value));
+      })()`, 120000, 'SDC output catalog or explicit build error');
+      results.sdcPublishedOutputs = {
+        error: await evalJs(ws, `document.querySelector('.preview-error')?.textContent || ''`),
+        catalogPages: await evalJs(ws, `(() => {
+          const values = new Set([...document.querySelectorAll('.preview-page-select option')]
+            .map((option) => option.value));
+          return ${JSON.stringify(sdcPagePaths)}.filter((path) => values.has(path));
+        })()`),
+        pages: {},
+      };
+      for (const path of results.sdcPublishedOutputs.catalogPages) {
+        const requiredText = path === 'en/CodeSystem-AustralianStateCodes.html'
+          ? 'Western Australia'
+          : path === 'en/project.html'
+            ? 'Project and participants'
+            : path.endsWith('.xml.html')
+              ? 'XML representation unavailable'
+              : path.endsWith('.ttl.html')
+                ? 'Turtle representation unavailable'
+                : path.endsWith('.json.html')
+                  ? 'questionnaire-sdc-profile-example'
+                  : 'SDC-Combination';
+        await evalJs(ws, `(() => {
+          const select = document.querySelector('.preview-page-select select');
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+          setter.call(select, ${JSON.stringify(path)});
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        await waitForStable(ws, `(() => {
+          if (document.querySelector('.preview-error')) return true;
+          const frame = document.querySelector('.preview-frame');
+          const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+          return document.querySelector('.preview-page-select select')?.value === ${JSON.stringify(path)}
+            && (frame?.contentWindow?.location.pathname || '').endsWith('/' + ${JSON.stringify(path)})
+            && doc?.readyState === 'complete'
+            && !doc.querySelector('[data-igpreview-fallback]');
+        })()`, 120000, `SDC verified output ${path}`);
+        const pageError = await evalJs(ws, `document.querySelector('.preview-error')?.textContent || ''`);
+        results.sdcPublishedOutputs.pages[path] = pageError ? { error: pageError } : await evalJs(ws, `(async () => {
+          const frame = document.querySelector('.preview-frame');
+          const win = frame?.contentWindow;
+          const doc = win?.document;
+          const response = await win.fetch(win.location.pathname);
+          const body = await response.text();
+          return {
+            status: response.status,
+            source: response.headers.get('X-IGPreview-Source'),
+            contentType: response.headers.get('Content-Type') || '',
+            fallback: !!doc?.querySelector('[data-igpreview-fallback]')
+              || /data-igpreview-fallback/u.test(body),
+            rawLeak: /\\{%-?\\s*(?:raw|endraw)\\s*-?%\\}/u.test(body),
+            unsupportedRawLinks: [...(doc?.querySelectorAll('a[href]') || [])]
+              .map((link) => new URL(link.getAttribute('href'), win.location.href).pathname)
+              .filter((candidate) => /\\.(?:xml|ttl)$/iu.test(candidate)),
+            hasRequiredText: body.includes(${JSON.stringify(requiredText)}),
+            bodyLength: body.length,
+          };
+        })()`);
+      }
+      if (!results.sdcPublishedOutputs.error) {
+        results.sdcPublishedOutputs.rawJson = await evalJs(ws, `(async () => {
+          const frame = document.querySelector('.preview-frame');
+          const win = frame?.contentWindow;
+          const response = await win.fetch(new URL(
+            ${JSON.stringify(sdcRawJsonPath.replace(/^en\//u, ''))},
+            win.location.href,
+          ));
+          const body = await response.text();
+          let resource = null;
+          try { resource = JSON.parse(body); } catch { /* assertion records invalid JSON */ }
+          return {
+            path: ${JSON.stringify(sdcRawJsonPath)},
+            status: response.status,
+            source: response.headers.get('X-IGPreview-Source'),
+            contentType: response.headers.get('Content-Type') || '',
+            fallback: /data-igpreview-fallback/u.test(body),
+            rawLeak: /\\{%-?\\s*(?:raw|endraw)\\s*-?%\\}/u.test(body),
+            bodyLength: body.length,
+            resourceType: resource?.resourceType || '',
+            id: resource?.id || '',
+          };
+        })()`);
+      }
+    }
+
     // ---- Authored structural-page precedence (Genomics) -------------------
     // This guide deliberately supplies input/pages/artifacts.md, including a
     // SQL-to-Liquid query. It must replace only the generated artifacts
@@ -3407,6 +3522,47 @@ try {
     const after = results.engineLifecycleAfterMcode || {};
     if (after.recycleCount !== before.recycleCount + 1 || after.preparedConfigCount !== 1) {
       console.error('assert: direct US Core -> mCODE did not recycle exactly once before the heavy successor —', JSON.stringify({ before, after })); ok = false;
+    }
+  }
+  {
+    const sdc = results.sdcPublishedOutputs || {};
+    const expectedPages = [
+      'en/project.html',
+      'en/Bundle-questionnaire-sdc-profile-example.html',
+      'en/Bundle-questionnaire-sdc-profile-example.xml.html',
+      'en/Bundle-questionnaire-sdc-profile-example.json.html',
+      'en/Bundle-questionnaire-sdc-profile-example.ttl.html',
+      'en/CodeSystem-AustralianStateCodes.html',
+    ];
+    const verifiedSources = new Set(['content-store', 'build-cache', 'content-transfer', 'render']);
+    const badPages = expectedPages.filter((path) => {
+      const page = sdc.pages?.[path];
+      return page?.status !== 200
+        || !verifiedSources.has(page?.source)
+        || !/^text\/html\b/iu.test(page?.contentType || '')
+        || page?.fallback !== false
+        || page?.rawLeak !== false
+        || (page?.unsupportedRawLinks?.length || 0) > 0
+        || page?.hasRequiredText !== true
+        || !(page?.bodyLength > 400);
+    });
+    const raw = sdc.rawJson || {};
+    if (results.sdcClicked !== 'clicked'
+      || sdc.error
+      || sdc.catalogPages?.length !== expectedPages.length
+      || badPages.length > 0
+      || raw.path !== 'en/Bundle-questionnaire-sdc-profile-example.json'
+      || raw.status !== 200
+      || !verifiedSources.has(raw.source)
+      || !/(?:application\/(?:fhir\+)?json|text\/json)\b/iu.test(raw.contentType || '')
+      || raw.fallback !== false
+      || raw.rawLeak !== false
+      || !(raw.bodyLength > 400)
+      || raw.resourceType !== 'Bundle'
+      || raw.id !== 'questionnaire-sdc-profile-example') {
+      console.error('assert: SDC authored/resource format output closure is incomplete —', JSON.stringify({
+        clicked: results.sdcClicked, badPages, sdc,
+      })); ok = false;
     }
   }
   if (!results.workspaceDirtyAfterABA?.marker) {

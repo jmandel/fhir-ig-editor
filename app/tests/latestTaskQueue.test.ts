@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   LatestTaskQueue,
 } from '../src/build/latestTaskQueue';
+import { BuildRuntimeRegistry } from '../src/worker/buildRuntimeRegistry';
 
 const APP = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
@@ -130,5 +131,48 @@ describe('LatestTaskQueue', () => {
     const recovered = queue.enqueue(async () => 42);
     await expect(failed).rejects.toThrow('expected');
     expect((await recovered).value).toBe(42);
+  });
+
+  test('awaits superseded runtime release before starting its successor', async () => {
+    const queue = new LatestTaskQueue();
+    const runtimes = new BuildRuntimeRegistry<string>();
+    const bPrepared = deferred();
+    const letBObserveRevocation = deferred();
+    const releaseFinished = deferred();
+    const events: string[] = [];
+    runtimes.install('published-a', 'A');
+
+    const b = queue.enqueueLatest(async (lease) => {
+      runtimes.install('superseded-b', 'B');
+      events.push('b:prepared');
+      bPrepared.resolve();
+      await letBObserveRevocation.promise;
+      if (!lease.isLatest()) {
+        events.push('b:release-start');
+        await releaseFinished.promise;
+        runtimes.release('superseded-b');
+        events.push('b:release-complete');
+      }
+    });
+    await bPrepared.promise;
+    const c = queue.enqueueLatest(async () => {
+      events.push('c:start');
+      runtimes.install('latest-c', 'C');
+    });
+    letBObserveRevocation.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(['b:prepared', 'b:release-start']);
+    releaseFinished.resolve();
+
+    expect(await b).toMatchObject({ latest: false, superseded: false });
+    expect(await c).toMatchObject({ latest: true, superseded: false });
+    expect(events).toEqual([
+      'b:prepared',
+      'b:release-start',
+      'b:release-complete',
+      'c:start',
+    ]);
+    expect(runtimes.handles()).toEqual(['latest-c', 'published-a']);
   });
 });

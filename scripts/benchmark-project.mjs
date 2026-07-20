@@ -196,6 +196,15 @@ const EDIT_SCENARIOS = {
     after: '### Conformance Benchmark Edit',
     expectedPreviewText: 'Conformance Benchmark Edit',
   },
+  sdc: {
+    sourceKind: 'fsh',
+    scheduling: 'leading-latest-only',
+    sourcePath: 'input/fsh/codesystems/AustralianStateCodes.fsh',
+    previewPath: 'en/CodeSystem-AustralianStateCodes.html',
+    before: 'Title: "Australian State Codes"',
+    after: 'Title: "Australian State Codes Benchmark Edit"',
+    expectedPreviewText: 'Australian State Codes Benchmark Edit',
+  },
 };
 const editScenario = editEnabled ? EDIT_SCENARIOS[projectId] : null;
 if (editEnabled && !editScenario) {
